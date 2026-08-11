@@ -1,0 +1,26 @@
+{
+  "name": "codex-session-messaging",
+  "version": "0.5.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Same-machine Codex session messaging with an optional Claude Code UDS bridge.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/backpointer/cxmsg.git"
+  },
+  "bugs": {
+    "url": "https://github.com/backpointer/cxmsg/issues"
+  },
+  "homepage": "https://github.com/backpointer/cxmsg#readme",
+  "type": "module",
+  "bin": {
+    "cxmsg": "./bin/cxmsg"
+  },
+  "scripts": {
+    "test": "node --test",
+    "check": "node --check bin/cxmsg && node --check bin/cxmsg.js && node --check bin/claude-bridge-worker.js && node --check src/app-server-client.js && node --check src/attachments.js && node --check src/claude-bridge.js && node --check src/claude-grants.js && node --check src/claude-messaging.js && node --check src/claude-requests.js && node --check src/jobs.js && node --check src/messaging.js && node --check src/registry.js && node --check src/runtime.js && node --check src/unix-websocket.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
