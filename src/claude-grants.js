@@ -36,8 +36,14 @@ export function upsertClaudeRequestGrant(
   record,
   peer,
   permissions,
-  token = randomUUID(),
+  approval = "never",
+  token = null,
 ) {
+  if (!["never", "relay", "auto"].includes(approval)) {
+    token = approval;
+    approval = "never";
+  }
+  token ||= randomUUID();
   const sessionId = validateClaudeSessionId(peer?.sessionId);
   validateClaudeSessionId(token);
   if (!permissions?.trim()) throw new Error("permission profile is required");
@@ -49,6 +55,7 @@ export function upsertClaudeRequestGrant(
     name: peer.name || null,
     address: peer.address || null,
     permissions,
+    approval,
     token,
     grantedAt: new Date().toISOString(),
   });
@@ -66,6 +73,7 @@ export function publicClaudeRequestGrant(grant) {
     name: grant.name,
     address: grant.address,
     permissions: grant.permissions,
+    approval: grant.approval || "never",
     tokenHint: `${grant.token.slice(0, 8)}…`,
     grantedAt: grant.grantedAt,
   };

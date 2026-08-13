@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>cxmsg Orchestration</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body data-view="orchestration">
+    <header class="topbar">
+      <a class="brand" href="/dashboard"><span class="brand-mark">cx</span>msg</a>
+      <nav aria-label="Primary">
+        <a href="/dashboard">Dashboard</a>
+        <a class="active" href="/orchestration">Orchestration</a>
+      </nav>
+      <div class="refresh"><span id="connection-dot" class="dot pending"></span><span id="refresh-state">Connecting</span></div>
+    </header>
+
+    <main>
+      <section class="hero orchestration-hero">
+        <div>
+          <p class="eyebrow">LIVE EXECUTION MAP</p>
+          <h1>Follow work without joining the conversation.</h1>
+          <p>Correlation jobs, execution threads, and response delivery are visible here. Agents remain responsible for messaging.</p>
+        </div>
+        <span class="mode-badge">OBSERVE ONLY · V1</span>
+      </section>
+
+      <section class="job-summary" aria-label="Job overview">
+        <span><strong id="job-running">—</strong> in flight</span>
+        <span><strong id="job-completed">—</strong> completed</span>
+        <span><strong id="job-failed">—</strong> need attention</span>
+        <span class="job-total"><strong id="job-total">—</strong> total</span>
+      </section>
+
+      <section class="panel graph-panel">
+        <div class="panel-heading">
+          <div>
+            <p class="eyebrow">PROJECT TOPOLOGY</p>
+            <h2>Session graph</h2>
+            <p id="project-summary" class="panel-subtitle">Loading project…</p>
+          </div>
+          <label class="project-picker">
+            <span>Project</span>
+            <select id="project-filter" aria-label="Project"></select>
+          </label>
+        </div>
+        <div id="topology-graph" class="topology-graph" aria-live="polite"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">CORRELATION LOG</p><h2>Jobs</h2></div>
+          <p id="job-table-caption">Newest 20 jobs. IDs are shortened visually.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Correlation</th><th>Route</th><th>Kind</th><th>Permission</th><th>Status</th><th>Reply</th><th>Updated</th></tr></thead>
+            <tbody id="job-table-body"><tr><td colspan="7" class="empty">Loading jobs…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

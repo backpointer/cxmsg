@@ -13,7 +13,10 @@ import {
 } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { withAppServer } from "../src/app-server-client.js";
+import {
+  probeAppServerSocket,
+  withAppServer,
+} from "../src/app-server-client.js";
 import {
   attachmentCommandMatches,
   listAttachmentRecords,
@@ -45,7 +48,14 @@ import {
   removeStaleClaudeBridgeRecord,
 } from "../src/claude-bridge.js";
 import { replyToClaudeRequest } from "../src/claude-requests.js";
+import { decideApproval } from "../src/approvals.js";
 import {
+  APPROVAL_MODES,
+  EXECUTION_MODES,
+  MIRROR_MODES,
+} from "../src/delegation-worker.js";
+import {
+  activeJobsForTarget,
   createJob,
   isPendingJob,
   newJobId,
@@ -61,7 +71,11 @@ import {
   socketUrl,
 } from "../src/runtime.js";
 import {
-  deliverDelegatedTask,
+  processIdentity,
+  processState,
+  serviceEvidence,
+} from "../src/process-state.js";
+import {
   deliverPeerMessage,
   storedSessionName,
   validateMessage,
@@ -74,10 +88,12 @@ import {
   withSessionLock,
   writeSessionRecord,
 } from "../src/registry.js";
+import { startWebServer } from "../src/web-server.js";
 
 const codexBin = process.env.CODEX_BIN || "codex";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const claudeBridgeWorker = path.join(scriptDir, "claude-bridge-worker.js");
+const delegationWorker = path.join(scriptDir, "delegation-worker.js");
 
 function usage(exitCode = 0) {
   const output = `Usage:
@@ -95,13 +111,20 @@ function usage(exitCode = 0) {
   cxmsg grant <sender> <target>
   cxmsg revoke <sender> <target>
   cxmsg permissions <target> [--json]
-  cxmsg delegate [--from <name>] [--permissions <profile>] <target> <task...>
+  cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|inline]
+                 [--approval never|relay|auto] [--approval-timeout <seconds>]
+                 [--mirror none|summary|full] <target> <task...>
   cxmsg wait <job-id> [--timeout <seconds>] [--json]
   cxmsg result <job-id> [--json]
+  cxmsg approvals <job-id> [--json]
+  cxmsg approve <job-id> <approval-id>
+  cxmsg deny <job-id> <approval-id>
+  cxmsg web [--port <number>]
   cxmsg claude peers [--json]
   cxmsg claude bridge start|status|stop <codex-session>
   cxmsg claude send [--from <codex-session>] <claude-session> <message...>
-  cxmsg claude grant [--permissions <profile>] <claude-session> <codex-session>
+  cxmsg claude grant [--permissions <profile>] [--approval never|relay|auto]
+                     <claude-session> <codex-session>
   cxmsg claude revoke <claude-session-id> <codex-session>
   cxmsg claude grants <codex-session> [--json]
   cxmsg claude retry <job-id>
@@ -153,63 +176,60 @@ function readServerPid() {
   }
 }
 
-function processExists(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function processMatchesServer(pid) {
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
-    encoding: "utf8",
-  });
-  return (
-    result.status === 0 &&
-    result.stdout.includes("app-server") &&
-    result.stdout.includes(DEFAULT_SOCKET_PATH)
-  );
-}
-
 function processCommand(pid) {
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
-    encoding: "utf8",
-  });
-  return result.status === 0 ? result.stdout.trim() : null;
+  const identity = processIdentity(pid, []);
+  return identity.state === "matched" ? identity.command : null;
 }
 
 function liveAttachment(name) {
   const record = readAttachmentRecord(name);
   if (!record) return null;
+  const state = processState(record.childPid);
+  if (state === "missing") {
+    removeAttachmentRecord(name, record.childPid);
+    return null;
+  }
   const command = processCommand(record.childPid);
   if (command && attachmentCommandMatches(record, command)) return record;
+  if (!command) return record;
   removeAttachmentRecord(name, record.childPid);
   return null;
 }
 
-function serverState() {
+async function serverState() {
   const pid = readServerPid();
+  const process = processState(pid);
+  const identity = pid
+    ? processIdentity(pid, ["app-server", DEFAULT_SOCKET_PATH]).state
+    : "unavailable";
+  const socketHealthy = await probeAppServerSocket(DEFAULT_SOCKET_PATH);
   return {
     pid,
-    running: Boolean(pid && processExists(pid) && processMatchesServer(pid)),
     socketPresent: existsSync(DEFAULT_SOCKET_PATH),
+    process,
+    identity,
+    socketHealthy,
+    ...serviceEvidence({ process, identity, socketHealthy }),
   };
 }
 
 async function waitUntil(predicate, timeoutMs = 10_000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    if (predicate()) return true;
+    if (await predicate()) return true;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   return false;
 }
 
 async function startServer() {
-  const current = serverState();
-  if (current.running && current.socketPresent) return current.pid;
+  const current = await serverState();
+  if (current.running) return current.pid;
+  if (current.pid && !current.safeToRemove) {
+    throw new Error(
+      `cannot verify whether app-server pid ${current.pid} is stale; refusing to replace its socket`,
+    );
+  }
 
   mkdirSync(CXMSG_STATE_DIR, { recursive: true, mode: 0o700 });
   chmodSync(CXMSG_STATE_DIR, 0o700);
@@ -230,7 +250,9 @@ async function startServer() {
   writeFileSync(PID_PATH, `${child.pid}\n`, { mode: 0o600 });
 
   const ready = await waitUntil(
-    () => processExists(child.pid) && existsSync(DEFAULT_SOCKET_PATH),
+    async () =>
+      processState(child.pid) !== "missing" &&
+      (await probeAppServerSocket(DEFAULT_SOCKET_PATH)),
   );
   if (!ready) {
     throw new Error(`app-server did not become ready; inspect ${LOG_PATH}`);
@@ -305,15 +327,46 @@ async function commandServer(action) {
         `cannot stop app-server while remote TUI attachments are active: ${attachments.map((record) => record.name).join(", ")}`,
       );
     }
-    const state = serverState();
+    const state = await serverState();
     if (!state.running) {
+      if (state.safeToSignal) {
+        process.kill(state.pid, "SIGTERM");
+        await waitUntil(() => processState(state.pid) === "missing", 5_000);
+        if (processState(state.pid) !== "missing") {
+          throw new Error(`app-server pid ${state.pid} did not stop`);
+        }
+        const stopped = await serverState();
+        if (stopped.running) {
+          throw new Error(
+            "app-server listener remained reachable after its managed pid stopped",
+          );
+        }
+        if (existsSync(PID_PATH)) unlinkSync(PID_PATH);
+        if (existsSync(DEFAULT_SOCKET_PATH)) unlinkSync(DEFAULT_SOCKET_PATH);
+        process.stdout.write("Codex app-server stopped.\n");
+        return;
+      }
+      if (state.pid && !state.safeToRemove) {
+        throw new Error(
+          `cannot verify app-server pid ${state.pid}; refusing to signal or remove its socket`,
+        );
+      }
       process.stdout.write("Codex app-server is not running.\n");
       return;
     }
+    if (!state.safeToSignal) {
+      throw new Error(
+        `app-server is reachable but pid ${state.pid || "-"} identity is unverified; refusing to signal it`,
+      );
+    }
     process.kill(state.pid, "SIGTERM");
-    await waitUntil(() => !processExists(state.pid), 5_000);
-    if (processExists(state.pid)) {
+    await waitUntil(() => processState(state.pid) === "missing", 5_000);
+    if (processState(state.pid) !== "missing") {
       throw new Error(`app-server pid ${state.pid} did not stop`);
+    }
+    const stopped = await serverState();
+    if (stopped.running) {
+      throw new Error("app-server listener remained reachable after its managed pid stopped");
     }
     if (existsSync(PID_PATH)) unlinkSync(PID_PATH);
     if (existsSync(DEFAULT_SOCKET_PATH)) unlinkSync(DEFAULT_SOCKET_PATH);
@@ -321,10 +374,38 @@ async function commandServer(action) {
     return;
   }
 
-  const state = serverState();
+  const state = await serverState();
   process.stdout.write(
-    `${state.running ? "running" : "stopped"}\tpid=${state.pid || "-"}\tsocket=${DEFAULT_SOCKET_PATH}\n`,
+    `${state.running ? "running" : "stopped"}\tpid=${state.pid || "-"}\tsocket=${DEFAULT_SOCKET_PATH}\tverification=${state.safeToSignal ? "identity" : state.socketHealthy ? "socket" : "none"}\n`,
   );
+}
+
+async function commandWeb(args) {
+  let port = 4173;
+  while (args.length) {
+    const option = args.shift();
+    if (option === "--port") port = Number(args.shift());
+    else throw new Error(`unknown web option: ${option}`);
+  }
+  await ensureServer();
+  const web = await startWebServer({ port });
+  process.stdout.write(
+    `cxmsg web is running on ${web.origin}\n` +
+      `Dashboard: ${web.origin}/dashboard\n` +
+      `Orchestration: ${web.origin}/orchestration\n`,
+  );
+
+  await new Promise((resolve, reject) => {
+    let closing = false;
+    const close = () => {
+      if (closing) return;
+      closing = true;
+      web.server.close((error) => (error ? reject(error) : resolve()));
+    };
+    process.once("SIGINT", close);
+    process.once("SIGTERM", close);
+    web.server.once("error", reject);
+  });
 }
 
 async function commandCreate(name) {
@@ -383,7 +464,7 @@ async function commandRemove(name) {
   if (attachment) {
     throw new Error(`session ${name} is attached by pid ${attachment.childPid}; detach it first`);
   }
-  if (claudeBridgeState(name).running) {
+  if ((await claudeBridgeState(name)).running) {
     throw new Error(`Claude bridge for ${name} is running; stop it before removing the session`);
   }
   await ensureServer();
@@ -504,7 +585,7 @@ async function commandDetach(name) {
   }
   if (currentCommand) process.kill(attachment.childPid, "SIGTERM");
   const stopped = await waitUntil(
-    () => !processExists(attachment.childPid),
+    () => processState(attachment.childPid) === "missing",
     5_000,
   );
   if (!stopped) {
@@ -557,13 +638,33 @@ async function commandStatus(name, jsonOutput) {
       };
     }
   });
+  const activeJobs = activeJobsForTarget(name);
+  const awaitingApprovals = activeJobs.filter(
+    (job) => job.status === "awaiting_approval",
+  ).length;
+  state.threadActivity = state.activity;
+  state.delegatedActivity = awaitingApprovals
+    ? "awaiting_approval"
+    : activeJobs.length
+      ? "working"
+      : "idle";
+  state.activeJobs = activeJobs.length;
+  state.awaitingApprovals = awaitingApprovals;
+  state.effectiveActivity =
+    state.activity === "working"
+      ? "working"
+      : awaitingApprovals
+        ? "awaiting-approval"
+        : activeJobs.length
+          ? "delegated-working"
+          : state.activity;
 
   if (jsonOutput) {
     process.stdout.write(`${JSON.stringify(state, null, 2)}\n`);
     return;
   }
   process.stdout.write(
-    `${state.name}\t${state.presentation}\t${state.activity}\tpid=${state.attachedPid || "-"}\t${state.threadId}\n`,
+    `${state.name}\t${state.presentation}\t${state.effectiveActivity}\tpid=${state.attachedPid || "-"}\tjobs=${state.activeJobs}\t${state.threadId}\n`,
   );
   if (state.error) process.stdout.write(`warning: ${state.error}\n`);
 }
@@ -600,6 +701,21 @@ async function commandPeers(jsonOutput) {
     );
   });
 
+  for (const peer of peers) {
+    const activeJobs = activeJobsForTarget(peer.name);
+    const awaitingApprovals = activeJobs.filter(
+      (job) => job.status === "awaiting_approval",
+    ).length;
+    peer.threadStatus = peer.status;
+    peer.activeJobs = activeJobs.length;
+    peer.awaitingApprovals = awaitingApprovals;
+    if (peer.status !== "active" && awaitingApprovals) {
+      peer.status = "awaitingApproval";
+    } else if (peer.status !== "active" && activeJobs.length) {
+      peer.status = "delegatedWorking";
+    }
+  }
+
   if (jsonOutput) {
     process.stdout.write(`${JSON.stringify(peers, null, 2)}\n`);
     return;
@@ -615,15 +731,20 @@ async function commandPeers(jsonOutput) {
   }
 }
 
-function processMatchesClaudeBridge(pid, target) {
-  const result = spawnSync("ps", ["-p", String(pid), "-o", "command="], {
-    encoding: "utf8",
-  });
-  return (
-    result.status === 0 &&
-    result.stdout.includes(claudeBridgeWorker) &&
-    result.stdout.includes(` ${target}`)
-  );
+async function claudeBridgeOperationState(target) {
+  const state = await claudeBridgeState(target);
+  const identity = state.record
+    ? processIdentity(state.record.pid, [claudeBridgeWorker, ` ${target}`]).state
+    : "unavailable";
+  return {
+    ...state,
+    identity,
+    ...serviceEvidence({
+      process: state.process,
+      identity,
+      socketHealthy: state.socketHealthy,
+    }),
+  };
 }
 
 async function commandClaudeBridge(action, target) {
@@ -631,32 +752,49 @@ async function commandClaudeBridge(action, target) {
   validateSessionName(target);
 
   if (action === "status") {
-    const state = claudeBridgeState(target);
-    const running = Boolean(
-      state.running && processMatchesClaudeBridge(state.record.pid, target),
-    );
+    const state = await claudeBridgeOperationState(target);
     process.stdout.write(
-      `${running ? "running" : "stopped"}\ttarget=${target}\tpid=${state.record?.pid || "-"}\tsocket=${state.record?.socketPath || "-"}\n`,
+      `${state.running ? "running" : "stopped"}\ttarget=${target}\tpid=${state.record?.pid || "-"}\tsocket=${state.record?.socketPath || "-"}\tverification=${state.safeToSignal ? "identity" : state.socketHealthy ? "socket" : "none"}\n`,
     );
     return;
   }
 
   if (action === "stop") {
-    const state = claudeBridgeState(target);
+    const state = await claudeBridgeOperationState(target);
     if (!state.running) {
-      removeStaleClaudeBridgeRecord(target);
+      if (state.safeToSignal) {
+        process.kill(state.record.pid, "SIGTERM");
+        await waitUntil(
+          () => processState(state.record.pid) === "missing",
+          5_000,
+        );
+        if (processState(state.record.pid) !== "missing") {
+          throw new Error(`Claude bridge pid ${state.record.pid} did not stop`);
+        }
+        await removeStaleClaudeBridgeRecord(target);
+        process.stdout.write(`stopped Claude bridge for ${target}\n`);
+        return;
+      }
+      if (state.record && !state.safeToRemove) {
+        throw new Error(
+          `cannot verify Claude bridge pid ${state.record.pid}; refusing to signal or remove its socket`,
+        );
+      }
+      await removeStaleClaudeBridgeRecord(target);
       process.stdout.write(`Claude bridge for ${target} is not running.\n`);
       return;
     }
-    if (!processMatchesClaudeBridge(state.record.pid, target)) {
-      throw new Error(`refusing to stop pid ${state.record.pid}: it is not the ${target} Claude bridge`);
+    if (!state.safeToSignal) {
+      throw new Error(
+        `Claude bridge is reachable but pid ${state.record.pid} identity is unverified; refusing to signal it`,
+      );
     }
     process.kill(state.record.pid, "SIGTERM");
-    await waitUntil(() => !processExists(state.record.pid), 5_000);
-    if (processExists(state.record.pid)) {
+    await waitUntil(() => processState(state.record.pid) === "missing", 5_000);
+    if (processState(state.record.pid) !== "missing") {
       throw new Error(`Claude bridge pid ${state.record.pid} did not stop`);
     }
-    removeStaleClaudeBridgeRecord(target);
+    await removeStaleClaudeBridgeRecord(target);
     process.stdout.write(`stopped Claude bridge for ${target}\n`);
     return;
   }
@@ -664,14 +802,19 @@ async function commandClaudeBridge(action, target) {
   const targetRecord = readSessionRecord(target);
   if (!targetRecord) throw new Error(`unknown Codex session: ${target}`);
   await ensureServer();
-  const current = claudeBridgeState(target);
-  if (current.running && processMatchesClaudeBridge(current.record.pid, target)) {
+  const current = await claudeBridgeOperationState(target);
+  if (current.running) {
     process.stdout.write(
       `Claude bridge for ${target} is running (pid ${current.record.pid}).\n`,
     );
     return;
   }
-  removeStaleClaudeBridgeRecord(target);
+  if (current.record && !current.safeToRemove) {
+    throw new Error(
+      `cannot verify whether Claude bridge pid ${current.record.pid} is stale; refusing to replace its socket`,
+    );
+  }
+  await removeStaleClaudeBridgeRecord(target);
 
   const logFd = openBridgeLog(target);
   const child = spawn(process.execPath, [claudeBridgeWorker, target], {
@@ -681,8 +824,9 @@ async function commandClaudeBridge(action, target) {
   child.unref();
   closeBridgeLog(logFd);
   const ready = await waitUntil(() => {
-    const state = claudeBridgeState(target);
-    return state.running && state.record.pid === child.pid;
+    return claudeBridgeState(target).then(
+      (state) => state.running && state.record.pid === child.pid,
+    );
   });
   if (!ready) {
     throw new Error(`Claude bridge did not become ready; inspect ${bridgeLogPath(target)}`);
@@ -720,11 +864,8 @@ async function commandClaudeSend(args) {
   const message = validateMessage(args.join(" "));
   const sourceRecord = readSessionRecord(from);
   if (!sourceRecord) throw new Error(`unknown Codex session: ${from}`);
-  const bridge = claudeBridgeState(from);
-  if (
-    !bridge.running ||
-    !processMatchesClaudeBridge(bridge.record.pid, from)
-  ) {
+  const bridge = await claudeBridgeState(from);
+  if (!bridge.running) {
     throw new Error(`Claude bridge for ${from} is not running; run: cxmsg claude bridge start ${from}`);
   }
 
@@ -743,12 +884,17 @@ async function commandClaudeSend(args) {
 
 async function commandClaudeGrant(args) {
   let permissions = DEFAULT_CLAUDE_PERMISSION_PROFILE;
+  let approval = "never";
   while (args[0]?.startsWith("--")) {
     const option = args.shift();
     if (option === "--permissions") permissions = args.shift() || "";
+    else if (option === "--approval") approval = args.shift() || "";
     else throw new Error(`unknown Claude grant option: ${option}`);
   }
   if (!permissions) throw new Error("permission profile is required");
+  if (!APPROVAL_MODES.has(approval)) {
+    throw new Error("approval must be never, relay, or auto");
+  }
   const claudeTarget = args.shift();
   const codexTarget = validateSessionName(args.shift());
   if (args.length) throw new Error(`unexpected argument: ${args[0]}`);
@@ -770,13 +916,15 @@ async function commandClaudeGrant(args) {
   await withSessionLock(codexTarget, async () => {
     const current = readSessionRecord(codexTarget);
     if (!current) throw new Error(`unknown Codex session: ${codexTarget}`);
-    writeSessionRecord(upsertClaudeRequestGrant(current, peer, permissions));
+    writeSessionRecord(
+      upsertClaudeRequestGrant(current, peer, permissions, approval),
+    );
   });
   const grant = listClaudeRequestGrants(readSessionRecord(codexTarget)).find(
     (candidate) => candidate.sessionId === peer.sessionId,
   );
   process.stdout.write(
-    `granted Claude ${peer.name} (${peer.sessionId}) -> ${codexTarget} with ${permissions}\n` +
+    `granted Claude ${peer.name} (${peer.sessionId}) -> ${codexTarget} with ${permissions}, approval=${approval}\n` +
       `grant-token ${grant.token}\n`,
   );
 }
@@ -823,11 +971,8 @@ async function commandClaudeRetry(jobId) {
   if (isPendingJob(job)) throw new Error(`Claude request is still ${job.status}`);
   const targetRecord = readSessionRecord(job.target);
   if (!targetRecord) throw new Error(`unknown Codex session: ${job.target}`);
-  const bridge = claudeBridgeState(job.target);
-  if (
-    !bridge.running ||
-    !processMatchesClaudeBridge(bridge.record.pid, job.target)
-  ) {
+  const bridge = await claudeBridgeState(job.target);
+  if (!bridge.running) {
     throw new Error(
       `Claude bridge for ${job.target} is not running; run: cxmsg claude bridge start ${job.target}`,
     );
@@ -926,22 +1071,64 @@ async function commandPermissions(target, jsonOutput) {
 function parseDelegationArgs(args) {
   let from = process.env.CODEX_SESSION_NAME || "";
   let permissions = null;
+  let execution = "fork";
+  let approval = "never";
+  let mirror = "none";
+  let approvalTimeoutSeconds = 600;
   while (args[0]?.startsWith("--")) {
     const option = args.shift();
     if (option === "--from") from = args.shift() || "";
     else if (option === "--permissions") permissions = args.shift() || "";
+    else if (option === "--execution") execution = args.shift() || "";
+    else if (option === "--approval") approval = args.shift() || "";
+    else if (option === "--mirror") mirror = args.shift() || "";
+    else if (option === "--approval-timeout") {
+      approvalTimeoutSeconds = Number(args.shift());
+    }
     else throw new Error(`unknown delegate option: ${option}`);
+  }
+  if (!EXECUTION_MODES.has(execution)) {
+    throw new Error("execution must be fork or inline");
+  }
+  if (!APPROVAL_MODES.has(approval)) {
+    throw new Error("approval must be never, relay, or auto");
+  }
+  if (!MIRROR_MODES.has(mirror)) {
+    throw new Error("mirror must be none, summary, or full");
+  }
+  if (
+    !Number.isFinite(approvalTimeoutSeconds) ||
+    approvalTimeoutSeconds < 1 ||
+    approvalTimeoutSeconds > 86_400
+  ) {
+    throw new Error("approval timeout must be between 1 and 86400 seconds");
+  }
+  if (execution === "inline" && mirror !== "none") {
+    throw new Error("inline execution already preserves context; mirror must be none");
   }
   return {
     from: validateSessionName(from),
     permissions,
+    execution,
+    approval,
+    mirror,
+    approvalTimeoutSeconds,
     target: validateSessionName(args.shift()),
     task: validateMessage(args.join(" ")),
   };
 }
 
 async function commandDelegate(args) {
-  const { from, permissions, target, task } = parseDelegationArgs([...args]);
+  const {
+    from,
+    permissions,
+    execution,
+    approval,
+    mirror,
+    approvalTimeoutSeconds,
+    target,
+    task,
+  } = parseDelegationArgs([...args]);
   if (from === target) throw new Error("cannot delegate to the same session");
   await ensureServer();
   const record = readSessionRecord(target);
@@ -961,10 +1148,14 @@ async function commandDelegate(args) {
     threadId: null,
     task,
     permissions,
+    execution,
+    approval,
+    mirror,
+    approvalTimeoutSeconds,
   });
 
   try {
-    const delivery = await withAppServer(async (client) => {
+    await withAppServer(async (client) => {
       if (permissions) {
         const profiles = await availablePermissionProfiles(client, record.cwd);
         const selected = profiles.find((profile) => profile.id === permissions);
@@ -980,50 +1171,69 @@ async function commandDelegate(args) {
       if (read.thread.status?.type === "active") {
         throw new Error("target session already has an active turn");
       }
-
-      const forkParams = {
-        threadId: record.threadId,
-        approvalPolicy: "never",
-        deferGoalContinuation: true,
-      };
-      if (permissions) forkParams.permissions = permissions;
-
-      let executionThread;
-      try {
-        const forked = await client.request("thread/fork", forkParams);
-        executionThread = forked.thread;
-      } catch (error) {
-        if (!/no rollout found|thread not loaded/i.test(error.message)) throw error;
-        const startParams = {
-          cwd: record.cwd,
-          serviceName: "cxmsg-delegate",
-          approvalPolicy: "never",
-        };
-        if (permissions) startParams.permissions = permissions;
-        const started = await client.request("thread/start", startParams);
-        executionThread = started.thread;
-      }
-
-      return deliverDelegatedTask(client, executionThread, {
-        from,
-        target,
-        task,
-        jobId,
-      });
     });
-    updateJob(job, {
-      status: "running",
-      threadId: delivery.threadId,
-      turnId: delivery.turnId,
-      turnStartedAt: new Date().toISOString(),
+    updateJob(job, { status: "queued" });
+    const child = spawn(process.execPath, [delegationWorker, jobId], {
+      detached: true,
+      stdio: "ignore",
     });
+    child.unref();
+    if (!child.pid) throw new Error("failed to start delegation worker");
+    await waitUntil(() => {
+      const current = readJob(jobId);
+      return Boolean(current?.turnId || (current && !isPendingJob(current)));
+    });
+    const started = readJob(jobId);
+    if (!started) throw new Error(`delegation job disappeared: ${jobId}`);
+    if (started.status === "failed") throw new Error(started.error || "delegation failed");
     process.stdout.write(
-      `delegated ${jobId} to ${target} (turn ${delivery.turnId})\n`,
+      `delegated ${jobId} to ${target} (${execution}, ${approval}, turn ${started.turnId || "pending"})\n`,
     );
   } catch (error) {
-    updateJob(job, { status: "failed", error: error.message });
+    const current = readJob(jobId) || job;
+    if (isPendingJob(current)) {
+      updateJob(current, {
+        status: "failed",
+        error: error.message,
+        completedAt: new Date().toISOString(),
+      });
+    }
     throw error;
   }
+}
+
+async function commandApprovals(args) {
+  const jobId = args.shift();
+  const jsonOutput = args[0] === "--json";
+  if (args.length > (jsonOutput ? 1 : 0)) throw new Error(`unexpected option: ${args[0]}`);
+  const job = readJob(jobId);
+  if (!job) throw new Error(`unknown job: ${jobId}`);
+  const approvals = job.approvals || [];
+  if (jsonOutput) {
+    process.stdout.write(`${JSON.stringify(approvals, null, 2)}\n`);
+    return;
+  }
+  if (!approvals.length) {
+    process.stdout.write(`No approvals for job ${jobId}.\n`);
+    return;
+  }
+  for (const approval of approvals) {
+    const detail =
+      approval.request?.reason ||
+      approval.request?.command ||
+      approval.method;
+    process.stdout.write(
+      `${approval.approvalId}\t${approval.status}\t${approval.method}\t${detail}\n`,
+    );
+  }
+}
+
+async function commandApprovalDecision(args, action) {
+  const jobId = args.shift();
+  const approvalId = args.shift();
+  if (args.length) throw new Error(`unexpected argument: ${args[0]}`);
+  await decideApproval(jobId, approvalId, action);
+  process.stdout.write(`${action === "approve" ? "approved" : "denied"} ${approvalId} for job ${jobId}\n`);
 }
 
 function parseJobOptions(args, allowTimeout) {
@@ -1171,6 +1381,18 @@ async function main() {
       break;
     case "result":
       await commandResult(args);
+      break;
+    case "approvals":
+      await commandApprovals(args);
+      break;
+    case "approve":
+      await commandApprovalDecision(args, "approve");
+      break;
+    case "deny":
+      await commandApprovalDecision(args, "deny");
+      break;
+    case "web":
+      await commandWeb(args);
       break;
     case "claude":
       await commandClaude(args);

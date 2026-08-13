@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
+import { processState } from "./process-state.js";
 
 export const CLAUDE_SESSIONS_DIR = path.join(os.homedir(), ".claude", "sessions");
 export const CLAUDE_SOCKETS_DIR = path.join(path.sep, "tmp", "cc-socks");
@@ -12,15 +13,6 @@ const CLAUDE_REQUEST_CLOSE = "</cxmsg-request>";
 
 function isUuid(value) {
   return /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(value || "");
-}
-
-function processExists(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function xmlEscapeAttribute(value) {
@@ -177,6 +169,9 @@ export async function validateClaudeSocketPath(socketPath) {
   if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
     throw new Error(`Claude socket is owned by another user: ${resolved}`);
   }
+  if ((metadata.mode & 0o077) !== 0) {
+    throw new Error(`Claude socket permissions are too broad: ${resolved}`);
+  }
   return resolved;
 }
 
@@ -198,7 +193,11 @@ export async function probeClaudeSocket(socketPath, timeoutMs = 250) {
   }
 }
 
-export async function listClaudePeers({ sessionsDir = CLAUDE_SESSIONS_DIR } = {}) {
+export async function listClaudePeers({
+  sessionsDir = CLAUDE_SESSIONS_DIR,
+  processStateFn = processState,
+  probeSocket = probeClaudeSocket,
+} = {}) {
   let filenames;
   try {
     filenames = await fs.readdir(sessionsDir);
@@ -215,11 +214,11 @@ export async function listClaudePeers({ sessionsDir = CLAUDE_SESSIONS_DIR } = {}
           const record = JSON.parse(await fs.readFile(path.join(sessionsDir, filename), "utf8"));
           if (
             record.pid !== pid ||
-            !processExists(pid) ||
+            processStateFn(pid) === "missing" ||
             record.entrypoint === "cxmsg" ||
             typeof record.messagingSocketPath !== "string" ||
             path.basename(record.messagingSocketPath) !== `${pid}.sock` ||
-            !(await probeClaudeSocket(record.messagingSocketPath))
+            !(await probeSocket(record.messagingSocketPath))
           ) {
             return null;
           }

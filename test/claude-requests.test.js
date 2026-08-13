@@ -29,6 +29,7 @@ test("authorized Claude requests run in a fork and return one correlated reply",
     server.once("error", reject);
     server.listen(socketPath, resolve);
   });
+  await fs.chmod(socketPath, 0o600);
 
   try {
     const { createClaudeRequestJob, processClaudeRequest } = await import(

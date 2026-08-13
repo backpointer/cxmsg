@@ -22,6 +22,7 @@ import {
   MAX_CLAUDE_FRAME_BYTES,
   parseClaudePeerFrame,
   parseClaudeRequestBody,
+  validateClaudeSocketPath,
 } from "./claude-messaging.js";
 import { findClaudeRequestGrant } from "./claude-grants.js";
 import {
@@ -32,6 +33,7 @@ import { isPendingJob, listJobs } from "./jobs.js";
 import { deliverPeerMessage, validateSessionName } from "./messaging.js";
 import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
+import { processState, serviceEvidence } from "./process-state.js";
 
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
 
@@ -49,23 +51,16 @@ function atomicWrite(destination, value, mode = 0o600) {
   renameSync(temporary, destination);
 }
 
-function processExists(pid) {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 export function readClaudeBridgeRecord(target) {
   try {
     const record = JSON.parse(readFileSync(bridgeRecordPath(target), "utf8"));
     if (
       record?.version !== 1 ||
       record.target !== target ||
+      typeof record.targetThreadId !== "string" ||
       !Number.isSafeInteger(record.pid) ||
-      typeof record.socketPath !== "string"
+      typeof record.socketPath !== "string" ||
+      !Number.isSafeInteger(record.startedAt)
     ) {
       return null;
     }
@@ -75,19 +70,74 @@ export function readClaudeBridgeRecord(target) {
   }
 }
 
-export function claudeBridgeState(target) {
-  const record = readClaudeBridgeRecord(target);
+export async function probeClaudeBridge(record, timeoutMs = 500) {
+  if (!record?.socketPath) return false;
+  if (path.basename(record.socketPath) !== `${record.pid}.sock`) return false;
+  let resolved;
+  try {
+    resolved = await validateClaudeSocketPath(record.socketPath);
+  } catch {
+    return false;
+  }
+  const nonce = randomUUID();
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ path: resolved });
+    const chunks = [];
+    let settled = false;
+    const finish = (healthy) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(healthy);
+    };
+    socket.on("data", (chunk) => chunks.push(chunk));
+    socket.once("error", () => finish(false));
+    socket.once("end", () => {
+      try {
+        const response = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+        finish(
+          response?.cxmsgHealth === 1 &&
+            response.nonce === nonce &&
+            response.target === record.target &&
+            response.targetThreadId === record.targetThreadId &&
+            response.pid === record.pid &&
+            response.startedAt === record.startedAt,
+        );
+      } catch {
+        finish(false);
+      }
+    });
+    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.once("connect", () => {
+      socket.end(`${JSON.stringify({ cxmsgHealth: 1, nonce, target: record.target })}\n`);
+    });
+  });
+}
+
+export async function evaluateClaudeBridgeRecord(
+  record,
+  { processStateFn = processState, probeBridge = probeClaudeBridge } = {},
+) {
+  const process = record ? processStateFn(record.pid) : "missing";
+  const socketHealthy = record ? await probeBridge(record) : false;
   return {
     record,
-    running: Boolean(
-      record && processExists(record.pid) && existsSync(record.socketPath),
-    ),
+    process,
+    socketHealthy,
+    ...serviceEvidence({ process, identity: "unavailable", socketHealthy }),
   };
 }
 
-export function removeStaleClaudeBridgeRecord(target) {
+export async function claudeBridgeState(target, options = {}) {
+  return evaluateClaudeBridgeRecord(readClaudeBridgeRecord(target), options);
+}
+
+export async function removeStaleClaudeBridgeRecord(target, options = {}) {
   const record = readClaudeBridgeRecord(target);
-  if (record && processExists(record.pid)) return false;
+  if (record) {
+    const state = await claudeBridgeState(target, options);
+    if (!state.safeToRemove) return false;
+  }
   if (record?.socketPath && existsSync(record.socketPath)) unlinkSync(record.socketPath);
   const destination = bridgeRecordPath(target);
   if (existsSync(destination)) unlinkSync(destination);
@@ -213,9 +263,27 @@ export async function runClaudeBridge(target) {
     });
     socket.on("end", async () => {
       try {
-        writeClaudeRegistry(record, targetRecord, "busy");
         const line = Buffer.concat(chunks).toString("utf8").trim();
-        const parsed = parseClaudePeerFrame(JSON.parse(line));
+        const frame = JSON.parse(line);
+        if (
+          frame?.cxmsgHealth === 1 &&
+          typeof frame.nonce === "string" &&
+          frame.target === target
+        ) {
+          socket.end(
+            `${JSON.stringify({
+              cxmsgHealth: 1,
+              nonce: frame.nonce,
+              target,
+              targetThreadId: record.targetThreadId,
+              pid: record.pid,
+              startedAt: record.startedAt,
+            })}\n`,
+          );
+          return;
+        }
+        writeClaudeRegistry(record, targetRecord, "busy");
+        const parsed = parseClaudePeerFrame(frame);
         const currentRecord = readSessionRecord(target);
         if (!currentRecord) throw new Error(`unknown Codex session: ${target}`);
         const request = parseClaudeRequestBody(parsed.body);
@@ -240,8 +308,10 @@ export async function runClaudeBridge(target) {
       } catch (error) {
         process.stderr.write(`cxmsg Claude bridge delivery failed: ${error.message}\n`);
       } finally {
-        writeClaudeRegistry(record, targetRecord, "idle");
-        socket.end();
+        if (!socket.writableEnded) {
+          writeClaudeRegistry(record, targetRecord, "idle");
+          socket.end();
+        }
       }
     });
   });

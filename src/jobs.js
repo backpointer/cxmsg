@@ -5,13 +5,18 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  statSync,
+  unlinkSync,
   writeFileSync,
+  openSync,
+  closeSync,
 } from "node:fs";
 import path from "node:path";
 import { finalTurnResult } from "./messaging.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 const JOBS_DIR = path.join(CXMSG_STATE_DIR, "jobs");
+const LOCK_STALE_MS = 30_000;
 
 function ensureJobsDirectory() {
   mkdirSync(JOBS_DIR, { recursive: true, mode: 0o700 });
@@ -27,6 +32,10 @@ function validateJobId(jobId) {
 
 function jobPath(jobId) {
   return path.join(JOBS_DIR, `${validateJobId(jobId)}.json`);
+}
+
+function jobLockPath(jobId) {
+  return path.join(JOBS_DIR, `${validateJobId(jobId)}.lock`);
 }
 
 export function newJobId() {
@@ -67,13 +76,17 @@ export function createJob({
   jobId = newJobId(),
   from,
   target,
-  targetThreadId = threadId,
+  targetThreadId = null,
   threadId,
   task,
   permissions = null,
   kind = "delegation",
   source = null,
   reply = null,
+  execution = "fork",
+  approval = "never",
+  mirror = "none",
+  approvalTimeoutSeconds = 600,
 }) {
   if (readJob(jobId)) throw new Error(`job already exists: ${jobId}`);
   return writeJob({
@@ -81,7 +94,7 @@ export function createJob({
     jobId,
     from,
     target,
-    targetThreadId,
+    targetThreadId: targetThreadId || threadId,
     threadId,
     turnId: null,
     task,
@@ -89,6 +102,13 @@ export function createJob({
     kind,
     source,
     reply,
+    execution,
+    approval,
+    mirror,
+    approvalTimeoutSeconds,
+    approvals: [],
+    workerPid: null,
+    mirrorDelivery: null,
     status: "dispatching",
     result: null,
     error: null,
@@ -99,7 +119,9 @@ export function createJob({
 }
 
 export function isPendingJob(job) {
-  return ["dispatching", "queued", "running"].includes(job?.status);
+  return ["dispatching", "queued", "running", "awaiting_approval"].includes(
+    job?.status,
+  );
 }
 
 export function updateJob(job, changes) {
@@ -108,6 +130,59 @@ export function updateJob(job, changes) {
     ...changes,
     updatedAt: new Date().toISOString(),
   });
+}
+
+export async function withJobLock(jobId, callback, timeoutMs = 10_000) {
+  validateJobId(jobId);
+  ensureJobsDirectory();
+  const target = jobLockPath(jobId);
+  const deadline = Date.now() + timeoutMs;
+  let descriptor;
+
+  while (descriptor === undefined) {
+    try {
+      descriptor = openSync(target, "wx", 0o600);
+      writeFileSync(descriptor, `${process.pid}\n`);
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+      try {
+        if (Date.now() - statSync(target).mtimeMs > LOCK_STALE_MS) {
+          unlinkSync(target);
+          continue;
+        }
+      } catch {
+        continue;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(`timed out acquiring job lock: ${jobId}`);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+  }
+
+  try {
+    return await callback();
+  } finally {
+    closeSync(descriptor);
+    try {
+      unlinkSync(target);
+    } catch {}
+  }
+}
+
+export async function mutateJob(jobId, mutate) {
+  return withJobLock(jobId, async () => {
+    const current = readJob(jobId);
+    if (!current) throw new Error(`unknown job: ${jobId}`);
+    return writeJob({
+      ...mutate(current),
+      updatedAt: new Date().toISOString(),
+    });
+  });
+}
+
+export function activeJobsForTarget(target) {
+  return listJobs().filter((job) => job.target === target && isPendingJob(job));
 }
 
 export async function refreshJob(client, job) {
@@ -135,6 +210,15 @@ export async function refreshJob(client, job) {
       : turn.status === "completed"
         ? "completed"
         : turn.status;
+  const startedAt = Date.parse(job.turnStartedAt || job.updatedAt || job.createdAt);
+  if (
+    status !== "running" &&
+    status !== "completed" &&
+    Number.isFinite(startedAt) &&
+    Date.now() - startedAt < 10_000
+  ) {
+    return job;
+  }
   const terminal = status !== "running";
   if (!terminal && job.status === "running") return job;
   return updateJob(job, {

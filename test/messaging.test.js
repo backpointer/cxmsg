@@ -177,6 +177,28 @@ test("delegation can select an explicit named permission profile", async () => {
   assert.equal(calls[0].params.sandboxPolicy, undefined);
 });
 
+test("delegation can select an interactive approval policy", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      return { turn: { id: "turn-relay" } };
+    },
+  };
+  await deliverDelegatedTask(
+    client,
+    { id: "thread-worker", status: { type: "idle" }, turns: [] },
+    {
+      from: "coordinator",
+      target: "worker",
+      task: "inspect",
+      jobId: "12345678-1234-1234-1234-123456789abf",
+      approvalPolicy: "on-request",
+    },
+  );
+  assert.equal(calls[0].params.approvalPolicy, "on-request");
+});
+
 test("delegation refuses to merge into an active turn", async () => {
   const client = { request: async () => assert.fail("should not request") };
   await assert.rejects(

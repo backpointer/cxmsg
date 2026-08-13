@@ -155,6 +155,7 @@ export async function deliverDelegatedTask(client, thread, payload) {
     clientUserMessageId: delegated.jobId,
   };
   if (payload.permissions) params.permissions = payload.permissions;
+  if (payload.approvalPolicy) params.approvalPolicy = payload.approvalPolicy;
   const result = await client.request("turn/start", params);
   return {
     jobId: delegated.jobId,

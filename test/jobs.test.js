@@ -33,6 +33,34 @@ test("job refresh tolerates a newly started turn missing from the first read", a
     );
     assert.equal(refreshed.status, "running");
     assert.equal(refreshed.error, null);
+
+    const transient = createJob({
+      jobId: "62345678-1234-1234-1234-123456789abc",
+      from: "coordinator",
+      target: "worker",
+      targetThreadId: "source-thread",
+      threadId: null,
+      task: "inspect",
+    });
+    const transientRunning = updateJob(transient, {
+      status: "running",
+      threadId: "execution-thread",
+      turnId: "new-turn",
+      turnStartedAt: new Date().toISOString(),
+    });
+    const transientRefreshed = await refreshJob(
+      {
+        request: async () => ({
+          thread: {
+            id: "execution-thread",
+            turns: [{ id: "new-turn", status: "interrupted", items: [] }],
+          },
+        }),
+      },
+      transientRunning,
+    );
+    assert.equal(transientRefreshed.status, "running");
+    assert.equal(transientRefreshed.completedAt, null);
   } finally {
     await fs.rm(stateDir, { recursive: true, force: true });
     delete process.env.CXMSG_STATE_DIR;

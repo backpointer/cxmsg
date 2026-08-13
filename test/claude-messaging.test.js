@@ -37,6 +37,7 @@ async function listenOnTestSocket(handler) {
     server.once("error", reject);
     server.listen(socketPath, resolve);
   });
+  await fs.chmod(socketPath, 0o600);
   return {
     server,
     socketPath,
@@ -102,6 +103,7 @@ test("Claude request grants bind authorization to stable session ids", () => {
     GRANT_TOKEN,
   );
   assert.equal(listClaudeRequestGrants(granted).length, 1);
+  assert.equal(listClaudeRequestGrants(granted)[0].approval, "never");
   assert.equal(
     findClaudeRequestGrant(granted, {
       fromSession: SESSION_ID,
@@ -158,13 +160,17 @@ test("Claude peer sender writes one JSONL frame over the Unix socket", async () 
 test("Claude peer discovery uses live owner-only session sockets", async () => {
   const sessionsDir = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-claude-sessions-"));
   const canonicalSocket = path.join(CLAUDE_SOCKETS_DIR, `${process.pid}.sock`);
-  const server = net.createServer((socket) => socket.end());
+  const server = net.createServer((socket) => {
+    socket.resume();
+    socket.on("end", () => socket.end());
+  });
   await fs.mkdir(CLAUDE_SOCKETS_DIR, { recursive: true, mode: 0o700 });
   await fs.unlink(canonicalSocket).catch(() => {});
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(canonicalSocket, resolve);
   });
+  await fs.chmod(canonicalSocket, 0o600);
   try {
     await fs.writeFile(
       path.join(sessionsDir, `${process.pid}.json`),
@@ -184,6 +190,34 @@ test("Claude peer discovery uses live owner-only session sockets", async () => {
     assert.equal(peers.length, 1);
     assert.equal(peers[0].name, "claude-test");
     assert.equal(peers[0].address, `uds:${canonicalSocket}`);
+
+    const restrictedPeers = await listClaudePeers({
+      sessionsDir,
+      processStateFn: () => "unverified",
+    });
+    assert.equal(restrictedPeers.length, 1);
+    await sendClaudePeerFrame(
+      restrictedPeers[0].socketPath,
+      buildClaudePeerFrame({
+        fromSocket: canonicalSocket,
+        fromName: "codex-test",
+        fromSession: SESSION_ID,
+        message: "EPERM does not block socket delivery",
+        messageId: MESSAGE_ID,
+      }),
+    );
+
+    await fs.chmod(canonicalSocket, 0o666);
+    assert.equal(
+      (
+        await listClaudePeers({
+          sessionsDir,
+          processStateFn: () => "unverified",
+        })
+      ).length,
+      0,
+    );
+    await fs.chmod(canonicalSocket, 0o600);
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await fs.unlink(canonicalSocket).catch(() => {});

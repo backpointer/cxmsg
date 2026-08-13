@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { withAppServer } from "./app-server-client.js";
+import { createApprovalHandler } from "./approvals.js";
 import {
   buildClaudePeerFrame,
   buildClaudeResponseBody,
@@ -67,10 +68,10 @@ async function waitForSourceThread(client, job, deadline) {
   }
 }
 
-async function forkExecutionThread(client, sourceThread, record, permissions) {
+async function forkExecutionThread(client, sourceThread, record, permissions, approval) {
   const forkParams = {
     threadId: sourceThread.id,
-    approvalPolicy: "never",
+    approvalPolicy: approval === "never" ? "never" : "on-request",
     deferGoalContinuation: true,
     permissions,
   };
@@ -82,7 +83,7 @@ async function forkExecutionThread(client, sourceThread, record, permissions) {
     const started = await client.request("thread/start", {
       cwd: record.cwd,
       serviceName: "cxmsg-claude-request",
-      approvalPolicy: "never",
+      approvalPolicy: approval === "never" ? "never" : "on-request",
       permissions,
     });
     return started.thread;
@@ -97,6 +98,7 @@ async function startClaudeRequest(client, job, targetRecord, deadline) {
     sourceThread,
     targetRecord,
     job.permissions,
+    job.approval || "never",
   );
   const delivery = await deliverDelegatedTask(client, executionThread, {
     from: job.from,
@@ -104,6 +106,7 @@ async function startClaudeRequest(client, job, targetRecord, deadline) {
     task: job.task,
     jobId: job.jobId,
     permissions: job.permissions,
+    approvalPolicy: job.approval === "never" ? "never" : "on-request",
   });
   return updateJob(job, {
     status: "running",
@@ -142,6 +145,7 @@ export function createClaudeRequestJob({ target, targetRecord, parsed, grant, ta
     threadId: null,
     task,
     permissions: grant.permissions,
+    approval: grant.approval || "never",
     kind: "claude-request",
     source: {
       sessionId: parsed.fromSession,
@@ -213,13 +217,16 @@ export async function processClaudeRequest({
   let current = job;
   const deadline = Date.now() + timeoutMs;
   try {
-    current = await connect(async (client) => {
-      let active = current;
-      if (!active.turnId && isPendingJob(active)) {
-        active = await startClaudeRequest(client, active, targetRecord, deadline);
-      }
-      return waitForCompletion(client, active, deadline);
-    });
+    current = await connect(
+      async (client) => {
+        let active = current;
+        if (!active.turnId && isPendingJob(active)) {
+          active = await startClaudeRequest(client, active, targetRecord, deadline);
+        }
+        return waitForCompletion(client, active, deadline);
+      },
+      { onServerRequest: createApprovalHandler(job.jobId) },
+    );
   } catch (error) {
     current = readJob(job.jobId) || current;
     if (isPendingJob(current)) current = terminalFailure(current, error.message);

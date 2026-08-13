@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>cxmsg Dashboard</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body data-view="dashboard">
+    <header class="topbar">
+      <a class="brand" href="/dashboard"><span class="brand-mark">cx</span>msg</a>
+      <nav aria-label="Primary">
+        <a class="active" href="/dashboard">Dashboard</a>
+        <a href="/orchestration">Orchestration</a>
+      </nav>
+      <div class="refresh"><span id="connection-dot" class="dot pending"></span><span id="refresh-state">Connecting</span></div>
+    </header>
+
+    <main>
+      <section class="hero">
+        <div>
+          <p class="eyebrow">LOCAL CONTROL PLANE</p>
+          <h1>Sessions and authority at a glance.</h1>
+          <p>Read-only visibility into the App Server, Codex workers, Claude peers, bridges, and configured grants.</p>
+        </div>
+        <span class="mode-badge">READ ONLY · V1</span>
+      </section>
+
+      <section class="metrics" aria-label="Overview">
+        <article class="metric"><span>App Server</span><strong id="server-state">—</strong><small id="server-detail">Waiting for snapshot</small></article>
+        <article class="metric"><span>Codex sessions</span><strong id="codex-count">—</strong><small id="codex-active">— working</small></article>
+        <article class="metric"><span>Claude sessions</span><strong id="claude-count">—</strong><small id="claude-active">— busy</small></article>
+        <article class="metric"><span>Active grants</span><strong id="grant-count">—</strong><small>Delegation + Claude request</small></article>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">CODEX</p><h2>Managed sessions</h2></div>
+          <p>Durable App Server threads and their effective local authority.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Session</th><th>State</th><th>Project</th><th>Connection</th><th>Authority</th><th>Bridge</th></tr></thead>
+            <tbody id="codex-table-body"><tr><td colspan="6" class="empty">Loading sessions…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-heading">
+          <div><p class="eyebrow">CLAUDE CODE</p><h2>Live UDS peers</h2></div>
+          <p>Only currently reachable interactive sessions are shown.</p>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th>Peer</th><th>State</th><th>Project</th><th>Session ID</th><th>PID</th></tr></thead>
+            <tbody id="claude-table-body"><tr><td colspan="5" class="empty">Loading peers…</td></tr></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
