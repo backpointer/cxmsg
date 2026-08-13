@@ -21,6 +21,7 @@ import {
   removeClaudeRequestGrant,
   upsertClaudeRequestGrant,
 } from "../src/claude-grants.js";
+import { failedProbe } from "../src/socket-probe.js";
 
 const MESSAGE_ID = "12345678-1234-1234-1234-123456789abc";
 const SESSION_ID = "87654321-4321-4321-4321-cba987654321";
@@ -218,6 +219,17 @@ test("Claude peer discovery uses live owner-only session sockets", async () => {
       0,
     );
     await fs.chmod(canonicalSocket, 0o600);
+
+    const sandboxDenied = await listClaudePeers({
+      sessionsDir,
+      processStateFn: () => "unverified",
+      probeSocket: async () =>
+        failedProbe(Object.assign(new Error("connect EPERM"), { code: "EPERM" })),
+    });
+    assert.equal(sandboxDenied.length, 1);
+    assert.equal(sandboxDenied[0].status, "unreachable");
+    assert.equal(sandboxDenied[0].verification, "sandbox-denied");
+    assert.equal(sandboxDenied[0].errorCode, "EPERM");
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await fs.unlink(canonicalSocket).catch(() => {});

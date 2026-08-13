@@ -38,16 +38,30 @@ test("healthy UDS permits status but not signaling or stale cleanup when PID is 
     serviceEvidence({
       process: "unverified",
       identity: "unavailable",
-      socketHealthy: true,
+      socketProbe: { state: "healthy" },
+      socketPresent: true,
     }),
-    { running: true, safeToSignal: false, safeToRemove: false },
+    {
+      status: "running",
+      running: true,
+      reachable: true,
+      safeToSignal: false,
+      safeToRemove: false,
+    },
   );
   assert.deepEqual(
     serviceEvidence({
       process: "missing",
       identity: "unavailable",
-      socketHealthy: false,
+      socketProbe: { state: "missing" },
+      socketPresent: false,
     }),
-    { running: false, safeToSignal: false, safeToRemove: true },
+    {
+      status: "stopped",
+      running: false,
+      reachable: false,
+      safeToSignal: false,
+      safeToRemove: true,
+    },
   );
 });

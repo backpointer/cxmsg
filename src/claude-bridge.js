@@ -26,14 +26,25 @@ import {
 } from "./claude-messaging.js";
 import { findClaudeRequestGrant } from "./claude-grants.js";
 import {
+  parseClaudeDeliveryAck,
+  recordClaudeDeliveryAck,
+  refreshClaudeDelivery,
+  sendClaudeDeliveryJob,
+} from "./claude-delivery.js";
+import {
   createClaudeRequestJob,
   processClaudeRequest,
 } from "./claude-requests.js";
-import { isPendingJob, listJobs } from "./jobs.js";
+import { isPendingJob, listJobs, mutateJob, readJob } from "./jobs.js";
 import { deliverPeerMessage, validateSessionName } from "./messaging.js";
 import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import { processState, serviceEvidence } from "./process-state.js";
+import {
+  failedProbe,
+  healthyProbe,
+  timeoutProbe,
+} from "./socket-probe.js";
 
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
 
@@ -71,43 +82,57 @@ export function readClaudeBridgeRecord(target) {
 }
 
 export async function probeClaudeBridge(record, timeoutMs = 500) {
-  if (!record?.socketPath) return false;
-  if (path.basename(record.socketPath) !== `${record.pid}.sock`) return false;
+  if (!record?.socketPath) return failedProbe(new Error("missing bridge socket path"));
+  if (path.basename(record.socketPath) !== `${record.pid}.sock`) {
+    return failedProbe(
+      Object.assign(new Error("bridge socket path does not match its PID"), {
+        code: "EIDENTITY",
+      }),
+    );
+  }
   let resolved;
   try {
     resolved = await validateClaudeSocketPath(record.socketPath);
-  } catch {
-    return false;
+  } catch (error) {
+    return failedProbe(error);
   }
   const nonce = randomUUID();
   return new Promise((resolve) => {
     const socket = net.createConnection({ path: resolved });
     const chunks = [];
     let settled = false;
-    const finish = (healthy) => {
+    const finish = (probe) => {
       if (settled) return;
       settled = true;
       socket.destroy();
-      resolve(healthy);
+      resolve(probe);
     };
     socket.on("data", (chunk) => chunks.push(chunk));
-    socket.once("error", () => finish(false));
+    socket.once("error", (error) => finish(failedProbe(error)));
     socket.once("end", () => {
       try {
         const response = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-        finish(
+        const matched =
           response?.cxmsgHealth === 1 &&
             response.nonce === nonce &&
             response.target === record.target &&
             response.targetThreadId === record.targetThreadId &&
             response.pid === record.pid &&
-            response.startedAt === record.startedAt,
+            response.startedAt === record.startedAt;
+        finish(
+          matched
+            ? healthyProbe()
+            : failedProbe(
+                Object.assign(new Error("bridge identity handshake mismatch"), {
+                  code: "EIDENTITY",
+                }),
+              ),
         );
-      } catch {
-        finish(false);
+      } catch (error) {
+        finish(failedProbe(error));
       }
     });
-    socket.setTimeout(timeoutMs, () => finish(false));
+    socket.setTimeout(timeoutMs, () => finish(timeoutProbe()));
     socket.once("connect", () => {
       socket.end(`${JSON.stringify({ cxmsgHealth: 1, nonce, target: record.target })}\n`);
     });
@@ -119,12 +144,28 @@ export async function evaluateClaudeBridgeRecord(
   { processStateFn = processState, probeBridge = probeClaudeBridge } = {},
 ) {
   const process = record ? processStateFn(record.pid) : "missing";
-  const socketHealthy = record ? await probeBridge(record) : false;
+  const socketProbe = record
+    ? await probeBridge(record)
+    : failedProbe(Object.assign(new Error("bridge record is missing"), { code: "ENOENT" }));
+  const normalizedProbe =
+    typeof socketProbe === "boolean"
+      ? socketProbe
+        ? healthyProbe()
+        : failedProbe(new Error("bridge probe failed"))
+      : socketProbe;
+  const socketPresent = Boolean(record?.socketPath && existsSync(record.socketPath));
   return {
     record,
     process,
-    socketHealthy,
-    ...serviceEvidence({ process, identity: "unavailable", socketHealthy }),
+    socketProbe: normalizedProbe,
+    socketPresent,
+    socketHealthy: normalizedProbe.state === "healthy",
+    ...serviceEvidence({
+      process,
+      identity: "unavailable",
+      socketProbe: normalizedProbe,
+      socketPresent,
+    }),
   };
 }
 
@@ -209,6 +250,68 @@ async function deliverClaudeMessage(target, parsed) {
   });
 }
 
+function claudeDeliveryWakeBody(delivery) {
+  const detail = delivery.result || delivery.error || "No result detail was provided.";
+  const bounded = Buffer.from(detail, "utf8")
+    .subarray(0, 12 * 1024)
+    .toString("utf8");
+  return (
+    `Claude delivery ${delivery.jobId} reached terminal status ${delivery.status}.\n\n` +
+    bounded
+  );
+}
+
+export async function handleClaudeDeliveryAck(
+  target,
+  parsed,
+  ack,
+  {
+    recordAck = recordClaudeDeliveryAck,
+    deliverMessage = deliverClaudeMessage,
+    mutate = mutateJob,
+  } = {},
+) {
+  const delivery = await recordAck(parsed, ack);
+  if (!delivery) return null;
+  if (
+    (!delivery.ackTransitioned && delivery.wake?.status !== "failed") ||
+    !["completed", "failed"].includes(delivery.status)
+  ) {
+    return delivery;
+  }
+
+  try {
+    const wake = await deliverMessage(target, {
+      ...parsed,
+      messageId: delivery.jobId,
+      body: claudeDeliveryWakeBody(delivery),
+    });
+    return mutate(delivery.jobId, (current) => ({
+      ...current,
+      wake: {
+        ...current.wake,
+        status: "delivered",
+        attemptedAt: new Date().toISOString(),
+        deliveredAt: new Date().toISOString(),
+        delivery: wake.delivery,
+        turnId: wake.turnId,
+        error: null,
+      },
+    }));
+  } catch (error) {
+    await mutate(delivery.jobId, (current) => ({
+      ...current,
+      wake: {
+        ...current.wake,
+        status: "failed",
+        attemptedAt: new Date().toISOString(),
+        error: error.message,
+      },
+    }));
+    throw error;
+  }
+}
+
 export async function runClaudeBridge(target) {
   validateSessionName(target);
   const targetRecord = readSessionRecord(target);
@@ -230,6 +333,37 @@ export async function runClaudeBridge(target) {
     startedAt: Date.now(),
   };
   const requestWorkers = new Map();
+  const deliveryTimers = new Map();
+
+  const scheduleDelivery = (job) => {
+    if (deliveryTimers.has(job.jobId) || job.status !== "retry_scheduled") return;
+    const delayMs = Math.max(0, Date.parse(job.delivery?.nextAttemptAt) - Date.now());
+    const timer = setTimeout(async () => {
+      deliveryTimers.delete(job.jobId);
+      try {
+        const current = readJob(job.jobId);
+        if (!current || current.status !== "retry_scheduled") return;
+        const sourceRecord = readSessionRecord(target);
+        if (!sourceRecord) throw new Error(`unknown Codex session: ${target}`);
+        await sendClaudeDeliveryJob(record, sourceRecord, current);
+      } catch (error) {
+        process.stderr.write(
+          `cxmsg Claude delivery ${job.jobId} retry failed: ${error.message}\n`,
+        );
+      }
+    }, delayMs);
+    deliveryTimers.set(job.jobId, timer);
+  };
+
+  const scanDeliveries = () => {
+    for (const job of listJobs()) {
+      if (job.kind !== "claude-delivery" || job.from !== target) continue;
+      const current = refreshClaudeDelivery(job);
+      if (current.status === "retry_scheduled") scheduleDelivery(current);
+    }
+  };
+  const deliveryMonitor = setInterval(scanDeliveries, 5_000);
+  deliveryMonitor.unref();
 
   const scheduleRequest = (targetRecord, job) => {
     if (requestWorkers.has(job.jobId)) return;
@@ -284,6 +418,17 @@ export async function runClaudeBridge(target) {
         }
         writeClaudeRegistry(record, targetRecord, "busy");
         const parsed = parseClaudePeerFrame(frame);
+        const deliveryAck = parseClaudeDeliveryAck(parsed.body);
+        if (deliveryAck) {
+          const delivery = await handleClaudeDeliveryAck(
+            target,
+            parsed,
+            deliveryAck,
+          );
+          if (!delivery) throw new Error(`unknown Claude delivery: ${deliveryAck.jobId}`);
+          scheduleDelivery(delivery);
+          return;
+        }
         const currentRecord = readSessionRecord(target);
         if (!currentRecord) throw new Error(`unknown Codex session: ${target}`);
         const request = parseClaudeRequestBody(parsed.body);
@@ -320,6 +465,9 @@ export async function runClaudeBridge(target) {
   const cleanup = () => {
     if (cleaned) return;
     cleaned = true;
+    for (const timer of deliveryTimers.values()) clearTimeout(timer);
+    deliveryTimers.clear();
+    clearInterval(deliveryMonitor);
     try {
       server.close();
     } catch {}
@@ -350,6 +498,7 @@ export async function runClaudeBridge(target) {
     });
   });
 
+  scanDeliveries();
   for (const job of listJobs()) {
     if (
       job.kind === "claude-request" &&

@@ -1,5 +1,6 @@
 import { lstatSync } from "node:fs";
 import { socketPath as defaultSocketPath } from "./runtime.js";
+import { failedProbe, healthyProbe } from "./socket-probe.js";
 import { UnixWebSocket } from "./unix-websocket.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -49,7 +50,7 @@ export class AppServerClient {
       clientInfo: {
         name: "cxmsg",
         title: "Codex Session Messaging",
-        version: "0.6.0",
+        version: "0.8.0",
       },
       capabilities: {
         experimentalApi: true,
@@ -182,22 +183,39 @@ export async function probeAppServerSocket(
   let metadata;
   try {
     metadata = lstatSync(socketPath);
-  } catch {
-    return false;
+  } catch (error) {
+    return failedProbe(error);
   }
-  if (!metadata.isSocket()) return false;
+  if (!metadata.isSocket()) return failedProbe(new Error("not a Unix socket"));
   if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
-    return false;
+    return failedProbe(new Error("Unix socket is owned by another user"));
   }
-  if ((metadata.mode & 0o077) !== 0) return false;
+  if ((metadata.mode & 0o077) !== 0) {
+    return failedProbe(new Error("Unix socket permissions are too broad"));
+  }
 
   const client = new AppServerClient({ socketPath, timeoutMs });
+  let probeTimer;
   try {
-    await client.connect();
-    return true;
-  } catch {
-    return false;
+    await Promise.race([
+      client.connect(),
+      new Promise((_, reject) =>
+        (probeTimer = setTimeout(
+          () =>
+            reject(
+              Object.assign(new Error("app-server Unix socket probe timed out"), {
+                code: "ETIMEDOUT",
+              }),
+            ),
+          timeoutMs,
+        )),
+      ),
+    ]);
+    return healthyProbe();
+  } catch (error) {
+    return failedProbe(error);
   } finally {
+    clearTimeout(probeTimer);
     await client.close();
   }
 }

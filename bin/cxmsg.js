@@ -27,11 +27,14 @@ import {
   writeAttachmentRecord,
 } from "../src/attachments.js";
 import {
-  buildClaudePeerFrame,
   listClaudePeers,
   resolveClaudePeer,
-  sendClaudePeerFrame,
 } from "../src/claude-messaging.js";
+import {
+  createClaudeDeliveryJob,
+  refreshClaudeDelivery,
+  sendClaudeDeliveryJob,
+} from "../src/claude-delivery.js";
 import {
   DEFAULT_CLAUDE_PERMISSION_PROFILE,
   listClaudeRequestGrants,
@@ -89,11 +92,18 @@ import {
   writeSessionRecord,
 } from "../src/registry.js";
 import { startWebServer } from "../src/web-server.js";
+import {
+  HOST_RELAY_LOG_PATH,
+  HOST_RELAY_RECORD_PATH,
+  hostRelayRequest,
+  readHostRelayRecord,
+} from "../src/host-relay.js";
 
 const codexBin = process.env.CODEX_BIN || "codex";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const claudeBridgeWorker = path.join(scriptDir, "claude-bridge-worker.js");
 const delegationWorker = path.join(scriptDir, "delegation-worker.js");
+const hostRelayWorker = path.join(scriptDir, "host-relay-worker.js");
 
 function usage(exitCode = 0) {
   const output = `Usage:
@@ -120,6 +130,7 @@ function usage(exitCode = 0) {
   cxmsg approve <job-id> <approval-id>
   cxmsg deny <job-id> <approval-id>
   cxmsg web [--port <number>]
+  cxmsg relay start|status|stop [--port <number>]
   cxmsg claude peers [--json]
   cxmsg claude bridge start|status|stop <codex-session>
   cxmsg claude send [--from <codex-session>] <claude-session> <message...>
@@ -128,6 +139,7 @@ function usage(exitCode = 0) {
   cxmsg claude revoke <claude-session-id> <codex-session>
   cxmsg claude grants <codex-session> [--json]
   cxmsg claude retry <job-id>
+  cxmsg claude delivery <job-id> [--json]
 
 Environment:
   CODEX_BIN          Codex executable (default: codex)
@@ -202,14 +214,16 @@ async function serverState() {
   const identity = pid
     ? processIdentity(pid, ["app-server", DEFAULT_SOCKET_PATH]).state
     : "unavailable";
-  const socketHealthy = await probeAppServerSocket(DEFAULT_SOCKET_PATH);
+  const socketProbe = await probeAppServerSocket(DEFAULT_SOCKET_PATH);
+  const socketPresent = existsSync(DEFAULT_SOCKET_PATH);
   return {
     pid,
-    socketPresent: existsSync(DEFAULT_SOCKET_PATH),
+    socketPresent,
     process,
     identity,
-    socketHealthy,
-    ...serviceEvidence({ process, identity, socketHealthy }),
+    socketProbe,
+    socketHealthy: socketProbe.state === "healthy",
+    ...serviceEvidence({ process, identity, socketProbe, socketPresent }),
   };
 }
 
@@ -225,6 +239,11 @@ async function waitUntil(predicate, timeoutMs = 10_000) {
 async function startServer() {
   const current = await serverState();
   if (current.running) return current.pid;
+  if (current.status === "unreachable") {
+    throw new Error(
+      `app-server appears active, but this caller cannot connect to its UDS: ${current.socketProbe.error}. The current sandbox may prohibit Unix socket access`,
+    );
+  }
   if (current.pid && !current.safeToRemove) {
     throw new Error(
       `cannot verify whether app-server pid ${current.pid} is stale; refusing to replace its socket`,
@@ -252,7 +271,7 @@ async function startServer() {
   const ready = await waitUntil(
     async () =>
       processState(child.pid) !== "missing" &&
-      (await probeAppServerSocket(DEFAULT_SOCKET_PATH)),
+      (await probeAppServerSocket(DEFAULT_SOCKET_PATH)).state === "healthy",
   );
   if (!ready) {
     throw new Error(`app-server did not become ready; inspect ${LOG_PATH}`);
@@ -375,8 +394,18 @@ async function commandServer(action) {
   }
 
   const state = await serverState();
+  const verification = state.safeToSignal
+    ? "identity"
+    : state.socketProbe.state === "healthy"
+      ? "socket"
+      : state.socketProbe.state === "denied"
+        ? "sandbox-denied"
+        : state.socketProbe.state;
+  const error = state.socketProbe.errorCode
+    ? `\terror=${state.socketProbe.errorCode}`
+    : "";
   process.stdout.write(
-    `${state.running ? "running" : "stopped"}\tpid=${state.pid || "-"}\tsocket=${DEFAULT_SOCKET_PATH}\tverification=${state.safeToSignal ? "identity" : state.socketHealthy ? "socket" : "none"}\n`,
+    `${state.status}\tpid=${state.pid || "-"}\tsocket=${DEFAULT_SOCKET_PATH}\tverification=${verification}${error}\n`,
   );
 }
 
@@ -406,6 +435,96 @@ async function commandWeb(args) {
     process.once("SIGTERM", close);
     web.server.once("error", reject);
   });
+}
+
+async function relayState() {
+  const record = readHostRelayRecord();
+  if (!record) return { status: "stopped", record: null, error: null };
+  try {
+    const health = await hostRelayRequest("/health", { record });
+    const matched =
+      health.pid === record.pid &&
+      health.port === record.port &&
+      health.startedAt === record.startedAt;
+    return {
+      status: matched ? "running" : "mismatched",
+      record,
+      error: matched ? null : "host relay identity mismatch",
+    };
+  } catch (error) {
+    const process = processState(record.pid);
+    const denied = ["EPERM", "EACCES", "ETIMEDOUT"].includes(error.code);
+    return {
+      status: denied && process !== "missing" ? "unreachable" : "unknown",
+      record,
+      error: error.message,
+      errorCode: error.code || null,
+    };
+  }
+}
+
+async function commandRelay(args) {
+  const action = args.shift();
+  if (!action || !["start", "status", "stop"].includes(action)) usage(2);
+  let port = 4174;
+  if (args[0] === "--port") {
+    args.shift();
+    port = Number(args.shift());
+  }
+  if (args.length || !Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new Error("relay port must be an integer between 1 and 65535");
+  }
+  const state = await relayState();
+  if (action === "status") {
+    process.stdout.write(
+      `${state.status}\tpid=${state.record?.pid || "-"}\tport=${state.record?.port || "-"}${state.errorCode ? `\terror=${state.errorCode}` : ""}\n`,
+    );
+    return;
+  }
+  if (action === "stop") {
+    if (!state.record) {
+      process.stdout.write("cxmsg host relay is not running.\n");
+      return;
+    }
+    const processStatus = processState(state.record.pid);
+    const identity = processIdentity(
+      state.record.pid,
+      [hostRelayWorker, String(state.record.port)],
+    ).state;
+    if (processStatus !== "alive" || identity !== "matched") {
+      throw new Error(
+        `host relay pid ${state.record.pid} identity is unverified; refusing to signal it`,
+      );
+    }
+    process.kill(state.record.pid, "SIGTERM");
+    await waitUntil(() => processState(state.record.pid) === "missing", 5_000);
+    if (processState(state.record.pid) !== "missing") {
+      throw new Error(`host relay pid ${state.record.pid} did not stop`);
+    }
+    if (existsSync(HOST_RELAY_RECORD_PATH)) unlinkSync(HOST_RELAY_RECORD_PATH);
+    process.stdout.write("cxmsg host relay stopped.\n");
+    return;
+  }
+  if (state.status === "running") {
+    process.stdout.write(`cxmsg host relay is running (pid ${state.record.pid}).\n`);
+    return;
+  }
+  if (state.record && processState(state.record.pid) !== "missing") {
+    throw new Error(
+      `host relay pid ${state.record.pid} cannot be verified as stale; refusing to replace it`,
+    );
+  }
+  if (existsSync(HOST_RELAY_RECORD_PATH)) unlinkSync(HOST_RELAY_RECORD_PATH);
+  const logFd = openSync(HOST_RELAY_LOG_PATH, "a", 0o600);
+  const child = spawn(process.execPath, [hostRelayWorker, String(port)], {
+    detached: true,
+    stdio: ["ignore", logFd, logFd],
+  });
+  child.unref();
+  closeSync(logFd);
+  const ready = await waitUntil(async () => (await relayState()).status === "running");
+  if (!ready) throw new Error(`host relay did not become ready; inspect ${HOST_RELAY_LOG_PATH}`);
+  process.stdout.write(`started cxmsg host relay (pid ${child.pid}, port ${port}).\n`);
 }
 
 async function commandCreate(name) {
@@ -742,7 +861,8 @@ async function claudeBridgeOperationState(target) {
     ...serviceEvidence({
       process: state.process,
       identity,
-      socketHealthy: state.socketHealthy,
+      socketProbe: state.socketProbe,
+      socketPresent: state.socketPresent,
     }),
   };
 }
@@ -753,8 +873,18 @@ async function commandClaudeBridge(action, target) {
 
   if (action === "status") {
     const state = await claudeBridgeOperationState(target);
+    const verification = state.safeToSignal
+      ? "identity"
+      : state.socketProbe.state === "healthy"
+        ? "socket"
+        : state.socketProbe.state === "denied"
+          ? "sandbox-denied"
+          : state.socketProbe.state;
+    const error = state.socketProbe.errorCode
+      ? `\terror=${state.socketProbe.errorCode}`
+      : "";
     process.stdout.write(
-      `${state.running ? "running" : "stopped"}\ttarget=${target}\tpid=${state.record?.pid || "-"}\tsocket=${state.record?.socketPath || "-"}\tverification=${state.safeToSignal ? "identity" : state.socketHealthy ? "socket" : "none"}\n`,
+      `${state.status}\ttarget=${target}\tpid=${state.record?.pid || "-"}\tsocket=${state.record?.socketPath || "-"}\tverification=${verification}${error}\n`,
     );
     return;
   }
@@ -808,6 +938,11 @@ async function commandClaudeBridge(action, target) {
       `Claude bridge for ${target} is running (pid ${current.record.pid}).\n`,
     );
     return;
+  }
+  if (current.status === "unreachable") {
+    throw new Error(
+      `Claude bridge appears active, but this caller cannot connect to its UDS: ${current.socketProbe.error}. The current sandbox may prohibit Unix socket access`,
+    );
   }
   if (current.record && !current.safeToRemove) {
     throw new Error(
@@ -864,21 +999,57 @@ async function commandClaudeSend(args) {
   const message = validateMessage(args.join(" "));
   const sourceRecord = readSessionRecord(from);
   if (!sourceRecord) throw new Error(`unknown Codex session: ${from}`);
+  const relaySend = async (jobId = null) => {
+    try {
+      const delivery = await hostRelayRequest("/v1/claude/send", {
+        method: "POST",
+        body: { from, target, message, jobId },
+      });
+      process.stdout.write(
+        `queued Claude delivery ${delivery.jobId} via host relay (${delivery.status}, attempt ${delivery.attempt})\n`,
+      );
+      return;
+    } catch (error) {
+      const sandboxHint = ["EPERM", "EACCES"].includes(error.code)
+        ? " The current sandbox also blocks loopback TCP; invoke cxmsg through an allowed host-side tool"
+        : " Start 'cxmsg relay start' from an allowed host terminal";
+      throw new Error(
+        `Claude UDS is unavailable to this caller and host relay connection failed before delivery: ${error.message}. destination-attempted=false.${sandboxHint}`,
+      );
+    }
+  };
   const bridge = await claudeBridgeState(from);
   if (!bridge.running) {
-    throw new Error(`Claude bridge for ${from} is not running; run: cxmsg claude bridge start ${from}`);
+    if (bridge.status === "unreachable") {
+      await relaySend();
+      return;
+    }
+    throw new Error(`Claude bridge for ${from} is ${bridge.status}`);
   }
 
   const peer = resolveClaudePeer(await listClaudePeers(), target);
-  const frame = buildClaudePeerFrame({
-    fromSocket: bridge.record.socketPath,
-    fromName: `codex-${from}`,
-    fromSession: sourceRecord.threadId,
+  if (peer.status === "unreachable") {
+    await relaySend();
+    return;
+  }
+  let job = createClaudeDeliveryJob({
+    from,
+    sourceRecord,
+    peer,
     message,
   });
-  const delivery = await sendClaudePeerFrame(peer.socketPath, frame);
+  job = await sendClaudeDeliveryJob(bridge.record, sourceRecord, job);
+  if (job.status === "unreachable" && job.delivery?.errorCode === "EPERM") {
+    await relaySend(job.jobId);
+    return;
+  }
+  if (job.status !== "transport_delivered") {
+    throw new Error(
+      `Claude delivery ${job.jobId} failed: ${job.error || job.status}`,
+    );
+  }
   process.stdout.write(
-    `delivered ${delivery.messageId} from ${from} to Claude ${peer.name} (${peer.address})\n`,
+    `queued Claude delivery ${job.jobId} to ${peer.name} (transport_delivered, awaiting ACK)\n`,
   );
 }
 
@@ -965,6 +1136,40 @@ function commandClaudeGrants(codexTarget, jsonOutput) {
 async function commandClaudeRetry(jobId) {
   const job = readJob(jobId);
   if (!job) throw new Error(`unknown job: ${jobId}`);
+  if (job.kind === "claude-delivery") {
+    const sourceRecord = readSessionRecord(job.from);
+    if (!sourceRecord) throw new Error(`unknown Codex session: ${job.from}`);
+    const bridge = await claudeBridgeState(job.from);
+    let retried;
+    if (bridge.status === "unreachable") {
+      retried = await hostRelayRequest("/v1/claude/send", {
+        method: "POST",
+        body: {
+          from: job.from,
+          target: job.claudeTarget?.sessionId || job.target,
+          message: job.task,
+          jobId,
+        },
+      });
+      process.stdout.write(
+        `retried Claude delivery ${jobId} via host relay (${retried.status})\n`,
+      );
+      return;
+    }
+    if (!bridge.running) {
+      throw new Error(`Claude bridge for ${job.from} is ${bridge.status}`);
+    }
+    retried = await sendClaudeDeliveryJob(bridge.record, sourceRecord, job);
+    if (retried.status !== "transport_delivered") {
+      throw new Error(
+        `Claude delivery retry failed: ${retried.error || retried.status}`,
+      );
+    }
+    process.stdout.write(
+      `retried Claude delivery ${jobId} (attempt ${retried.delivery.attempt}, awaiting ACK)\n`,
+    );
+    return;
+  }
   if (job.kind !== "claude-request") {
     throw new Error(`job is not a Claude request: ${jobId}`);
   }
@@ -973,6 +1178,11 @@ async function commandClaudeRetry(jobId) {
   if (!targetRecord) throw new Error(`unknown Codex session: ${job.target}`);
   const bridge = await claudeBridgeState(job.target);
   if (!bridge.running) {
+    if (bridge.status === "unreachable") {
+      throw new Error(
+        `Claude bridge appears active, but this caller cannot connect to its UDS: ${bridge.socketProbe.error}. The current sandbox may prohibit Unix socket access`,
+      );
+    }
     throw new Error(
       `Claude bridge for ${job.target} is not running; run: cxmsg claude bridge start ${job.target}`,
     );
@@ -990,6 +1200,36 @@ async function commandClaudeRetry(jobId) {
   process.stdout.write(
     `delivered Claude response ${retried.reply.messageId} for job ${jobId}\n`,
   );
+}
+
+function commandClaudeDelivery(jobId, jsonOutput) {
+  let job = readJob(jobId);
+  if (!job || job.kind !== "claude-delivery") {
+    throw new Error(`unknown Claude delivery: ${jobId}`);
+  }
+  job = refreshClaudeDelivery(job);
+  const value = {
+    jobId: job.jobId,
+    from: job.from,
+    target: job.claudeTarget?.name || job.target,
+    status: job.status,
+    attempt: job.delivery?.attempt || 0,
+    maxAttempts: job.delivery?.maxAttempts || 0,
+    transportStatus: job.delivery?.transportStatus || null,
+    deliveredAt: job.delivery?.deliveredAt || null,
+    ackDeadlineAt: job.delivery?.ackDeadlineAt || null,
+    nextAttemptAt: job.delivery?.nextAttemptAt || null,
+    errorCode: job.delivery?.errorCode || null,
+    ack: job.ack || null,
+    wake: job.wake || null,
+    error: job.error || null,
+  };
+  if (jsonOutput) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
+  else {
+    process.stdout.write(
+      `${value.jobId}\t${value.status}\tattempt=${value.attempt}/${value.maxAttempts}\ttarget=${value.target}${value.errorCode ? `\terror=${value.errorCode}` : ""}\n`,
+    );
+  }
 }
 
 async function commandClaude(args) {
@@ -1020,6 +1260,15 @@ async function commandClaude(args) {
   }
   if (action === "retry") {
     await commandClaudeRetry(args[0]);
+    return;
+  }
+  if (action === "delivery") {
+    const jobId = args.shift();
+    const jsonOutput = args[0] === "--json";
+    if (args.length > (jsonOutput ? 1 : 0)) {
+      throw new Error(`unexpected option: ${args[0]}`);
+    }
+    commandClaudeDelivery(jobId, jsonOutput);
     return;
   }
   usage(2);
@@ -1393,6 +1642,9 @@ async function main() {
       break;
     case "web":
       await commandWeb(args);
+      break;
+    case "relay":
+      await commandRelay(args);
       break;
     case "claude":
       await commandClaude(args);

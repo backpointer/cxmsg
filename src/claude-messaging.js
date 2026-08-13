@@ -4,6 +4,12 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { processState } from "./process-state.js";
+import {
+  failedProbe,
+  healthyProbe,
+  isUnreachableProbe,
+  timeoutProbe,
+} from "./socket-probe.js";
 
 export const CLAUDE_SESSIONS_DIR = path.join(os.homedir(), ".claude", "sessions");
 export const CLAUDE_SOCKETS_DIR = path.join(path.sep, "tmp", "cc-socks");
@@ -176,21 +182,24 @@ export async function validateClaudeSocketPath(socketPath) {
 }
 
 export async function probeClaudeSocket(socketPath, timeoutMs = 250) {
+  let resolved;
   try {
-    const resolved = await validateClaudeSocketPath(socketPath);
-    return await new Promise((resolve) => {
-      const socket = net.createConnection({ path: resolved });
-      const finish = (live) => {
-        socket.destroy();
-        resolve(live);
-      };
-      socket.once("connect", () => finish(true));
-      socket.once("error", (error) => finish(error.code === "EBUSY"));
-      socket.setTimeout(timeoutMs, () => finish(false));
-    });
-  } catch {
-    return false;
+    resolved = await validateClaudeSocketPath(socketPath);
+  } catch (error) {
+    return failedProbe(error);
   }
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ path: resolved });
+    const finish = (probe) => {
+      socket.destroy();
+      resolve(probe);
+    };
+    socket.once("connect", () => finish(healthyProbe()));
+    socket.once("error", (error) =>
+      finish(error.code === "EBUSY" ? healthyProbe() : failedProbe(error)),
+    );
+    socket.setTimeout(timeoutMs, () => finish(timeoutProbe()));
+  });
 }
 
 export async function listClaudePeers({
@@ -212,22 +221,42 @@ export async function listClaudePeers({
         try {
           const pid = Number.parseInt(filename.slice(0, -5), 10);
           const record = JSON.parse(await fs.readFile(path.join(sessionsDir, filename), "utf8"));
+          const process = processStateFn(pid);
           if (
             record.pid !== pid ||
-            processStateFn(pid) === "missing" ||
+            process === "missing" ||
             record.entrypoint === "cxmsg" ||
             typeof record.messagingSocketPath !== "string" ||
-            path.basename(record.messagingSocketPath) !== `${pid}.sock` ||
-            !(await probeSocket(record.messagingSocketPath))
+            path.basename(record.messagingSocketPath) !== `${pid}.sock`
           ) {
             return null;
           }
+          const probe = await probeSocket(record.messagingSocketPath);
+          if (!probe || typeof probe === "boolean") {
+            if (!probe) return null;
+          } else if (!isUnreachableProbe(probe) && probe.state !== "healthy") {
+            return null;
+          }
+          const unreachable =
+            typeof probe === "object" && isUnreachableProbe(probe);
           return {
             pid,
             name: typeof record.name === "string" ? record.name : `claude-${pid}`,
             sessionId: typeof record.sessionId === "string" ? record.sessionId : null,
             cwd: typeof record.cwd === "string" ? record.cwd : null,
-            status: typeof record.status === "string" ? record.status : null,
+            status: unreachable
+              ? "unreachable"
+              : typeof record.status === "string"
+                ? record.status
+                : null,
+            sessionStatus:
+              typeof record.status === "string" ? record.status : null,
+            verification: unreachable
+              ? probe.state === "denied"
+                ? "sandbox-denied"
+                : "timeout"
+              : "socket",
+            errorCode: unreachable ? probe.errorCode : null,
             kind: typeof record.kind === "string" ? record.kind : null,
             peerProtocol: record.peerProtocol,
             socketPath: record.messagingSocketPath,

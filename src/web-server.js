@@ -65,6 +65,9 @@ function publicClaudePeer(peer) {
     sessionId: peer.sessionId,
     cwd: peer.cwd,
     status: peer.status,
+    sessionStatus: peer.sessionStatus,
+    verification: peer.verification,
+    errorCode: peer.errorCode,
     kind: peer.kind,
   };
 }
@@ -117,8 +120,14 @@ async function codexSessionSnapshot(client, record, profileCache) {
     delegators: [...(record.allowedDelegators || [])].sort(),
     claudeGrants: publicClaudeRequestGrants(record),
     bridge: {
+      status: bridge.status,
       running: bridge.running,
-      pid: bridge.running ? bridge.record.pid : null,
+      pid: bridge.record?.pid || null,
+      verification:
+        bridge.socketProbe?.state === "denied"
+          ? "sandbox-denied"
+          : bridge.socketProbe?.state || null,
+      errorCode: bridge.socketProbe?.errorCode || null,
     },
     permissionProfiles: profiles.map((profile) => ({
       id: profile.id,
@@ -154,16 +163,27 @@ export async function buildWebSnapshot({
   const managedServer = currentSocketPath === DEFAULT_SOCKET_PATH;
   const pid = managedServer ? readServerPid() : null;
   const socketPresent = existsSync(currentSocketPath);
-  const socketHealthy = await appServerProbe(currentSocketPath);
+  const socketProbe = await appServerProbe(currentSocketPath);
 
   return {
     generatedAt: new Date().toISOString(),
     server: {
-      running: socketHealthy,
+      status:
+        socketProbe.state === "healthy"
+          ? "running"
+          : socketProbe.state === "denied" || socketProbe.state === "timeout"
+            ? "unreachable"
+            : socketPresent
+              ? "unknown"
+              : "stopped",
+      running: socketProbe.state === "healthy",
       pid,
       transport: "unix",
       socketPresent,
-      socketHealthy,
+      socketHealthy: socketProbe.state === "healthy",
+      verification:
+        socketProbe.state === "denied" ? "sandbox-denied" : socketProbe.state,
+      errorCode: socketProbe.errorCode,
     },
     codexSessions: codexSessions.sort((left, right) =>
       left.name.localeCompare(right.name),

@@ -44,7 +44,7 @@ test("bridge identity handshake supports EPERM status and rejects mismatches", a
   });
   await fs.chmod(socketPath, 0o600);
   try {
-    assert.equal(await probeClaudeBridge(record), true);
+    assert.equal((await probeClaudeBridge(record)).state, "healthy");
     const state = await evaluateClaudeBridgeRecord(record, {
       processStateFn: () => "unverified",
     });
@@ -52,8 +52,8 @@ test("bridge identity handshake supports EPERM status and rejects mismatches", a
     assert.equal(state.safeToSignal, false);
     assert.equal(state.safeToRemove, false);
     assert.equal(
-      await probeClaudeBridge({ ...record, targetThreadId: "wrong-thread" }),
-      false,
+      (await probeClaudeBridge({ ...record, targetThreadId: "wrong-thread" })).state,
+      "invalid",
     );
   } finally {
     await new Promise((resolve) => server.close(resolve));

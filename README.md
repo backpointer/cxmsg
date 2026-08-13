@@ -228,6 +228,60 @@ cxmsg claude bridge start coordinator
 cxmsg claude bridge status coordinator
 ```
 
+If a managed sandbox can read the registry but cannot connect to local Unix
+sockets, start the authenticated host relay from an ordinary host terminal:
+
+```bash
+cxmsg relay start
+cxmsg relay status
+```
+
+The relay binds only to `127.0.0.1`, keeps its bearer capability in the
+mode-`0600` cxmsg state directory, and performs the same session, bridge,
+socket-owner, and target checks as direct delivery. `cxmsg claude send`
+automatically uses it only when direct UDS access is denied. If the sandbox
+also blocks loopback TCP, run the command through an allowed host tool; cxmsg
+does not weaken the sandbox or request broader agent permissions.
+
+### Codex host-side MCP
+
+When a Codex managed sandbox blocks both filesystem UDS and loopback TCP,
+configure cxmsg as a local stdio MCP server. Codex launches the MCP process as
+a host integration, so the model does not need to invoke the network-blocked
+shell CLI:
+
+```bash
+npm link
+codex mcp add cxmsg -- cxmsg-mcp
+```
+
+Restart the Codex client after changing MCP configuration. The server exposes
+three bounded tools:
+
+- `cxmsg_peers_list`: list Claude peers and their transport state without
+  invoking a model.
+- `cxmsg_send_peer`: send ordinary, user-authorized coordination text and
+  return a durable delivery ID.
+- `cxmsg_delivery_status`: read redacted transport, ACK, retry, and completion
+  metadata for that delivery ID.
+
+The MCP server uses stdio and opens no additional network listener. It reuses
+the existing cxmsg bridge, peer validation, message limits, durable delivery
+records, ACK handling, and retry policy. Its result distinguishes transport
+acceptance from model completion and reports whether the destination was
+actually attempted.
+
+These tools deliberately do not expose `grant`, `delegate`, approval, retry,
+or lifecycle operations. An MCP message is transport, not user authority, and
+cannot expand a target's permissions. Existing same-user trust boundaries
+still apply, so verify the source name, target session ID, cwd, and address
+before sending sensitive text.
+
+Use `codex mcp get cxmsg` to inspect the registration and
+`codex mcp remove cxmsg` to remove it. The loopback relay remains useful for
+callers that can reach `127.0.0.1`; the MCP path is intended for profiles that
+cannot reach either local socket transport.
+
 Claude's `ListPeers` now shows that bridge as `codex-coordinator`. Send a
 message from the Codex identity to a uniquely named live Claude session:
 
@@ -237,6 +291,57 @@ cxmsg claude send \
   claude-reviewer \
   "The migration is ready for review."
 ```
+
+The command now prints a durable delivery ID. Inspect or retry it with:
+
+```bash
+cxmsg claude delivery <delivery-id> --json
+cxmsg claude retry <delivery-id>
+```
+
+`transport_delivered` means the Claude UDS accepted the frame; it does not mean
+the Claude API completed a model turn. cxmsg wraps correlated deliveries with
+an ACK request. A cooperating Claude session replies to the message's `from`
+address with one of these envelopes:
+
+```text
+<cxmsg-ack in-reply-to="<delivery-id>" status="completed">
+brief result
+</cxmsg-ack>
+```
+
+For transient overloads it can report a bounded retry:
+
+```text
+<cxmsg-ack in-reply-to="<delivery-id>" status="retryable_error" code="529" retry-after="30">
+Overloaded
+</cxmsg-ack>
+```
+
+Statuses are `transport_delivered`, `acknowledged`, `completed`,
+`retry_scheduled`, `retryable_error`, `failed`, `ack_rejected`,
+`transport_error`, `unreachable`, and `ack_timeout`. A `429` or `529` ACK
+schedules exponential backoff with a maximum delay and attempt budget. Retries
+preserve the delivery correlation ID and record each transport message ID so
+the receiver can avoid duplicating work.
+
+ACK source verification requires both the stable session ID and exact UDS
+address when Claude supplies `from-session`. Native replies that omit that
+optional field fall back to an exact UDS address match. A mismatch is recorded
+immediately as `ack_rejected` with `source_mismatch`, using only presence flags
+and short hashes for identity evidence; it is not later misreported as an ACK
+timeout.
+
+The first valid `completed` or `failed` ACK also starts or steers one untrusted
+turn on the originating Codex thread, waking it with the correlated result.
+Duplicate terminal ACKs reuse the delivery ID as the App Server client message
+ID and do not start another turn. `accepted` and retryable ACKs update delivery
+state without waking Codex.
+
+Claude Code's local session registry currently exposes liveness and activity,
+not the model API response code. If an API failure prevents Claude from running
+at all, it cannot emit an ACK; cxmsg records `ack_timeout` and requires an
+explicit retry instead of blindly duplicating a possibly accepted task.
 
 If multiple Claude sessions share a display name, use the full session ID or
 the `uds:/tmp/cc-socks/<pid>.sock` address printed by `cxmsg claude peers`.
@@ -328,6 +433,13 @@ nonce to the registry record. A sandbox may deny `kill(pid, 0)` or `ps` with
 socket check succeeds. Destructive lifecycle operations remain stricter:
 `server stop`, `claude bridge stop`, and stale cleanup refuse to signal or
 remove an identity they cannot verify.
+
+Socket probes preserve their cause instead of returning a boolean. CLI and web
+state distinguish `running`, `unreachable`, `stopped`, `stale`, `unknown`, and
+`mismatched`. `EPERM` or a probe timeout with a valid registry and socket is
+reported as `unreachable` (`verification=sandbox-denied` or `timeout`), never
+as `stopped`. Unreachable peers remain visible with their session status and
+error code. Start, stop, signal, and stale cleanup remain fail-closed.
 
 The bridge transports text only. Incoming Claude text is converted to the same
 untrusted `additionalContext` used by `cxmsg send`, and an idle Codex turn still
@@ -585,10 +697,16 @@ sessions. A grant cannot exceed its stored permission profile or open an
 approval prompt. The bridge emits at most one automatic response per request ID
 and does not treat ordinary replies as new requests.
 
+The host relay token is also a same-user capability secret. Do not expose the
+relay beyond loopback, copy its state record into a repository, or pass its
+token on a command line. Stop it with `cxmsg relay stop` when host fallback is
+not needed.
+
 ## References
 
 - [Unlocking the Codex harness](https://openai.com/ko-KR/index/unlocking-the-codex-harness/)
 - [Codex App Server documentation](https://developers.openai.com/codex/app-server/)
+- [Codex MCP documentation](https://developers.openai.com/codex/mcp/)
 - [Codex App Server protocol README](https://github.com/openai/codex/blob/main/codex-rs/app-server/README.md)
 - [Claude Code cross-session messaging](https://blakecrosley.com/ko/blog/claude-code-cross-session-messaging)
 - [Claude Code session documentation](https://code.claude.com/docs/en/sessions)

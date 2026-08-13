@@ -30,10 +30,24 @@ export function processIdentity(
   };
 }
 
-export function serviceEvidence({ process, identity, socketHealthy }) {
+export function serviceEvidence({ process, identity, socketProbe, socketPresent }) {
+  const probeState = socketProbe?.state || "invalid";
+  let status;
+  if (identity === "mismatched") status = "mismatched";
+  else if (probeState === "healthy") status = "running";
+  else if (probeState === "denied" || probeState === "timeout") {
+    status = socketPresent ? "unreachable" : "unknown";
+  } else if (process === "missing" && !socketPresent) status = "stopped";
+  else if (probeState === "refused" && socketPresent) status = "stale";
+  else status = "unknown";
   return {
-    running: Boolean(socketHealthy),
-    safeToSignal: process === "alive" && identity === "matched",
-    safeToRemove: process === "missing" && !socketHealthy,
+    status,
+    running: status === "running",
+    reachable: probeState === "healthy",
+    safeToSignal:
+      status === "running" && process === "alive" && identity === "matched",
+    safeToRemove:
+      process === "missing" &&
+      (probeState === "missing" || (probeState === "refused" && socketPresent)),
   };
 }
