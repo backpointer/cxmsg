@@ -113,6 +113,31 @@ Stop the local server when no attached Codex session needs it:
 cxmsg server stop
 ```
 
+## Read-only diagnostics
+
+Run the bounded Doctor before changing runtime state:
+
+```bash
+cxmsg doctor
+cxmsg doctor --json
+cxmsg doctor --target worker
+cxmsg doctor --deep --target worker
+```
+
+The default pass uses only passive process, registry, file, socket metadata,
+Job, grant, bridge, and relay evidence. `--deep` additionally performs
+non-mutating App Server, Claude bridge, and host relay handshakes; resolves
+registered threads with `thread/read(includeTurns:false)`; and checks stored
+permission profile references. Neither mode sends a peer message, starts or
+steers a model turn, answers an approval request, changes a grant, signals a
+process, removes a record, or repairs state.
+
+Text output is intended for operators. Automation should use `--json` and the
+versioned [Doctor schema](docs/DOCTOR_SCHEMA_V1.md). Exit code `0` means
+`healthy`, `1` means `degraded` or `unhealthy`, and `2` means an invalid
+invocation or failure to construct a report. Doctor deliberately has no
+`--fix` option.
+
 Create a durable named session without attaching a TUI:
 
 ```bash
@@ -440,7 +465,11 @@ Thread activity checks use metadata-only `thread/read` plus bounded
 check status, steer a message, refresh a Job, or run mirror preflight. Redacted
 transport, ACK, timeout, and wake evidence is appended to the owner-only
 `~/.codex/cxmsg/events.jsonl`. These JSONL records contain correlation IDs and
-bounded state codes, not message bodies, full socket paths, or error text.
+bounded state codes, not message bodies, full socket paths, or error text. The
+active file is limited to 1 MiB and four owner-only archives are retained as
+`events.jsonl.1` through `events.jsonl.4`, bounding this evidence set to about
+5 MiB. Rotation and append share an owner-only lock; a logging failure never
+turns a successful message operation into a delivery failure.
 
 Status and ordinary delivery use an owner-only UDS health check. The cxmsg
 bridge health response binds its target, thread, PID, start time, and a fresh
@@ -727,6 +756,7 @@ not needed.
 
 - [Busy delivery, scheduling, and doctor improvement plan](docs/BUSY_SCHEDULING_DOCTOR.md)
 - [Coordination graph and conversation plan](docs/COORDINATION_GRAPH_CONVERSATIONS.md)
+- [Doctor JSON schema v1](docs/DOCTOR_SCHEMA_V1.md)
 - [Domain language](CONTEXT.md)
 
 ## References

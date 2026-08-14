@@ -54,6 +54,11 @@ import {
 import { replyToClaudeRequest } from "../src/claude-requests.js";
 import { decideApproval } from "../src/approvals.js";
 import {
+  doctorExitCode,
+  renderDoctorText,
+  runDoctor,
+} from "../src/doctor.js";
+import {
   APPROVAL_MODES,
   EXECUTION_MODES,
   MIRROR_MODES,
@@ -124,6 +129,7 @@ function usage(exitCode = 0) {
   cxmsg grant <sender> <target>
   cxmsg revoke <sender> <target>
   cxmsg permissions <target> [--json]
+  cxmsg doctor [--json] [--deep] [--target <session-name>]
   cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|inline]
                  [--approval never|relay|auto] [--approval-timeout <seconds>]
                  [--mirror none|summary|full] <target> <task...>
@@ -1618,6 +1624,41 @@ async function commandSend(args) {
   );
 }
 
+async function commandDoctor(args) {
+  let deep = false;
+  let jsonOutput = false;
+  let target = null;
+  while (args.length) {
+    const option = args.shift();
+    if (option === "--deep") deep = true;
+    else if (option === "--json") jsonOutput = true;
+    else if (option === "--target") {
+      try {
+        target = validateSessionName(args.shift());
+      } catch (error) {
+        error.exitCode = 2;
+        throw error;
+      }
+    } else {
+      const error = new Error(`unknown doctor option: ${option}`);
+      error.exitCode = 2;
+      throw error;
+    }
+  }
+
+  let report;
+  try {
+    report = await runDoctor({ deep, target });
+  } catch (error) {
+    error.exitCode = 2;
+    throw error;
+  }
+  process.stdout.write(
+    jsonOutput ? `${JSON.stringify(report, null, 2)}\n` : renderDoctorText(report),
+  );
+  process.exitCode = doctorExitCode(report);
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
@@ -1662,6 +1703,9 @@ async function main() {
     case "permissions":
       await commandPermissions(args[0], args.includes("--json"));
       break;
+    case "doctor":
+      await commandDoctor(args);
+      break;
     case "delegate":
       await commandDelegate(args);
       break;
@@ -1701,5 +1745,5 @@ async function main() {
 
 main().catch((error) => {
   process.stderr.write(`cxmsg: ${error.message}\n`);
-  process.exitCode = 1;
+  process.exitCode = error.exitCode || 1;
 });

@@ -483,6 +483,13 @@ when the experimental App Server protocol changes.
 - ship read-only runtime, filesystem, Job, bridge, relay, and transport checks;
 - establish the evidence vocabulary reused by Directory and Ledger.
 
+Initial implementation is complete for the existing runtime state: bounded
+Inspector Interfaces cover runtime, filesystem, Job, attachment, permission,
+bridge, relay, App Server, and metadata-only registered-thread evidence.
+`cxmsg doctor` exposes the stable redacted v1 report and exit codes without a
+Repair path. Schedule, Directory, Ledger, Conversation, and projection checks
+remain assigned to their later canonical phases.
+
 ### Phase 2: Turn Lifecycle and shared durable primitives
 
 - surface App Server lifecycle notifications;

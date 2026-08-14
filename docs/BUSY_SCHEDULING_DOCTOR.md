@@ -552,8 +552,31 @@ The initial Phase 0 slice is implemented and tested against `codex-cli 0.147.0`:
 - empty bridge probes are silent, and bridge handler activity is stored
   separately from advertised bridge availability.
 
-The remaining canonical phases are still proposals and must not be inferred as
-implemented from this status.
+The structured event log now rotates at 1 MiB and retains four owner-only
+archives, closing the remaining unbounded Phase 0 evidence path.
+
+### Phase 1 implementation status
+
+The initial immutable inspection and Doctor foundation is implemented:
+
+- `cxmsg doctor`, `--json`, `--target`, and `--deep` follow the stable v1
+  report and exit-code contract;
+- Inspector Interfaces scan bounded owner/type/mode metadata and validate
+  session, attachment, Job, bridge, relay, grant, and permission references
+  without using mutating refresh or cleanup paths;
+- passive process evidence remains separate from deep App Server, Claude
+  bridge, and host relay handshakes;
+- `EPERM`, missing workers, identity mismatch, malformed or symlink records,
+  legacy Jobs, overdue ACKs, and unreconciled reply wakes retain distinct
+  findings;
+- deep thread checks use metadata-only `thread/read(includeTurns:false)` and
+  start zero model turns;
+- text and JSON renderers consume the same redacted finding model, and the
+  versioned schema is documented in `docs/DOCTOR_SCHEMA_V1.md`.
+
+Repair and Scheduled Delivery checks remain intentionally absent or skipped.
+Canonical Phases 2–7 remain proposals and must not be inferred as implemented
+from this status.
 
 ## Acceptance tests
 

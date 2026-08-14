@@ -22,6 +22,18 @@ malicious process running as that user.
 - Session rollouts and `~/.codex/cxmsg/` runtime state can contain sensitive
   prompts, results, paths, and tokens. Never commit or publish them.
 
+The Doctor Module is read-only. Default and `--deep` diagnosis must not signal
+processes, delete or rewrite records, start model turns, grant authority,
+change permission profiles, or answer approvals. An `unknown` or
+`sandbox-denied` finding is not permission to weaken a sandbox or perform
+cleanup. Doctor output omits message, task, result, error-body, approval-body,
+capability-token, and full socket-path data.
+
+Redacted coordination events are stored in an owner-only segmented JSONL set:
+one 1 MiB active segment and four retained archives. Rotation uses an
+owner-only lock. The event set is operational evidence rather than a complete
+conversation history and must not be copied into a repository.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

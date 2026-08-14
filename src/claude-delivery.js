@@ -104,7 +104,7 @@ export async function createClaudeDeliveryJob({
     ack: null,
     ackTimeoutSeconds,
   });
-  writeCoordinationEvent({
+  await writeCoordinationEvent({
     kind: "claude-delivery",
     phase: "created",
     correlationId: job.jobId,
@@ -151,7 +151,7 @@ export async function sendClaudeDeliveryJob(
   const messageId = randomUUID();
   const attemptedAt = new Date().toISOString();
   const attempt = (current.delivery?.attempt || 0) + 1;
-  log({
+  await log({
     kind: "claude-delivery",
     phase: "transport-attempt",
     correlationId: current.jobId,
@@ -187,7 +187,7 @@ export async function sendClaudeDeliveryJob(
         errorCode: null,
       },
     });
-    log({
+    await log({
       kind: "claude-delivery",
       phase: "transport",
       correlationId: delivered.jobId,
@@ -210,7 +210,7 @@ export async function sendClaudeDeliveryJob(
         errorCode: error?.code || null,
       },
     });
-    log({
+    await log({
       kind: "claude-delivery",
       phase: "transport",
       correlationId: failed.jobId,
@@ -230,7 +230,7 @@ export async function recordClaudeDeliveryAck(
 ) {
   const job = readJob(ack.jobId);
   if (!job || job.kind !== "claude-delivery") return null;
-  log({
+  await log({
     kind: "claude-delivery",
     phase: "ack-ingress",
     correlationId: job.jobId,
@@ -336,7 +336,7 @@ export async function recordClaudeDeliveryAck(
     };
   });
   if (rejection) {
-    log({
+    await log({
       kind: "claude-delivery",
       phase: "ack-source-validation",
       correlationId: job.jobId,
@@ -348,7 +348,7 @@ export async function recordClaudeDeliveryAck(
     });
     throw rejection;
   }
-  log({
+  await log({
     kind: "claude-delivery",
     phase: "ack-persisted",
     correlationId: updated.jobId,
@@ -374,7 +374,7 @@ export async function refreshClaudeDelivery(
       status: "ack_timeout",
       error: "Claude did not acknowledge the delivery before its deadline",
     });
-    log({
+    await log({
       kind: "claude-delivery",
       phase: "ack-deadline",
       correlationId: timedOut.jobId,

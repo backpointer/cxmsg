@@ -285,7 +285,7 @@ export async function handleClaudeDeliveryAck(
     return delivery;
   }
 
-  log({
+  await log({
     kind: "claude-delivery",
     phase: "wake-attempt",
     correlationId: delivery.jobId,
@@ -312,7 +312,7 @@ export async function handleClaudeDeliveryAck(
         error: null,
       },
     }));
-    log({
+    await log({
       kind: "claude-delivery",
       phase: "wake",
       correlationId: reconciled.jobId,
@@ -332,7 +332,7 @@ export async function handleClaudeDeliveryAck(
         error: error.message,
       },
     }));
-    log({
+    await log({
       kind: "claude-delivery",
       phase: "wake",
       correlationId: delivery.jobId,
