@@ -132,6 +132,10 @@ Inspect redacted identity metadata:
 cxmsg directory projects --json
 cxmsg directory nodes --json
 cxmsg directory node show codex <thread-id> --json
+cxmsg directory node tombstone codex <thread-id> --reason session-retired
+cxmsg directory successor add codex <old-thread-id> codex <new-thread-id>
+cxmsg directory tombstones --json
+cxmsg directory successors --json
 ```
 
 Project paths are omitted by default. `directory projects --paths` and
@@ -140,6 +144,22 @@ The stable Node key is `(runtime kind, native ID)`, encoded as
 `codex:<thread-id>` or `claude:<session-id>`; names are mutable aliases.
 Endpoint PID, UDS address, App Server presentation name, status, and generation
 remain volatile evidence and are not Node identity.
+
+Removing a registered Codex session creates a reduced Node Tombstone when that
+Node is present in the Directory. Operators can also Tombstone a retired Node
+explicitly. A Tombstone retains only stable identity, Project identity, last
+safe label, reason, and removal time; it prevents `directory sync` from
+automatically recreating that Node. Interrupted transitions that leave both a
+live Node and Tombstone are reported by `cxmsg doctor` and are never repaired
+automatically. Ordinary routed and legacy-unbound sends to a Tombstoned Node
+are quarantined before model-context injection.
+
+A successor relation is an explicit one-way link from an old Node to a live
+same-Project Node. Each successor has at most one predecessor and cycles are
+rejected. The link retains lifecycle provenance only: it does not transfer a
+grant, permission profile, role, Conversation membership, pending message, or
+authority. cxmsg never infers successors from a reused name, path, PID, socket,
+or restart.
 
 When a Directory Project exists, `cxmsg route bind` also pins the binding to
 the private Project UUID and stable Codex Node key. Reusing the same routing

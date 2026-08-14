@@ -8,6 +8,7 @@ import {
   readdirSync,
   realpathSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -17,6 +18,12 @@ import { CXMSG_STATE_DIR } from "./runtime.js";
 export const NODE_DIRECTORY_DIR = path.join(CXMSG_STATE_DIR, "directory");
 export const NODES_DIR = path.join(NODE_DIRECTORY_DIR, "nodes");
 export const PROJECTS_DIR = path.join(NODE_DIRECTORY_DIR, "projects");
+export const NODE_TOMBSTONES_DIR = path.join(
+  NODE_DIRECTORY_DIR,
+  "tombstones",
+  "nodes",
+);
+export const SUCCESSORS_DIR = path.join(NODE_DIRECTORY_DIR, "successors");
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -28,6 +35,23 @@ const ENDPOINT_STATUSES = new Set([
   "stale",
   "unknown",
   "mismatched",
+]);
+const NODE_TOMBSTONE_FIELDS = new Set([
+  "version",
+  "nodeKey",
+  "runtimeKind",
+  "nativeId",
+  "projectId",
+  "lastSafeLabel",
+  "removedAt",
+  "reason",
+]);
+const SUCCESSOR_FIELDS = new Set([
+  "version",
+  "predecessorNodeKey",
+  "successorNodeKey",
+  "projectId",
+  "linkedAt",
 ]);
 
 function validateUuid(label, value) {
@@ -101,6 +125,30 @@ function nodePath(runtimeKind, nativeId) {
   return path.join(NODES_DIR, nodeFilename(runtimeKind, nativeId));
 }
 
+function nodeTombstonePath(runtimeKind, nativeId) {
+  return path.join(NODE_TOMBSTONES_DIR, nodeFilename(runtimeKind, nativeId));
+}
+
+function parseNodeKey(identity) {
+  const match = /^(codex|claude):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.exec(
+    identity || "",
+  );
+  if (!match) throw new Error("Node key must contain a runtime kind and UUID");
+  return {
+    runtimeKind: validateRuntimeKind(match[1].toLowerCase()),
+    nativeId: validateUuid("native id", match[2]).toLowerCase(),
+  };
+}
+
+function successorFilename(successorNodeKey) {
+  const { runtimeKind, nativeId } = parseNodeKey(successorNodeKey);
+  return `${runtimeKind}--${nativeId}.json`;
+}
+
+function successorPath(successorNodeKey) {
+  return path.join(SUCCESSORS_DIR, successorFilename(successorNodeKey));
+}
+
 function projectPath(projectId) {
   return path.join(PROJECTS_DIR, `${validateUuid("project id", projectId)}.json`);
 }
@@ -165,6 +213,40 @@ function validNode(record) {
           ENDPOINT_STATUSES.has(endpoint.status),
       ),
   );
+}
+
+function validNodeTombstone(record) {
+  return Boolean(
+    record?.version === 1 &&
+      RUNTIME_KINDS.has(record.runtimeKind) &&
+      UUID_PATTERN.test(record.nativeId || "") &&
+      record.nodeKey === nodeKey(record.runtimeKind, record.nativeId) &&
+      UUID_PATTERN.test(record.projectId || "") &&
+      IDENTIFIER_PATTERN.test(record.lastSafeLabel || "") &&
+      IDENTIFIER_PATTERN.test(record.reason || "") &&
+      Number.isFinite(Date.parse(record.removedAt || "")) &&
+      Object.keys(record).every((field) => NODE_TOMBSTONE_FIELDS.has(field)),
+  );
+}
+
+function validSuccessor(record) {
+  if (
+    record?.version !== 1 ||
+    !UUID_PATTERN.test(record.projectId || "") ||
+    !Number.isFinite(Date.parse(record.linkedAt || ""))
+  ) {
+    return false;
+  }
+  try {
+    parseNodeKey(record.predecessorNodeKey);
+    parseNodeKey(record.successorNodeKey);
+    return (
+      record.predecessorNodeKey !== record.successorNodeKey &&
+      Object.keys(record).every((field) => SUCCESSOR_FIELDS.has(field))
+    );
+  } catch {
+    return false;
+  }
 }
 
 export function readProject(projectId) {
@@ -288,6 +370,56 @@ export function listNodes() {
     .filter(validNode);
 }
 
+export function readNodeTombstone(runtimeKind, nativeId) {
+  const record = readJson(nodeTombstonePath(runtimeKind, nativeId));
+  return validNodeTombstone(record) ? record : null;
+}
+
+export function listNodeTombstones() {
+  if (!existsSync(NODE_TOMBSTONES_DIR)) return [];
+  return readdirSync(NODE_TOMBSTONES_DIR)
+    .filter((name) => /^(?:codex|claude)--[0-9a-f-]{36}\.json$/i.test(name))
+    .sort()
+    .map((name) => readJson(path.join(NODE_TOMBSTONES_DIR, name)))
+    .filter(validNodeTombstone);
+}
+
+export function readSuccessor(successorNodeKey) {
+  const identity = parseNodeKey(successorNodeKey);
+  const normalized = nodeKey(identity.runtimeKind, identity.nativeId);
+  const record = readJson(successorPath(normalized));
+  return validSuccessor(record) && record.successorNodeKey === normalized
+    ? record
+    : null;
+}
+
+export function listSuccessors() {
+  if (!existsSync(SUCCESSORS_DIR)) return [];
+  return readdirSync(SUCCESSORS_DIR)
+    .filter((name) => /^(?:codex|claude)--[0-9a-f-]{36}\.json$/i.test(name))
+    .sort()
+    .map((name) => readJson(path.join(SUCCESSORS_DIR, name)))
+    .filter(validSuccessor);
+}
+
+function nodeOrTombstone(identity) {
+  const { runtimeKind, nativeId } = parseNodeKey(identity);
+  const live = readNode(runtimeKind, nativeId);
+  const tombstone = readNodeTombstone(runtimeKind, nativeId);
+  if (existsSync(nodePath(runtimeKind, nativeId)) && !live) {
+    throw new Error(`Node record failed schema validation: ${identity}`);
+  }
+  if (existsSync(nodeTombstonePath(runtimeKind, nativeId)) && !tombstone) {
+    throw new Error(`Node Tombstone failed schema validation: ${identity}`);
+  }
+  if (live && tombstone) {
+    throw new Error(
+      `Node is both live and tombstoned: ${identity}; Doctor inspection is required`,
+    );
+  }
+  return live || tombstone;
+}
+
 function normalizeEndpoint(nodeIdentity, endpoint) {
   if (!endpoint) return null;
   const transport = validateIdentifier("endpoint transport", endpoint.transport);
@@ -324,6 +456,14 @@ export async function upsertNode({
   const candidate = normalizeEndpoint(identity, endpoint);
   ensureDirectory(NODES_DIR);
   return withFileLock(path.join(NODES_DIR, `${identity.replace(":", "--")}.lock`), async () => {
+    const tombstone = readNodeTombstone(runtimeKind, nativeId);
+    if (tombstone || existsSync(nodeTombstonePath(runtimeKind, nativeId))) {
+      throw new Error(
+        tombstone
+          ? "Node is tombstoned; automatic reactivation is forbidden"
+          : "Node Tombstone exists but failed schema validation",
+      );
+    }
     const current = readNode(runtimeKind, nativeId);
     if (!current && existsSync(nodePath(runtimeKind, nativeId))) {
       throw new Error("Node record exists but failed schema validation");
@@ -370,6 +510,138 @@ export async function upsertNode({
   });
 }
 
+export async function tombstoneNode(
+  runtimeKind,
+  nativeId,
+  { reason = "explicit", missingOk = false } = {},
+) {
+  const identity = nodeKey(runtimeKind, nativeId);
+  validateIdentifier("Tombstone reason", reason);
+  ensureDirectory(NODES_DIR);
+  ensureDirectory(NODE_TOMBSTONES_DIR);
+  return withFileLock(
+    path.join(NODES_DIR, `${identity.replace(":", "--")}.lock`),
+    async () => {
+      const current = readNode(runtimeKind, nativeId);
+      const tombstone = readNodeTombstone(runtimeKind, nativeId);
+      const liveExists = existsSync(nodePath(runtimeKind, nativeId));
+      const tombstoneExists = existsSync(nodeTombstonePath(runtimeKind, nativeId));
+      if (liveExists && !current) {
+        throw new Error("Node record exists but failed schema validation");
+      }
+      if (tombstoneExists && !tombstone) {
+        throw new Error("Node Tombstone exists but failed schema validation");
+      }
+      if (current && tombstone) {
+        throw new Error("Node is both live and tombstoned; Doctor inspection is required");
+      }
+      if (tombstone) return tombstone;
+      if (!current) {
+        if (missingOk) return null;
+        throw new Error(`unknown Directory Node: ${identity}`);
+      }
+      const removed = atomicWrite(
+        NODE_TOMBSTONES_DIR,
+        nodeFilename(runtimeKind, nativeId),
+        {
+          version: 1,
+          nodeKey: identity,
+          runtimeKind,
+          nativeId: nativeId.toLowerCase(),
+          projectId: current.projectId,
+          lastSafeLabel: IDENTIFIER_PATTERN.test(
+            current.aliases.at(-1)?.value || "",
+          )
+            ? current.aliases.at(-1).value
+            : identity,
+          removedAt: new Date().toISOString(),
+          reason,
+        },
+      );
+      unlinkSync(nodePath(runtimeKind, nativeId));
+      return removed;
+    },
+  );
+}
+
+export async function addSuccessor({ predecessorNodeKey, successorNodeKey }) {
+  const predecessorIdentity = parseNodeKey(predecessorNodeKey);
+  const successorIdentity = parseNodeKey(successorNodeKey);
+  predecessorNodeKey = nodeKey(
+    predecessorIdentity.runtimeKind,
+    predecessorIdentity.nativeId,
+  );
+  successorNodeKey = nodeKey(
+    successorIdentity.runtimeKind,
+    successorIdentity.nativeId,
+  );
+  if (predecessorNodeKey === successorNodeKey) {
+    throw new Error("A Node cannot be its own successor");
+  }
+  ensureDirectory(SUCCESSORS_DIR);
+  return withFileLock(path.join(NODE_DIRECTORY_DIR, "successors.lock"), async () => {
+    const predecessor = nodeOrTombstone(predecessorNodeKey);
+    if (!predecessor) throw new Error(`unknown predecessor Node: ${predecessorNodeKey}`);
+    const successor = readNode(
+      successorIdentity.runtimeKind,
+      successorIdentity.nativeId,
+    );
+    const successorTombstone = readNodeTombstone(
+      successorIdentity.runtimeKind,
+      successorIdentity.nativeId,
+    );
+    if (
+      existsSync(
+        nodeTombstonePath(
+          successorIdentity.runtimeKind,
+          successorIdentity.nativeId,
+        ),
+      ) &&
+      !successorTombstone
+    ) {
+      throw new Error(
+        `Successor Node Tombstone failed schema validation: ${successorNodeKey}`,
+      );
+    }
+    if (successor && successorTombstone) {
+      throw new Error(
+        `Successor Node is both live and tombstoned: ${successorNodeKey}`,
+      );
+    }
+    if (!successor) throw new Error(`successor Node is not live: ${successorNodeKey}`);
+    if (predecessor.projectId !== successor.projectId) {
+      throw new Error("Successor Nodes must belong to the same Project");
+    }
+    const existing = readSuccessor(successorNodeKey);
+    if (existing) {
+      if (existing.predecessorNodeKey === predecessorNodeKey) return existing;
+      throw new Error("Successor Node already has another predecessor");
+    }
+    if (existsSync(successorPath(successorNodeKey))) {
+      throw new Error("Successor record exists but failed schema validation");
+    }
+    let cursor = predecessorNodeKey;
+    const visited = new Set();
+    while (cursor) {
+      if (cursor === successorNodeKey) {
+        throw new Error("Successor relation would create a cycle");
+      }
+      if (visited.has(cursor)) {
+        throw new Error("Existing successor records contain a cycle");
+      }
+      visited.add(cursor);
+      cursor = readSuccessor(cursor)?.predecessorNodeKey || null;
+    }
+    return atomicWrite(SUCCESSORS_DIR, successorFilename(successorNodeKey), {
+      version: 1,
+      predecessorNodeKey,
+      successorNodeKey,
+      projectId: successor.projectId,
+      linkedAt: new Date().toISOString(),
+    });
+  });
+}
+
 export function publicProject(record, { includePaths = false } = {}) {
   if (!validProject(record)) throw new Error("invalid Project record");
   return {
@@ -402,5 +674,32 @@ export function publicNode(record, { includeEndpoints = false } = {}) {
     ...(includeEndpoints ? { selectedEndpoints: record.selectedEndpoints } : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+  };
+}
+
+export function publicNodeTombstone(record) {
+  if (!validNodeTombstone(record)) {
+    throw new Error("invalid Node Tombstone record");
+  }
+  return {
+    version: record.version,
+    nodeKey: record.nodeKey,
+    runtimeKind: record.runtimeKind,
+    nativeId: record.nativeId,
+    projectId: record.projectId,
+    lastSafeLabel: record.lastSafeLabel,
+    removedAt: record.removedAt,
+    reason: record.reason,
+  };
+}
+
+export function publicSuccessor(record) {
+  if (!validSuccessor(record)) throw new Error("invalid successor record");
+  return {
+    version: record.version,
+    predecessorNodeKey: record.predecessorNodeKey,
+    successorNodeKey: record.successorNodeKey,
+    projectId: record.projectId,
+    linkedAt: record.linkedAt,
   };
 }

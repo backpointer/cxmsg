@@ -564,11 +564,19 @@ transport. Default CLI and Doctor projections redact Project paths and Endpoint
 addresses. Directory-aware Route Bindings pin the private Project UUID and
 stable Codex Node key in addition to the routing label and thread ID.
 
-This first slice deliberately has no automatic Project merge or move, Node
-successor inference, Endpoint history retention, Tombstone mutation, Cluster,
-or web projection. An older Endpoint generation is rejected and an equal
-generation with conflicting identity fails closed. Those omitted lifecycle
-transitions require explicit records and tests in the remaining Phase 3 work.
+The next lifecycle slice is also implemented. Explicit Node removal creates a
+minimal Tombstone, automatic synchronization cannot resurrect that identity,
+and an interrupted live-plus-Tombstone transition is left for read-only Doctor
+inspection. Explicit same-Project `successor-of` records accept only one
+predecessor per successor and reject cycles. A successor carries no automatic
+role, grant, permission, Conversation, Delivery, or authority inheritance.
+
+Phase 3 still has no automatic Project merge or move, successor inference,
+Endpoint history retention, Cluster, or web projection. Execution Thread
+classification remains separate from addressable Node synchronization. An
+older Endpoint generation is rejected and an equal generation with conflicting
+identity fails closed. Those omitted lifecycle transitions require explicit
+records and tests in the remaining Phase 3 work.
 
 ### Phase 4: Delivery Ledger and scheduling
 

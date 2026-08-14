@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, unlinkSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -103,5 +103,58 @@ test("a routing label cannot silently replace the bound private Project identity
     },
   );
   assert.equal(outcome.reason, "project_identity_mismatch");
+  assert.equal(dispatches, 0);
+});
+
+test("a Tombstoned Directory Node is quarantined before context injection", async () => {
+  routes.writeRouteBinding({
+    sessionName: "worker",
+    threadId,
+    projectId: "hermes",
+    projectKey: projectId,
+    nodeKey: `codex:${threadId}`,
+    role: "auditor",
+  });
+  await directory.tombstoneNode("codex", threadId, {
+    reason: "session-retired",
+  });
+  let dispatches = 0;
+  const retiredMessageId = "a2345678-1234-4234-8234-123456789abc";
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "unbound-sender",
+      target: "worker",
+      message: "must not enter retired context",
+      route: {
+        schema_version: 1,
+        project_id: "hermes",
+        target_role: "auditor",
+        logical_message_id: retiredMessageId,
+      },
+      logicalMessageId: retiredMessageId,
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+  );
+  assert.equal(outcome.reason, "target_node_retired");
+  assert.equal(dispatches, 0);
+
+  unlinkSync(path.join(routes.ROUTE_BINDINGS_DIR, "worker.json"));
+  const unboundMessageId = "b2345678-1234-4234-8234-123456789abc";
+  const unbound = await routes.routePeerMessage(
+    {
+      from: "unbound-sender",
+      target: "worker",
+      message: "legacy compatibility must not resurrect a retired Node",
+      logicalMessageId: unboundMessageId,
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+  );
+  assert.equal(unbound.reason, "target_node_retired");
   assert.equal(dispatches, 0);
 });

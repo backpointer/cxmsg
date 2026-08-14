@@ -10,7 +10,9 @@ const projectRoot = mkdtempSync(path.join(os.tmpdir(), "cxmsg-directory-cli-root
 const canonicalProjectRoot = realpathSync(projectRoot);
 process.env.CXMSG_STATE_DIR = stateDir;
 const registry = await import(`../src/registry.js?directory-cli=${Date.now()}`);
+const directory = await import(`../src/node-directory.js?directory-cli=${Date.now()}`);
 const threadId = "42345678-1234-4234-8234-123456789abc";
+const successorThreadId = "52345678-1234-4234-8234-123456789abc";
 registry.writeSessionRecord({
   name: "worker",
   threadId,
@@ -96,4 +98,54 @@ test("route binding adopts stable Directory Project and Node references", () => 
   );
   assert.equal(node.status, 0, node.stderr);
   assert.equal(JSON.parse(node.stdout).nodeKey, binding.nodeKey);
+});
+
+test("Directory CLI exposes explicit Tombstone and successor lifecycle", async () => {
+  const project = directory.findProjectByRoutingId("hermes");
+  await directory.upsertNode({
+    runtimeKind: "codex",
+    nativeId: successorThreadId,
+    displayName: "successor",
+    projectId: project.projectId,
+  });
+
+  const tombstoned = cxmsg(
+    "directory",
+    "node",
+    "tombstone",
+    "codex",
+    threadId,
+    "--reason",
+    "session-removed",
+    "--json",
+  );
+  assert.equal(tombstoned.status, 0, tombstoned.stderr);
+  const tombstone = JSON.parse(tombstoned.stdout);
+  assert.equal(tombstone.nodeKey, `codex:${threadId}`);
+  assert.equal("selectedEndpoints" in tombstone, false);
+
+  const linked = cxmsg(
+    "directory",
+    "successor",
+    "add",
+    "codex",
+    threadId,
+    "codex",
+    successorThreadId,
+    "--json",
+  );
+  assert.equal(linked.status, 0, linked.stderr);
+  assert.equal(
+    JSON.parse(linked.stdout).successorNodeKey,
+    `codex:${successorThreadId}`,
+  );
+
+  const tombstones = cxmsg("directory", "tombstones", "--json");
+  assert.equal(tombstones.status, 0, tombstones.stderr);
+  assert.equal(JSON.parse(tombstones.stdout).length, 1);
+  assert.doesNotMatch(tombstones.stdout, /app-server:/);
+
+  const successors = cxmsg("directory", "successors", "--json");
+  assert.equal(successors.status, 0, successors.stderr);
+  assert.equal(JSON.parse(successors.stdout).length, 1);
 });

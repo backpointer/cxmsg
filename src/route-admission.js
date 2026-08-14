@@ -15,6 +15,8 @@ import { MAX_STORED_MESSAGE_BYTES } from "./message-bodies.js";
 import {
   findProjectByRoutingId,
   nodeKey as directoryNodeKey,
+  readNode,
+  readNodeTombstone,
 } from "./node-directory.js";
 import { writeCoordinationEvent } from "./observability.js";
 import { readSessionRecord } from "./registry.js";
@@ -205,6 +207,12 @@ function admission(
   }
   const binding = bindingState.record;
   const senderBinding = senderBindingState.record;
+  if (senderRecord && readNodeTombstone("codex", senderRecord.threadId)) {
+    return { state: "quarantined", reason: "sender_node_retired" };
+  }
+  if (targetRecord && readNodeTombstone("codex", targetRecord.threadId)) {
+    return { state: "quarantined", reason: "target_node_retired" };
+  }
   if (route?.sender_role) {
     if (senderBindingState.state === "invalid") {
       return { state: "quarantined", reason: "sender_binding_invalid" };
@@ -220,6 +228,21 @@ function admission(
       senderBinding.nodeKey !== directoryNodeKey("codex", senderRecord.threadId)
     ) {
       return { state: "quarantined", reason: "sender_node_mismatch" };
+    }
+    if (senderBinding.nodeKey) {
+      if (readNodeTombstone("codex", senderRecord.threadId)) {
+        return { state: "quarantined", reason: "sender_node_retired" };
+      }
+      const senderNode = readNode("codex", senderRecord.threadId);
+      if (!senderNode) {
+        return { state: "quarantined", reason: "sender_node_missing" };
+      }
+      if (
+        senderBinding.projectKey &&
+        senderNode.projectId !== senderBinding.projectKey
+      ) {
+        return { state: "quarantined", reason: "sender_project_identity_mismatch" };
+      }
     }
     if (senderBinding.projectId !== route.project_id) {
       return { state: "quarantined", reason: "sender_project_mismatch" };
@@ -240,6 +263,15 @@ function admission(
     binding.nodeKey !== directoryNodeKey("codex", targetRecord.threadId)
   ) {
     return { state: "quarantined", reason: "target_node_mismatch" };
+  }
+  if (targetRecord && binding.nodeKey) {
+    const targetNode = readNode("codex", targetRecord.threadId);
+    if (!targetNode) {
+      return { state: "quarantined", reason: "target_node_missing" };
+    }
+    if (binding.projectKey && targetNode.projectId !== binding.projectKey) {
+      return { state: "quarantined", reason: "project_identity_mismatch" };
+    }
   }
   if (!route) return { state: "quarantined", reason: "missing_route" };
   if (route.project_id !== binding.projectId) {

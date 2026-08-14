@@ -98,14 +98,21 @@ import {
   readMessageBody,
 } from "../src/message-bodies.js";
 import {
+  addSuccessor,
   ensureProject,
   findProjectByRoutingId,
+  listNodeTombstones,
   listNodes,
   listProjects,
+  listSuccessors,
+  nodeKey,
   projectContainsPath,
   publicNode,
+  publicNodeTombstone,
   publicProject,
+  publicSuccessor,
   readNode,
+  tombstoneNode,
   upsertNode,
 } from "../src/node-directory.js";
 import {
@@ -162,6 +169,10 @@ function usage(exitCode = 0) {
   cxmsg directory projects [--json] [--paths]
   cxmsg directory nodes [--json] [--endpoints]
   cxmsg directory node show <codex|claude> <native-id> [--json] [--endpoints]
+  cxmsg directory node tombstone <codex|claude> <native-id> [--reason <id>] [--json]
+  cxmsg directory tombstones [--json]
+  cxmsg directory successor add <codex|claude> <native-id> <codex|claude> <native-id> [--json]
+  cxmsg directory successors [--json]
   cxmsg message info <message-id|content-ref> [--json]
   cxmsg message show <message-id|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -672,6 +683,10 @@ async function commandRemove(name) {
     }
   });
   removeSessionRecord(name);
+  await tombstoneNode("codex", record.threadId, {
+    reason: "session-removed",
+    missingOk: true,
+  });
   process.stdout.write(`removed ${name} ${record.threadId}\n`);
 }
 
@@ -1889,11 +1904,84 @@ async function commandDirectory(args) {
     );
     return;
   }
+  if (operation === "tombstones") {
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const tombstones = listNodeTombstones().map(publicNodeTombstone);
+    jsonOrLines(
+      tombstones,
+      jsonOutput,
+      (record) =>
+        `${record.nodeKey}\t${record.projectId}\t${record.lastSafeLabel}\t${record.reason}`,
+    );
+    return;
+  }
+  if (operation === "successors") {
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const successors = listSuccessors().map(publicSuccessor);
+    jsonOrLines(
+      successors,
+      jsonOutput,
+      (record) =>
+        `${record.predecessorNodeKey}\t${record.successorNodeKey}\t${record.projectId}`,
+    );
+    return;
+  }
+  if (operation === "successor") {
+    if (args.shift() !== "add") usage(2);
+    const predecessorRuntime = args.shift();
+    const predecessorNativeId = args.shift();
+    const successorRuntime = args.shift();
+    const successorNativeId = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (
+      !predecessorRuntime ||
+      !predecessorNativeId ||
+      !successorRuntime ||
+      !successorNativeId ||
+      args.some((value) => value !== "--json")
+    ) {
+      usage(2);
+    }
+    const successor = publicSuccessor(
+      await addSuccessor({
+        predecessorNodeKey: nodeKey(predecessorRuntime, predecessorNativeId),
+        successorNodeKey: nodeKey(successorRuntime, successorNativeId),
+      }),
+    );
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(successor, null, 2)}\n`
+        : `successor ${successor.predecessorNodeKey} -> ${successor.successorNodeKey}\n`,
+    );
+    return;
+  }
   if (operation === "node") {
-    if (args.shift() !== "show") usage(2);
+    const nodeOperation = args.shift();
     const runtimeKind = args.shift();
     const nativeId = args.shift();
     const jsonOutput = args.includes("--json");
+    if (nodeOperation === "tombstone") {
+      let reason = "explicit";
+      const remaining = [];
+      while (args.length) {
+        const option = args.shift();
+        if (option === "--reason") reason = args.shift();
+        else if (option !== "--json") remaining.push(option);
+      }
+      if (!runtimeKind || !nativeId || !reason || remaining.length) usage(2);
+      const record = publicNodeTombstone(
+        await tombstoneNode(runtimeKind, nativeId, { reason }),
+      );
+      process.stdout.write(
+        jsonOutput
+          ? `${JSON.stringify(record, null, 2)}\n`
+          : `tombstoned ${record.nodeKey} (${record.reason})\n`,
+      );
+      return;
+    }
+    if (nodeOperation !== "show") usage(2);
     const includeEndpoints = args.includes("--endpoints");
     if (
       !runtimeKind ||

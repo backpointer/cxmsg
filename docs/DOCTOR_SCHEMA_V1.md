@@ -48,7 +48,8 @@ Every check contains:
 - `scope` groups checks such as `runtime`, `state`, `sessions`, `jobs`,
   `permissions`, `app-server`, `attachments`, `bridges`, `relay`,
   `message-bodies`, `route-bindings`, `route-deliveries`, `quarantine`,
-  `directory-projects`, `directory-nodes`, or `schedules`.
+  `directory-projects`, `directory-nodes`, `directory-node-tombstones`,
+  `directory-successors`, or `schedules`.
 - `status` is `pass`, `warn`, `fail`, `unknown`, or `skipped`.
 - `summary` is bounded operator text with no private body data.
 - `verification` is bounded evidence such as `metadata`, `registry`,
@@ -82,12 +83,17 @@ records. They never emit a quarantined body in the report. `EROUTEIDENTITY`
 requires an explicit re-bind of the intended session; `EQUARANTINED` is an
 operator-review warning and never authorizes automatic release.
 
-Node Directory findings validate bounded owner-only Project and Node records,
-unique routing/discovery identity, Node-to-Project references, Endpoint
-generation schemas, and whether an addressable Codex Node still has a registry
-record. Findings omit canonical roots, Endpoint addresses, and native private
-routing details. `ENODEUNREGISTERED` is retained evidence awaiting explicit
-Tombstone support, not permission for Doctor to delete the Node.
+Node Directory findings validate bounded owner-only Project, Node, Tombstone,
+and successor records; unique routing/discovery identity; Node-to-Project
+references; Endpoint generation schemas; and whether an addressable Codex Node
+still has a registry record. Tombstones must contain only reduced identity,
+Project, safe-label, reason, and time fields. Successor relations must reference
+same-Project live or tombstoned Nodes, give each successor at most one
+predecessor, and remain acyclic. Findings omit canonical roots, Endpoint
+addresses, and native private routing details. `ENODEUNREGISTERED` recommends
+an explicit operator lifecycle action but never permits Doctor to delete or
+Tombstone a Node. `ENODELIFECYCLE` reports interrupted transitions where live
+and tombstoned records coexist; Doctor never chooses either record as truth.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.

@@ -93,6 +93,18 @@ successors. Endpoint selection accepts a newer generation or refresh of the
 same generation and exact Endpoint identity; conflicting equal generations do
 not overwrite the selected Endpoint.
 
+Node removal writes an owner-only reduced Tombstone and removes the live Node
+record. Tombstones contain no Endpoint, PID, socket, address, token, message
+body, permission profile, or process claim. Their presence blocks automatic
+Node resurrection. If a crash leaves live and Tombstone records together,
+Doctor reports the conflict but never deletes or selects either record.
+
+Successor links are explicit, same-Project, single-predecessor, and acyclic.
+They preserve lifecycle provenance only. They never migrate grants,
+permissions, approvals, route roles, Conversation membership, queued work, or
+message authority. A new runtime Node must receive each of those relationships
+through its owning subsystem and normal validation path.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

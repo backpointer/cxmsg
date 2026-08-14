@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import {
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -17,6 +24,8 @@ test.after(() => {
 
 const projectId = "12345678-1234-4234-8234-123456789abc";
 const nodeId = "22345678-1234-4234-8234-123456789abc";
+const successorNodeId = "52345678-1234-4234-8234-123456789abc";
+const finalNodeId = "62345678-1234-4234-8234-123456789abc";
 const discovery = (root) => ({
   kind: "canonical-root",
   key: path.resolve(root),
@@ -69,6 +78,47 @@ test("Project identity is private, stable, and conservative across discovery", a
     }),
     /Project ID already belongs/,
   );
+});
+
+test("real Git worktrees resolve to one Project discovery identity", async () => {
+  const repository = mkdtempSync(path.join(os.tmpdir(), "cxmsg-git-project-"));
+  const worktreeParent = mkdtempSync(path.join(os.tmpdir(), "cxmsg-git-worktree-"));
+  const worktree = path.join(worktreeParent, "checkout");
+  const runGit = (cwd, args) => {
+    const result = spawnSync("git", args, { cwd, encoding: "utf8" });
+    assert.equal(result.status, 0, result.stderr);
+  };
+  try {
+    runGit(repository, ["init", "--quiet"]);
+    runGit(repository, ["config", "user.name", "cxmsg test"]);
+    runGit(repository, ["config", "user.email", "cxmsg@example.invalid"]);
+    writeFileSync(path.join(repository, "fixture.txt"), "fixture\n");
+    runGit(repository, ["add", "fixture.txt"]);
+    runGit(repository, ["commit", "--quiet", "-m", "fixture"]);
+    runGit(repository, ["worktree", "add", "--quiet", "-b", "fixture-worktree", worktree]);
+
+    const primary = directory.discoverProjectRoot(repository);
+    const linked = directory.discoverProjectRoot(worktree);
+    assert.equal(primary.kind, "git-common-dir");
+    assert.equal(linked.kind, "git-common-dir");
+    assert.equal(linked.key, primary.key);
+
+    const gitProjectId = "92345678-1234-4234-8234-123456789abc";
+    const created = await directory.ensureProject({
+      routingId: "git-worktrees",
+      root: repository,
+      projectId: gitProjectId,
+    });
+    const repeated = await directory.ensureProject({
+      routingId: "git-worktrees",
+      root: worktree,
+    });
+    assert.equal(repeated.projectId, created.projectId);
+    assert.equal(repeated.rootAliases.length, 2);
+  } finally {
+    rmSync(worktreeParent, { recursive: true, force: true });
+    rmSync(repository, { recursive: true, force: true });
+  }
 });
 
 test("Node identity survives alias changes and endpoint selection is monotonic", async () => {
@@ -164,4 +214,119 @@ test("runtime kind is part of Node identity", async () => {
   assert.notEqual(claude.record.nodeKey, directory.readNode("codex", nodeId).nodeKey);
   assert.equal(directory.listNodes().length, 2);
   assert.equal("selectedEndpoints" in directory.publicNode(claude.record), false);
+});
+
+test("successor links are explicit, same-Project, single-predecessor, and acyclic", async () => {
+  await directory.upsertNode({
+    runtimeKind: "codex",
+    nativeId: successorNodeId,
+    displayName: "successor",
+    projectId,
+  });
+  await directory.upsertNode({
+    runtimeKind: "codex",
+    nativeId: finalNodeId,
+    displayName: "final",
+    projectId,
+  });
+  const first = await directory.addSuccessor({
+    predecessorNodeKey: `codex:${nodeId}`,
+    successorNodeKey: `codex:${successorNodeId}`,
+  });
+  const repeated = await directory.addSuccessor({
+    predecessorNodeKey: `codex:${nodeId}`,
+    successorNodeKey: `codex:${successorNodeId}`,
+  });
+  await directory.addSuccessor({
+    predecessorNodeKey: `codex:${successorNodeId}`,
+    successorNodeKey: `codex:${finalNodeId}`,
+  });
+
+  assert.deepEqual(repeated, first);
+  assert.equal(directory.listSuccessors().length, 2);
+  assert.equal(
+    directory.readSuccessor(`codex:${finalNodeId}`).predecessorNodeKey,
+    `codex:${successorNodeId}`,
+  );
+  assert.equal("permissions" in directory.publicSuccessor(first), false);
+  assert.equal("conversationId" in directory.publicSuccessor(first), false);
+
+  await assert.rejects(
+    directory.addSuccessor({
+      predecessorNodeKey: `claude:${nodeId}`,
+      successorNodeKey: `codex:${successorNodeId}`,
+    }),
+    /another predecessor/,
+  );
+  await assert.rejects(
+    directory.addSuccessor({
+      predecessorNodeKey: `codex:${finalNodeId}`,
+      successorNodeKey: `codex:${nodeId}`,
+    }),
+    /create a cycle/,
+  );
+
+  const otherRoot = mkdtempSync(path.join(os.tmpdir(), "cxmsg-other-project-"));
+  try {
+    const otherProjectId = "72345678-1234-4234-8234-123456789abc";
+    const otherNodeId = "82345678-1234-4234-8234-123456789abc";
+    await directory.ensureProject({
+      routingId: "other",
+      root: otherRoot,
+      projectId: otherProjectId,
+      discover: discovery,
+    });
+    await directory.upsertNode({
+      runtimeKind: "codex",
+      nativeId: otherNodeId,
+      displayName: "other",
+      projectId: otherProjectId,
+    });
+    await assert.rejects(
+      directory.addSuccessor({
+        predecessorNodeKey: `codex:${nodeId}`,
+        successorNodeKey: `codex:${otherNodeId}`,
+      }),
+      /same Project/,
+    );
+  } finally {
+    rmSync(otherRoot, { recursive: true, force: true });
+  }
+});
+
+test("Node Tombstones retain minimal identity and prevent automatic resurrection", async () => {
+  const removed = await directory.tombstoneNode("codex", nodeId, {
+    reason: "session-removed",
+  });
+  const repeated = await directory.tombstoneNode("codex", nodeId);
+
+  assert.deepEqual(repeated, removed);
+  assert.equal(directory.readNode("codex", nodeId), null);
+  assert.equal(directory.readNodeTombstone("codex", nodeId).nodeKey, `codex:${nodeId}`);
+  assert.equal(directory.listNodeTombstones().length, 1);
+  assert.equal(removed.lastSafeLabel, "auditor");
+  assert.equal(removed.projectId, projectId);
+  assert.equal("selectedEndpoints" in removed, false);
+  assert.equal("address" in removed, false);
+  assert.equal("pid" in removed, false);
+  assert.equal("permissions" in removed, false);
+  assert.equal(
+    existsSync(path.join(directory.NODES_DIR, `codex--${nodeId}.json`)),
+    false,
+  );
+  assert.equal(statSync(directory.NODE_TOMBSTONES_DIR).mode & 0o777, 0o700);
+  assert.equal(
+    directory.readSuccessor(`codex:${successorNodeId}`).predecessorNodeKey,
+    `codex:${nodeId}`,
+  );
+
+  await assert.rejects(
+    directory.upsertNode({
+      runtimeKind: "codex",
+      nativeId: nodeId,
+      displayName: "resurrected",
+      projectId,
+    }),
+    /automatic reactivation is forbidden/,
+  );
 });

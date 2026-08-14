@@ -276,9 +276,14 @@ test("Node Directory Inspector validates private identity references without pat
     await fs.chmod(root, 0o700);
     const projects = path.join(root, "directory", "projects");
     const nodes = path.join(root, "directory", "nodes");
+    const tombstones = path.join(root, "directory", "tombstones", "nodes");
+    const successors = path.join(root, "directory", "successors");
     await fs.mkdir(projects, { recursive: true, mode: 0o700 });
     await fs.mkdir(nodes, { mode: 0o700 });
+    await fs.mkdir(tombstones, { recursive: true, mode: 0o700 });
+    await fs.mkdir(successors, { mode: 0o700 });
     const projectId = "a2345678-1234-4234-8234-123456789abc";
+    const predecessorId = "b2345678-1234-4234-8234-123456789abc";
     await writeJson(path.join(projects, `${projectId}.json`), {
       version: 1,
       projectId,
@@ -304,6 +309,23 @@ test("Node Directory Inspector validates private identity references without pat
       aliases: [{ value: "worker" }],
       selectedEndpoints: {},
     });
+    await writeJson(path.join(tombstones, `claude--${predecessorId}.json`), {
+      version: 1,
+      nodeKey: `claude:${predecessorId}`,
+      runtimeKind: "claude",
+      nativeId: predecessorId,
+      projectId,
+      lastSafeLabel: "retired-auditor",
+      removedAt: "2026-08-14T00:01:00.000Z",
+      reason: "session-removed",
+    });
+    await writeJson(path.join(successors, `codex--${THREAD_ID}.json`), {
+      version: 1,
+      predecessorNodeKey: `claude:${predecessorId}`,
+      successorNodeKey: `codex:${THREAD_ID}`,
+      projectId,
+      linkedAt: "2026-08-14T00:02:00.000Z",
+    });
 
     const checks = inspectNodeDirectory({
       stateDir: root,
@@ -319,10 +341,95 @@ test("Node Directory Inspector validates private identity references without pat
         .status,
       "pass",
     );
+    assert.equal(
+      checks.find((check) =>
+        check.id.startsWith("directory-node-tombstones.lifecycle"),
+      ).status,
+      "pass",
+    );
+    assert.equal(
+      checks.find((check) => check.id.startsWith("directory-successors.reference"))
+        .status,
+      "pass",
+    );
+    assert.equal(
+      checks.find((check) => check.id === "directory-successors.graph.acyclic")
+        .status,
+      "pass",
+    );
     assert.doesNotMatch(
       JSON.stringify(checks),
-      /project-that-must-not-be-rendered/,
+      /project-that-must-not-be-rendered|private\/redacted\.sock/,
     );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Node Directory Inspector reports lifecycle conflicts and successor cycles without repair", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-lifecycle-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const projects = path.join(root, "directory", "projects");
+    const nodes = path.join(root, "directory", "nodes");
+    const tombstones = path.join(root, "directory", "tombstones", "nodes");
+    const successors = path.join(root, "directory", "successors");
+    for (const directory of [projects, nodes, tombstones, successors]) {
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    }
+    const projectId = "c2345678-1234-4234-8234-123456789abc";
+    const firstId = "d2345678-1234-4234-8234-123456789abc";
+    const secondId = "e2345678-1234-4234-8234-123456789abc";
+    await writeJson(path.join(projects, `${projectId}.json`), {
+      version: 1,
+      projectId,
+      routingId: "orchestra",
+      discovery: { kind: "canonical-root", key: "/private/redacted-project" },
+      rootAliases: [{ path: "/private/redacted-project" }],
+    });
+    for (const nativeId of [firstId, secondId]) {
+      await writeJson(path.join(nodes, `codex--${nativeId}.json`), {
+        version: 1,
+        nodeKey: `codex:${nativeId}`,
+        runtimeKind: "codex",
+        nativeId,
+        projectId,
+        aliases: [{ value: "worker" }],
+        selectedEndpoints: {},
+      });
+    }
+    await writeJson(path.join(tombstones, `codex--${firstId}.json`), {
+      version: 1,
+      nodeKey: `codex:${firstId}`,
+      runtimeKind: "codex",
+      nativeId: firstId,
+      projectId,
+      lastSafeLabel: "retired-worker",
+      removedAt: "2026-08-14T00:01:00.000Z",
+      reason: "interrupted-transition",
+    });
+    await writeJson(path.join(successors, `codex--${firstId}.json`), {
+      version: 1,
+      predecessorNodeKey: `codex:${secondId}`,
+      successorNodeKey: `codex:${firstId}`,
+      projectId,
+      linkedAt: "2026-08-14T00:02:00.000Z",
+    });
+    await writeJson(path.join(successors, `codex--${secondId}.json`), {
+      version: 1,
+      predecessorNodeKey: `codex:${firstId}`,
+      successorNodeKey: `codex:${secondId}`,
+      projectId,
+      linkedAt: "2026-08-14T00:03:00.000Z",
+    });
+
+    const before = await stateSnapshot(root);
+    const checks = inspectNodeDirectory({ stateDir: root, sessions: [] });
+    const after = await stateSnapshot(root);
+    assert.deepEqual(after, before);
+    assert.ok(checks.some((check) => check.errorCode === "ENODELIFECYCLE"));
+    assert.ok(checks.some((check) => check.errorCode === "ESUCCESSORCYCLE"));
+    assert.doesNotMatch(JSON.stringify(checks), /redacted-project/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

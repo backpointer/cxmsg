@@ -445,6 +445,62 @@ function validDirectoryNode(record, stem) {
   };
 }
 
+function validDirectoryNodeTombstone(record, stem) {
+  const expectedStem = `${record?.runtimeKind || ""}--${record?.nativeId || ""}`;
+  const allowedFields = new Set([
+    "version",
+    "nodeKey",
+    "runtimeKind",
+    "nativeId",
+    "projectId",
+    "lastSafeLabel",
+    "removedAt",
+    "reason",
+  ]);
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        expectedStem === stem &&
+        ["codex", "claude"].includes(record.runtimeKind) &&
+        UUID_PATTERN.test(record.nativeId || "") &&
+        record.nodeKey === `${record.runtimeKind}:${record.nativeId}` &&
+        UUID_PATTERN.test(record.projectId || "") &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(
+          record.lastSafeLabel || "",
+        ) &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.reason || "") &&
+        Number.isFinite(Date.parse(record.removedAt || "")) &&
+        Object.keys(record).every((field) => allowedFields.has(field)),
+    ),
+    errorCode: "ENODETOMBSTONESCHEMA",
+  };
+}
+
+function validDirectorySuccessor(record, stem) {
+  const expectedStem = String(record?.successorNodeKey || "").replace(":", "--");
+  const nodeKeyPattern = /^(?:codex|claude):[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  const allowedFields = new Set([
+    "version",
+    "predecessorNodeKey",
+    "successorNodeKey",
+    "projectId",
+    "linkedAt",
+  ]);
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        expectedStem === stem &&
+        nodeKeyPattern.test(record.predecessorNodeKey || "") &&
+        nodeKeyPattern.test(record.successorNodeKey || "") &&
+        record.predecessorNodeKey !== record.successorNodeKey &&
+        UUID_PATTERN.test(record.projectId || "") &&
+        Number.isFinite(Date.parse(record.linkedAt || "")) &&
+        Object.keys(record).every((field) => allowedFields.has(field)),
+    ),
+    errorCode: "ESUCCESSORSCHEMA",
+  };
+}
+
 export function inspectNodeDirectory({ stateDir, sessions = [] } = {}) {
   const projects = scanJsonDirectory({
     stateDir,
@@ -458,7 +514,24 @@ export function inspectNodeDirectory({ stateDir, sessions = [] } = {}) {
     scope: "directory-nodes",
     validate: validDirectoryNode,
   });
-  const checks = [...projects.checks, ...nodes.checks];
+  const tombstones = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/tombstones/nodes",
+    scope: "directory-node-tombstones",
+    validate: validDirectoryNodeTombstone,
+  });
+  const successors = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/successors",
+    scope: "directory-successors",
+    validate: validDirectorySuccessor,
+  });
+  const checks = [
+    ...projects.checks,
+    ...nodes.checks,
+    ...tombstones.checks,
+    ...successors.checks,
+  ];
   const projectIds = new Set(projects.records.map((record) => record.projectId));
   const seenRoutingIds = new Set();
   const seenDiscoveries = new Set();
@@ -508,12 +581,112 @@ export function inspectNodeDirectory({ stateDir, sessions = [] } = {}) {
           verification: "registry",
           errorCode: "ENODEUNREGISTERED",
           remediation:
-            "Retain the Node until explicit Tombstone lifecycle support is implemented",
+            "Explicitly remove or Tombstone the Node after confirming the runtime session is retired",
           required: false,
         }),
       );
     }
   }
+  const liveNodes = new Map(nodes.records.map((record) => [record.nodeKey, record]));
+  const retiredNodes = new Map(
+    tombstones.records.map((record) => [record.nodeKey, record]),
+  );
+  for (const tombstone of tombstones.records) {
+    const projectExists = projectIds.has(tombstone.projectId);
+    const duplicateLifecycle = liveNodes.has(tombstone.nodeKey);
+    checks.push(
+      diagnosticCheck({
+        id: `directory-node-tombstones.project.${safeLabel(tombstone.nodeKey)}`,
+        scope: "directory-node-tombstones",
+        status: projectExists ? "pass" : "fail",
+        summary: projectExists
+          ? "Node Tombstone references an existing private Project identity"
+          : "Node Tombstone references a missing private Project identity",
+        verification: "records",
+        errorCode: projectExists ? null : "ENODEPROJECT",
+      }),
+      diagnosticCheck({
+        id: `directory-node-tombstones.lifecycle.${safeLabel(tombstone.nodeKey)}`,
+        scope: "directory-node-tombstones",
+        status: duplicateLifecycle ? "fail" : "pass",
+        summary: duplicateLifecycle
+          ? "Node identity exists as both live and tombstoned"
+          : "Node Tombstone has no conflicting live Node",
+        verification: "records",
+        errorCode: duplicateLifecycle ? "ENODELIFECYCLE" : null,
+        remediation: duplicateLifecycle
+          ? "Inspect the interrupted lifecycle transition; Doctor will not choose or delete either record"
+          : null,
+      }),
+    );
+  }
+  const identities = new Map([...liveNodes, ...retiredNodes]);
+  const predecessorBySuccessor = new Map();
+  for (const relation of successors.records) {
+    const predecessor = identities.get(relation.predecessorNodeKey);
+    const successor = identities.get(relation.successorNodeKey);
+    const referencesExist = Boolean(predecessor && successor);
+    const sameProject = Boolean(
+      referencesExist &&
+        predecessor.projectId === relation.projectId &&
+        successor.projectId === relation.projectId,
+    );
+    const duplicate = predecessorBySuccessor.has(relation.successorNodeKey);
+    predecessorBySuccessor.set(
+      relation.successorNodeKey,
+      relation.predecessorNodeKey,
+    );
+    checks.push(
+      diagnosticCheck({
+        id: `directory-successors.reference.${safeLabel(relation.successorNodeKey)}`,
+        scope: "directory-successors",
+        status: referencesExist && sameProject && !duplicate ? "pass" : "fail",
+        summary: !referencesExist
+          ? "Successor relation references a missing Node identity"
+          : !sameProject
+            ? "Successor relation crosses or misstates its Project identity"
+            : duplicate
+              ? "Successor Node has multiple predecessor relations"
+              : "Successor relation references same-Project Node identities",
+        verification: "records",
+        errorCode: !referencesExist
+          ? "ESUCCESSORREFERENCE"
+          : !sameProject
+            ? "ESUCCESSORPROJECT"
+            : duplicate
+              ? "ESUCCESSORDUPLICATE"
+              : null,
+      }),
+    );
+  }
+  const cycleNodes = new Set();
+  for (const start of predecessorBySuccessor.keys()) {
+    const pathNodes = new Set();
+    let cursor = start;
+    while (cursor && predecessorBySuccessor.has(cursor)) {
+      if (pathNodes.has(cursor)) {
+        cycleNodes.add(start);
+        break;
+      }
+      pathNodes.add(cursor);
+      cursor = predecessorBySuccessor.get(cursor);
+    }
+  }
+  checks.push(
+    diagnosticCheck({
+      id: "directory-successors.graph.acyclic",
+      scope: "directory-successors",
+      status: cycleNodes.size ? "fail" : "pass",
+      summary: cycleNodes.size
+        ? "Successor relations contain a cycle"
+        : "Successor relations form an acyclic predecessor graph",
+      verification: "records",
+      errorCode: cycleNodes.size ? "ESUCCESSORCYCLE" : null,
+      remediation: cycleNodes.size
+        ? "Inspect successor records and remove only the explicitly invalid relation outside Doctor"
+        : null,
+    }),
+  );
   return checks;
 }
 
