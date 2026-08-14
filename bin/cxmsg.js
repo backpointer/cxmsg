@@ -69,6 +69,7 @@ import {
   createJob,
   failJobIfWorkerExited,
   isPendingJob,
+  listJobs,
   newJobId,
   readJob,
   refreshJob,
@@ -99,8 +100,10 @@ import {
 } from "../src/message-bodies.js";
 import {
   addSuccessor,
+  classifyExecutionThread,
   ensureProject,
   findProjectByRoutingId,
+  listExecutionThreads,
   listNodeTombstones,
   listNodes,
   listProjects,
@@ -110,7 +113,9 @@ import {
   publicNode,
   publicNodeTombstone,
   publicProject,
+  publicExecutionThread,
   publicSuccessor,
+  readExecutionThread,
   readNode,
   tombstoneNode,
   upsertNode,
@@ -173,6 +178,9 @@ function usage(exitCode = 0) {
   cxmsg directory tombstones [--json]
   cxmsg directory successor add <codex|claude> <native-id> <codex|claude> <native-id> [--json]
   cxmsg directory successors [--json]
+  cxmsg directory execution sync [--json]
+  cxmsg directory execution-threads [--json]
+  cxmsg directory execution-thread show <thread-id> [--json]
   cxmsg message info <message-id|content-ref> [--json]
   cxmsg message show <message-id|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -625,6 +633,9 @@ async function commandRegister(name, threadId) {
   validateSessionName(name);
   if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(threadId || "")) {
     throw new Error("thread-id must be a UUID");
+  }
+  if (readExecutionThread(threadId)) {
+    throw new Error("Execution Threads cannot be registered as addressable sessions");
   }
   await ensureServer();
 
@@ -1954,6 +1965,71 @@ async function commandDirectory(args) {
       jsonOutput
         ? `${JSON.stringify(successor, null, 2)}\n`
         : `successor ${successor.predecessorNodeKey} -> ${successor.successorNodeKey}\n`,
+    );
+    return;
+  }
+  if (operation === "execution-threads") {
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const records = listExecutionThreads().map(publicExecutionThread);
+    jsonOrLines(
+      records,
+      jsonOutput,
+      (record) =>
+        `${record.threadId}\t${record.jobId}\t${record.creationMode}`,
+    );
+    return;
+  }
+  if (operation === "execution-thread") {
+    if (args.shift() !== "show") usage(2);
+    const threadId = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (!threadId || args.some((value) => value !== "--json")) usage(2);
+    const record = readExecutionThread(threadId);
+    if (!record) throw new Error(`unknown Execution Thread: ${threadId}`);
+    const output = publicExecutionThread(record);
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${output.threadId}\t${output.jobId}\t${output.creationMode}\n`,
+    );
+    return;
+  }
+  if (operation === "execution") {
+    if (args.shift() !== "sync") usage(2);
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+    const classified = [];
+    for (const job of listJobs()) {
+      if (
+        (job.kind ?? "delegation") !== "delegation" ||
+        job.execution !== "fork" ||
+        !uuidPattern.test(job.jobId || "") ||
+        !uuidPattern.test(job.targetThreadId || "") ||
+        !uuidPattern.test(job.threadId || "") ||
+        !uuidPattern.test(job.turnId || "") ||
+        job.threadId === job.targetThreadId ||
+        ["dispatching", "queued"].includes(job.status)
+      ) {
+        continue;
+      }
+      const existing = readExecutionThread(job.threadId);
+      const record =
+        existing ||
+        (await classifyExecutionThread({
+          threadId: job.threadId,
+          jobId: job.jobId,
+          sourceThreadId: job.targetThreadId,
+          creationMode: "legacy-observed",
+        }));
+      classified.push(publicExecutionThread(record));
+    }
+    jsonOrLines(
+      classified,
+      jsonOutput,
+      (record) =>
+        `${record.threadId}\t${record.jobId}\t${record.creationMode}`,
     );
     return;
   }

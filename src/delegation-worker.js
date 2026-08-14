@@ -13,6 +13,7 @@ import {
   deliverPeerMessage,
   truncateUtf8,
 } from "./messaging.js";
+import { classifyExecutionThread } from "./node-directory.js";
 import { readSessionRecord } from "./registry.js";
 import { readThreadMetadata } from "./thread-activity.js";
 
@@ -34,7 +35,9 @@ async function validatePermissionProfile(client, record, permissions) {
 }
 
 async function executionThread(client, sourceThread, record, job) {
-  if (job.execution === "inline") return sourceThread;
+  if (job.execution === "inline") {
+    return { thread: sourceThread, creationMode: null };
+  }
   const forkParams = {
     threadId: sourceThread.id,
     approvalPolicy: job.approval === "never" ? "never" : "on-request",
@@ -44,7 +47,7 @@ async function executionThread(client, sourceThread, record, job) {
   if (job.permissions) forkParams.permissions = job.permissions;
   try {
     const forked = await client.request("thread/fork", forkParams);
-    return forked.thread;
+    return { thread: forked.thread, creationMode: "fork" };
   } catch (error) {
     if (!/no rollout found|thread not loaded/i.test(error.message)) throw error;
     const startParams = {
@@ -54,7 +57,7 @@ async function executionThread(client, sourceThread, record, job) {
     };
     if (job.permissions) startParams.permissions = job.permissions;
     const started = await client.request("thread/start", startParams);
-    return started.thread;
+    return { thread: started.thread, creationMode: "start-fallback" };
   }
 }
 
@@ -138,8 +141,21 @@ export async function runDelegationWorker(jobId, { Client = AppServerClient } = 
     if (thread.status?.type === "active") {
       throw new Error("target session already has an active turn");
     }
-    const targetThread = await executionThread(client, thread, record, job);
-    const delivery = await deliverDelegatedTask(client, targetThread, {
+    const execution = await executionThread(client, thread, record, job);
+    if (execution.creationMode) {
+      await classifyExecutionThread({
+        threadId: execution.thread.id,
+        jobId: job.jobId,
+        sourceThreadId: record.threadId,
+        creationMode: execution.creationMode,
+      });
+      job = await mutateJob(jobId, (current) => ({
+        ...current,
+        threadId: execution.thread.id,
+        executionThreadId: execution.thread.id,
+      }));
+    }
+    const delivery = await deliverDelegatedTask(client, execution.thread, {
       from: job.from,
       target: job.target,
       task: job.task,
@@ -151,6 +167,8 @@ export async function runDelegationWorker(jobId, { Client = AppServerClient } = 
       ...current,
       status: "running",
       threadId: delivery.threadId,
+      executionThreadId:
+        current.execution === "fork" ? delivery.threadId : null,
       turnId: delivery.turnId,
       turnStartedAt: new Date().toISOString(),
     }));

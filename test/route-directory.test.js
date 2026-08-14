@@ -10,6 +10,7 @@ process.env.CXMSG_STATE_DIR = stateDir;
 const directory = await import(`../src/node-directory.js?route=${Date.now()}`);
 const registry = await import(`../src/registry.js?route-directory=${Date.now()}`);
 const routes = await import(`../src/route-admission.js?directory=${Date.now()}`);
+const jobs = await import(`../src/jobs.js?route-directory=${Date.now()}`);
 
 test.after(() => {
   rmSync(stateDir, { recursive: true, force: true });
@@ -156,5 +157,51 @@ test("a Tombstoned Directory Node is quarantined before context injection", asyn
     },
   );
   assert.equal(unbound.reason, "target_node_retired");
+  assert.equal(dispatches, 0);
+});
+
+test("an Execution Thread registry mistake is quarantined before context injection", async () => {
+  const executionThreadId = "c2345678-1234-4234-8234-123456789abc";
+  const executionJobId = "d2345678-1234-4234-8234-123456789abc";
+  const sourceThreadId = "e2345678-1234-4234-8234-123456789abc";
+  const job = jobs.createJob({
+    jobId: executionJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: sourceThreadId,
+    task: "private execution fixture",
+    execution: "fork",
+  });
+  jobs.writeJob({
+    ...job,
+    threadId: executionThreadId,
+    turnId: "a3345678-1234-4234-8234-123456789abc",
+    status: "completed",
+  });
+  await directory.classifyExecutionThread({
+    threadId: executionThreadId,
+    jobId: executionJobId,
+    sourceThreadId,
+    creationMode: "legacy-observed",
+  });
+  registry.writeSessionRecord({
+    name: "execution-mistake",
+    threadId: executionThreadId,
+    cwd: root,
+  });
+  let dispatches = 0;
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "unbound-sender",
+      target: "execution-mistake",
+      message: "must not address an execution fork",
+      logicalMessageId: "f2345678-1234-4234-8234-123456789abc",
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+  );
+  assert.equal(outcome.reason, "target_execution_thread");
   assert.equal(dispatches, 0);
 });

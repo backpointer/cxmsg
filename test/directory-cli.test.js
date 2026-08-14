@@ -11,6 +11,7 @@ const canonicalProjectRoot = realpathSync(projectRoot);
 process.env.CXMSG_STATE_DIR = stateDir;
 const registry = await import(`../src/registry.js?directory-cli=${Date.now()}`);
 const directory = await import(`../src/node-directory.js?directory-cli=${Date.now()}`);
+const jobs = await import(`../src/jobs.js?directory-cli=${Date.now()}`);
 const threadId = "42345678-1234-4234-8234-123456789abc";
 const successorThreadId = "52345678-1234-4234-8234-123456789abc";
 registry.writeSessionRecord({
@@ -148,4 +149,49 @@ test("Directory CLI exposes explicit Tombstone and successor lifecycle", async (
   const successors = cxmsg("directory", "successors", "--json");
   assert.equal(successors.status, 0, successors.stderr);
   assert.equal(JSON.parse(successors.stdout).length, 1);
+});
+
+test("Directory CLI explicitly classifies strongly evidenced legacy Execution Threads", () => {
+  const legacyJobId = "62345678-1234-4234-8234-123456789abc";
+  const legacyExecutionThreadId = "72345678-1234-4234-8234-123456789abc";
+  const legacyTurnId = "82345678-1234-4234-8234-123456789abc";
+  const created = jobs.createJob({
+    jobId: legacyJobId,
+    from: "coordinator",
+    target: "successor",
+    targetThreadId: successorThreadId,
+    threadId: successorThreadId,
+    task: "private legacy body",
+    execution: "fork",
+  });
+  jobs.writeJob({
+    ...created,
+    threadId: legacyExecutionThreadId,
+    turnId: legacyTurnId,
+    status: "completed",
+    result: "private legacy result",
+  });
+
+  const synchronized = cxmsg("directory", "execution", "sync", "--json");
+  assert.equal(synchronized.status, 0, synchronized.stderr);
+  const classified = JSON.parse(synchronized.stdout);
+  assert.equal(classified.length, 1);
+  assert.equal(classified[0].threadId, legacyExecutionThreadId);
+  assert.equal(classified[0].sourceNodeKey, `codex:${successorThreadId}`);
+  assert.equal(classified[0].creationMode, "legacy-observed");
+  assert.doesNotMatch(synchronized.stdout, /private legacy/);
+
+  const shown = cxmsg(
+    "directory",
+    "execution-thread",
+    "show",
+    legacyExecutionThreadId,
+    "--json",
+  );
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(JSON.parse(shown.stdout).jobId, legacyJobId);
+
+  const listed = cxmsg("directory", "execution-threads", "--json");
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.equal(JSON.parse(listed.stdout).length, 1);
 });

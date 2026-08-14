@@ -95,6 +95,7 @@ export function createJob({
     target,
     targetThreadId: targetThreadId || threadId,
     threadId,
+    executionThreadId: null,
     turnId: null,
     task,
     permissions,

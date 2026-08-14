@@ -136,6 +136,9 @@ cxmsg directory node tombstone codex <thread-id> --reason session-retired
 cxmsg directory successor add codex <old-thread-id> codex <new-thread-id>
 cxmsg directory tombstones --json
 cxmsg directory successors --json
+cxmsg directory execution sync --json
+cxmsg directory execution-threads --json
+cxmsg directory execution-thread show <thread-id> --json
 ```
 
 Project paths are omitted by default. `directory projects --paths` and
@@ -160,6 +163,21 @@ rejected. The link retains lifecycle provenance only: it does not transfer a
 grant, permission profile, role, Conversation membership, pending message, or
 authority. cxmsg never infers successors from a reused name, path, PID, socket,
 or restart.
+
+Fork Delegations and their standalone `thread/start` fallback are classified as
+non-addressable Execution Threads before their first delegated turn starts.
+The record contains only the execution thread ID, Job ID, source thread/Node
+reference when available, creation mode, and classification time. It contains
+no task, result, permission, approval, or message body. Execution Threads are
+not synchronized as Nodes and cannot become Conversation members merely by
+being classified.
+
+`directory execution sync` is an explicit migration command for retained Jobs.
+It classifies only fork Jobs with distinct UUID-shaped source and execution
+threads, a retained turn ID, and a non-startup Job state. Ambiguous historical
+Jobs are skipped, existing classifications are reused, and Job records are not
+rewritten. cxmsg never infers an Execution Thread from an arbitrary unregistered
+App Server thread.
 
 When a Directory Project exists, `cxmsg route bind` also pins the binding to
 the private Project UUID and stable Codex Node key. Reusing the same routing

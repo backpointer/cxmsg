@@ -13,6 +13,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { withFileLock } from "./file-lock.js";
+import { readJob } from "./jobs.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const NODE_DIRECTORY_DIR = path.join(CXMSG_STATE_DIR, "directory");
@@ -24,6 +25,10 @@ export const NODE_TOMBSTONES_DIR = path.join(
   "nodes",
 );
 export const SUCCESSORS_DIR = path.join(NODE_DIRECTORY_DIR, "successors");
+export const EXECUTION_THREADS_DIR = path.join(
+  NODE_DIRECTORY_DIR,
+  "execution-threads",
+);
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -52,6 +57,22 @@ const SUCCESSOR_FIELDS = new Set([
   "successorNodeKey",
   "projectId",
   "linkedAt",
+]);
+const EXECUTION_THREAD_FIELDS = new Set([
+  "version",
+  "kind",
+  "threadId",
+  "jobId",
+  "sourceThreadId",
+  "sourceNodeKey",
+  "projectId",
+  "creationMode",
+  "classifiedAt",
+]);
+const EXECUTION_CREATION_MODES = new Set([
+  "fork",
+  "start-fallback",
+  "legacy-observed",
 ]);
 
 function validateUuid(label, value) {
@@ -147,6 +168,13 @@ function successorFilename(successorNodeKey) {
 
 function successorPath(successorNodeKey) {
   return path.join(SUCCESSORS_DIR, successorFilename(successorNodeKey));
+}
+
+function executionThreadPath(threadId) {
+  return path.join(
+    EXECUTION_THREADS_DIR,
+    `${validateUuid("execution thread id", threadId).toLowerCase()}.json`,
+  );
 }
 
 function projectPath(projectId) {
@@ -247,6 +275,24 @@ function validSuccessor(record) {
   } catch {
     return false;
   }
+}
+
+function validExecutionThread(record) {
+  return Boolean(
+    record?.version === 1 &&
+      record.kind === "execution-thread" &&
+      UUID_PATTERN.test(record.threadId || "") &&
+      UUID_PATTERN.test(record.jobId || "") &&
+      UUID_PATTERN.test(record.sourceThreadId || "") &&
+      record.threadId !== record.sourceThreadId &&
+      (record.sourceNodeKey === undefined ||
+        record.sourceNodeKey === nodeKey("codex", record.sourceThreadId)) &&
+      (record.projectId === undefined || UUID_PATTERN.test(record.projectId)) &&
+      Boolean(record.sourceNodeKey) === Boolean(record.projectId) &&
+      EXECUTION_CREATION_MODES.has(record.creationMode) &&
+      Number.isFinite(Date.parse(record.classifiedAt || "")) &&
+      Object.keys(record).every((field) => EXECUTION_THREAD_FIELDS.has(field)),
+  );
 }
 
 export function readProject(projectId) {
@@ -402,6 +448,23 @@ export function listSuccessors() {
     .filter(validSuccessor);
 }
 
+export function readExecutionThread(threadId) {
+  const normalized = validateUuid("execution thread id", threadId).toLowerCase();
+  const record = readJson(executionThreadPath(normalized));
+  return validExecutionThread(record) && record.threadId === normalized
+    ? record
+    : null;
+}
+
+export function listExecutionThreads() {
+  if (!existsSync(EXECUTION_THREADS_DIR)) return [];
+  return readdirSync(EXECUTION_THREADS_DIR)
+    .filter((name) => UUID_PATTERN.test(name.slice(0, -5)) && name.endsWith(".json"))
+    .sort()
+    .map((name) => readJson(path.join(EXECUTION_THREADS_DIR, name)))
+    .filter(validExecutionThread);
+}
+
 function nodeOrTombstone(identity) {
   const { runtimeKind, nativeId } = parseNodeKey(identity);
   const live = readNode(runtimeKind, nativeId);
@@ -456,6 +519,16 @@ export async function upsertNode({
   const candidate = normalizeEndpoint(identity, endpoint);
   ensureDirectory(NODES_DIR);
   return withFileLock(path.join(NODES_DIR, `${identity.replace(":", "--")}.lock`), async () => {
+    if (runtimeKind === "codex") {
+      const execution = readExecutionThread(nativeId);
+      if (execution || existsSync(executionThreadPath(nativeId))) {
+        throw new Error(
+          execution
+            ? "Execution Threads cannot be promoted to addressable Nodes"
+            : "Execution Thread record exists but failed schema validation",
+        );
+      }
+    }
     const tombstone = readNodeTombstone(runtimeKind, nativeId);
     if (tombstone || existsSync(nodeTombstonePath(runtimeKind, nativeId))) {
       throw new Error(
@@ -642,6 +715,118 @@ export async function addSuccessor({ predecessorNodeKey, successorNodeKey }) {
   });
 }
 
+export async function classifyExecutionThread({
+  threadId,
+  jobId,
+  sourceThreadId,
+  creationMode,
+}) {
+  threadId = validateUuid("execution thread id", threadId).toLowerCase();
+  jobId = validateUuid("job id", jobId).toLowerCase();
+  sourceThreadId = validateUuid("source thread id", sourceThreadId).toLowerCase();
+  if (threadId === sourceThreadId) {
+    throw new Error("Inline source threads are not Execution Threads");
+  }
+  if (!EXECUTION_CREATION_MODES.has(creationMode)) {
+    throw new Error("Execution Thread creation mode is invalid");
+  }
+  const job = readJob(jobId);
+  if (
+    !job ||
+    (job.kind ?? "delegation") !== "delegation" ||
+    job.execution !== "fork" ||
+    job.targetThreadId !== sourceThreadId ||
+    ![sourceThreadId, threadId].includes(job.threadId) ||
+    (job.executionThreadId && job.executionThreadId !== threadId)
+  ) {
+    throw new Error("Execution Thread does not match a retained fork Delegation");
+  }
+  if (
+    creationMode === "legacy-observed" &&
+    (job.threadId !== threadId ||
+      !UUID_PATTERN.test(job.turnId || "") ||
+      ["dispatching", "queued"].includes(job.status))
+  ) {
+    throw new Error("Legacy Execution Thread lacks strong retained Job evidence");
+  }
+  ensureDirectory(NODES_DIR);
+  ensureDirectory(EXECUTION_THREADS_DIR);
+  return withFileLock(
+    path.join(NODES_DIR, `codex--${threadId}.lock`),
+    async () => {
+      if (
+        (existsSync(nodePath("codex", threadId)) &&
+          !readNode("codex", threadId)) ||
+        (existsSync(nodeTombstonePath("codex", threadId)) &&
+          !readNodeTombstone("codex", threadId))
+      ) {
+        throw new Error("Execution Thread identity has invalid Node lifecycle state");
+      }
+      if (readNode("codex", threadId) || readNodeTombstone("codex", threadId)) {
+        throw new Error("Addressable or Tombstoned Nodes cannot be Execution Threads");
+      }
+      return withFileLock(
+        path.join(NODE_DIRECTORY_DIR, "execution-threads.lock"),
+        async () => {
+          const existing = readExecutionThread(threadId);
+          if (existing) {
+            if (
+              existing.jobId === jobId &&
+              existing.sourceThreadId === sourceThreadId &&
+              existing.creationMode === creationMode
+            ) {
+              return existing;
+            }
+            throw new Error(
+              "Execution Thread identity already has different provenance",
+            );
+          }
+          if (existsSync(executionThreadPath(threadId))) {
+            throw new Error(
+              "Execution Thread record exists but failed schema validation",
+            );
+          }
+          const duplicateJob = listExecutionThreads().find(
+            (record) => record.jobId === jobId,
+          );
+          if (duplicateJob) {
+            throw new Error("Job already belongs to another Execution Thread");
+          }
+          const sourceTombstone = readNodeTombstone("codex", sourceThreadId);
+          if (sourceTombstone) {
+            throw new Error(
+              "Tombstoned source Nodes cannot create Execution Threads",
+            );
+          }
+          const sourceNode = readNode("codex", sourceThreadId);
+          if (
+            (existsSync(nodePath("codex", sourceThreadId)) && !sourceNode) ||
+            (existsSync(nodeTombstonePath("codex", sourceThreadId)) &&
+              !sourceTombstone)
+          ) {
+            throw new Error("Source Node lifecycle state failed validation");
+          }
+          return atomicWrite(EXECUTION_THREADS_DIR, `${threadId}.json`, {
+            version: 1,
+            kind: "execution-thread",
+            threadId,
+            jobId,
+            sourceThreadId,
+            ...(sourceNode
+              ? {
+                  sourceNodeKey: sourceNode.nodeKey,
+                  projectId: sourceNode.projectId,
+                }
+              : {}),
+            creationMode,
+            classifiedAt: new Date().toISOString(),
+          });
+        },
+      );
+    },
+  );
+}
+
 export function publicProject(record, { includePaths = false } = {}) {
   if (!validProject(record)) throw new Error("invalid Project record");
   return {
@@ -701,5 +886,22 @@ export function publicSuccessor(record) {
     successorNodeKey: record.successorNodeKey,
     projectId: record.projectId,
     linkedAt: record.linkedAt,
+  };
+}
+
+export function publicExecutionThread(record) {
+  if (!validExecutionThread(record)) {
+    throw new Error("invalid Execution Thread record");
+  }
+  return {
+    version: record.version,
+    kind: record.kind,
+    threadId: record.threadId,
+    jobId: record.jobId,
+    sourceThreadId: record.sourceThreadId,
+    ...(record.sourceNodeKey ? { sourceNodeKey: record.sourceNodeKey } : {}),
+    ...(record.projectId ? { projectId: record.projectId } : {}),
+    creationMode: record.creationMode,
+    classifiedAt: record.classifiedAt,
   };
 }

@@ -49,7 +49,7 @@ Every check contains:
   `permissions`, `app-server`, `attachments`, `bridges`, `relay`,
   `message-bodies`, `route-bindings`, `route-deliveries`, `quarantine`,
   `directory-projects`, `directory-nodes`, `directory-node-tombstones`,
-  `directory-successors`, or `schedules`.
+  `directory-successors`, `directory-execution-threads`, or `schedules`.
 - `status` is `pass`, `warn`, `fail`, `unknown`, or `skipped`.
 - `summary` is bounded operator text with no private body data.
 - `verification` is bounded evidence such as `metadata`, `registry`,
@@ -94,6 +94,14 @@ addresses, and native private routing details. `ENODEUNREGISTERED` recommends
 an explicit operator lifecycle action but never permits Doctor to delete or
 Tombstone a Node. `ENODELIFECYCLE` reports interrupted transitions where live
 and tombstoned records coexist; Doctor never chooses either record as truth.
+
+Execution Thread findings validate bounded Job provenance without reading task
+or result bodies. An Execution Thread must not collide with a Node or
+Tombstone, appear in the addressable session registry, or share its Job with
+another Execution Thread. Its retained fork Job must identify the same source
+and execution thread. Optional source Node and Project references must resolve
+together. Doctor reports inconsistencies but never registers, deletes, resumes,
+or converts an Execution Thread.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.

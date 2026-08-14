@@ -278,12 +278,16 @@ test("Node Directory Inspector validates private identity references without pat
     const nodes = path.join(root, "directory", "nodes");
     const tombstones = path.join(root, "directory", "tombstones", "nodes");
     const successors = path.join(root, "directory", "successors");
+    const executionThreads = path.join(root, "directory", "execution-threads");
     await fs.mkdir(projects, { recursive: true, mode: 0o700 });
     await fs.mkdir(nodes, { mode: 0o700 });
     await fs.mkdir(tombstones, { recursive: true, mode: 0o700 });
     await fs.mkdir(successors, { mode: 0o700 });
+    await fs.mkdir(executionThreads, { mode: 0o700 });
     const projectId = "a2345678-1234-4234-8234-123456789abc";
     const predecessorId = "b2345678-1234-4234-8234-123456789abc";
+    const executionThreadId = "c2345678-1234-4234-8234-123456789abc";
+    const executionJobId = "d2345678-1234-4234-8234-123456789abc";
     await writeJson(path.join(projects, `${projectId}.json`), {
       version: 1,
       projectId,
@@ -326,10 +330,33 @@ test("Node Directory Inspector validates private identity references without pat
       projectId,
       linkedAt: "2026-08-14T00:02:00.000Z",
     });
+    await writeJson(path.join(executionThreads, `${executionThreadId}.json`), {
+      version: 1,
+      kind: "execution-thread",
+      threadId: executionThreadId,
+      jobId: executionJobId,
+      sourceThreadId: THREAD_ID,
+      sourceNodeKey: `codex:${THREAD_ID}`,
+      projectId,
+      creationMode: "fork",
+      classifiedAt: "2026-08-14T00:03:00.000Z",
+    });
 
     const checks = inspectNodeDirectory({
       stateDir: root,
       sessions: [{ name: "worker", threadId: THREAD_ID }],
+      jobs: [
+        {
+          version: 1,
+          jobId: executionJobId,
+          kind: "delegation",
+          execution: "fork",
+          targetThreadId: THREAD_ID,
+          threadId: executionThreadId,
+          executionThreadId,
+          status: "completed",
+        },
+      ],
     });
     assert.equal(
       checks.find((check) => check.id.startsWith("directory-projects.identity"))
@@ -357,6 +384,11 @@ test("Node Directory Inspector validates private identity references without pat
         .status,
       "pass",
     );
+    assert.ok(
+      checks
+        .filter((check) => check.scope === "directory-execution-threads")
+        .every((check) => !["fail", "unknown"].includes(check.status)),
+    );
     assert.doesNotMatch(
       JSON.stringify(checks),
       /project-that-must-not-be-rendered|private\/redacted\.sock/,
@@ -374,7 +406,14 @@ test("Node Directory Inspector reports lifecycle conflicts and successor cycles 
     const nodes = path.join(root, "directory", "nodes");
     const tombstones = path.join(root, "directory", "tombstones", "nodes");
     const successors = path.join(root, "directory", "successors");
-    for (const directory of [projects, nodes, tombstones, successors]) {
+    const executionThreads = path.join(root, "directory", "execution-threads");
+    for (const directory of [
+      projects,
+      nodes,
+      tombstones,
+      successors,
+      executionThreads,
+    ]) {
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     }
     const projectId = "c2345678-1234-4234-8234-123456789abc";
@@ -422,13 +461,41 @@ test("Node Directory Inspector reports lifecycle conflicts and successor cycles 
       projectId,
       linkedAt: "2026-08-14T00:03:00.000Z",
     });
+    const executionJobId = "f2345678-1234-4234-8234-123456789abc";
+    await writeJson(path.join(executionThreads, `${firstId}.json`), {
+      version: 1,
+      kind: "execution-thread",
+      threadId: firstId,
+      jobId: executionJobId,
+      sourceThreadId: secondId,
+      sourceNodeKey: `codex:${secondId}`,
+      projectId,
+      creationMode: "legacy-observed",
+      classifiedAt: "2026-08-14T00:04:00.000Z",
+    });
 
     const before = await stateSnapshot(root);
-    const checks = inspectNodeDirectory({ stateDir: root, sessions: [] });
+    const checks = inspectNodeDirectory({
+      stateDir: root,
+      sessions: [],
+      jobs: [
+        {
+          jobId: executionJobId,
+          kind: "delegation",
+          execution: "fork",
+          targetThreadId: secondId,
+          threadId: firstId,
+          status: "completed",
+        },
+      ],
+    });
     const after = await stateSnapshot(root);
     assert.deepEqual(after, before);
     assert.ok(checks.some((check) => check.errorCode === "ENODELIFECYCLE"));
     assert.ok(checks.some((check) => check.errorCode === "ESUCCESSORCYCLE"));
+    assert.ok(
+      checks.some((check) => check.errorCode === "EEXECUTIONNODECOLLISION"),
+    );
     assert.doesNotMatch(JSON.stringify(checks), /redacted-project/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });

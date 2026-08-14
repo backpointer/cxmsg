@@ -51,6 +51,7 @@ export async function runDoctor({
     ...(adapters.inspectNodeDirectory || inspectNodeDirectory)({
       stateDir,
       sessions: state.allSessions || state.sessions,
+      jobs: state.jobs,
     }),
   );
   checks.push(

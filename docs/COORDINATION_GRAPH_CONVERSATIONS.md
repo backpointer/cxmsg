@@ -129,7 +129,9 @@ decision.
 
 Delegation forks and other Job-specific App Server threads are Execution
 Threads. They carry Job provenance but do not appear as addressable Nodes or
-Conversation members unless explicitly registered. This prevents the Node
+Conversation members. Any future conversion requires a separate explicit,
+audited promotion lifecycle; ordinary registration and Directory
+synchronization refuse a classified Execution Thread. This prevents the Node
 Directory and communication graph from fragmenting on every fork.
 
 `forked-from` remains available as provenance for Job inspection and Doctor.
@@ -571,10 +573,18 @@ inspection. Explicit same-Project `successor-of` records accept only one
 predecessor per successor and reject cycles. A successor carries no automatic
 role, grant, permission, Conversation, Delivery, or authority inheritance.
 
+Execution Thread classification is now implemented for new fork Delegations
+and their standalone start fallback. Classification and the Job's
+`executionThreadId` link are persisted before delegated model input starts.
+These records retain bounded source and Job provenance without becoming Nodes
+or Conversation members. Historical classification is an explicit command and
+requires retained fork, source/execution thread, and turn evidence; ambiguous
+Jobs and arbitrary App Server threads are not inferred.
+
 Phase 3 still has no automatic Project merge or move, successor inference,
 Endpoint history retention, Cluster, or web projection. Execution Thread
-classification remains separate from addressable Node synchronization. An
-older Endpoint generation is rejected and an equal generation with conflicting
+classification remains separate from addressable Node synchronization. An older
+Endpoint generation is rejected and an equal generation with conflicting
 identity fails closed. Those omitted lifecycle transitions require explicit
 records and tests in the remaining Phase 3 work.
 

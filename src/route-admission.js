@@ -15,6 +15,7 @@ import { MAX_STORED_MESSAGE_BYTES } from "./message-bodies.js";
 import {
   findProjectByRoutingId,
   nodeKey as directoryNodeKey,
+  readExecutionThread,
   readNode,
   readNodeTombstone,
 } from "./node-directory.js";
@@ -207,6 +208,12 @@ function admission(
   }
   const binding = bindingState.record;
   const senderBinding = senderBindingState.record;
+  if (senderRecord && readExecutionThread(senderRecord.threadId)) {
+    return { state: "quarantined", reason: "sender_execution_thread" };
+  }
+  if (targetRecord && readExecutionThread(targetRecord.threadId)) {
+    return { state: "quarantined", reason: "target_execution_thread" };
+  }
   if (senderRecord && readNodeTombstone("codex", senderRecord.threadId)) {
     return { state: "quarantined", reason: "sender_node_retired" };
   }

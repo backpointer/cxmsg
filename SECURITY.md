@@ -105,6 +105,15 @@ permissions, approvals, route roles, Conversation membership, queued work, or
 message authority. A new runtime Node must receive each of those relationships
 through its owning subsystem and normal validation path.
 
+Execution Thread records are provenance, not identity or authority. New fork
+Delegations are classified before model input is delivered, and the Job stores
+the classified execution thread ID separately from its addressable target
+thread. An Execution Thread cannot collide with a live or Tombstoned Node and
+must not be added to the addressable session registry. Its record contains no
+task, result, permission, approval, credential, or message body. Explicit
+legacy synchronization requires strong retained Job evidence and does not scan
+or promote arbitrary App Server threads.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

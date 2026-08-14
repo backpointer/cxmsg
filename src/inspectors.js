@@ -301,6 +301,9 @@ function validJob(record, stem) {
         record.jobId === stem &&
         UUID_PATTERN.test(record.jobId || "") &&
         (record.kind === undefined || typeof record.kind === "string") &&
+        (record.executionThreadId === undefined ||
+          record.executionThreadId === null ||
+          UUID_PATTERN.test(record.executionThreadId)) &&
         typeof record.status === "string",
     ),
     errorCode: "EJOBSCHEMA",
@@ -501,7 +504,42 @@ function validDirectorySuccessor(record, stem) {
   };
 }
 
-export function inspectNodeDirectory({ stateDir, sessions = [] } = {}) {
+function validDirectoryExecutionThread(record, stem) {
+  const allowedFields = new Set([
+    "version",
+    "kind",
+    "threadId",
+    "jobId",
+    "sourceThreadId",
+    "sourceNodeKey",
+    "projectId",
+    "creationMode",
+    "classifiedAt",
+  ]);
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        record.kind === "execution-thread" &&
+        record.threadId === stem &&
+        UUID_PATTERN.test(record.threadId || "") &&
+        UUID_PATTERN.test(record.jobId || "") &&
+        UUID_PATTERN.test(record.sourceThreadId || "") &&
+        record.threadId !== record.sourceThreadId &&
+        (record.sourceNodeKey === undefined ||
+          record.sourceNodeKey === `codex:${record.sourceThreadId}`) &&
+        (record.projectId === undefined || UUID_PATTERN.test(record.projectId)) &&
+        Boolean(record.sourceNodeKey) === Boolean(record.projectId) &&
+        ["fork", "start-fallback", "legacy-observed"].includes(
+          record.creationMode,
+        ) &&
+        Number.isFinite(Date.parse(record.classifiedAt || "")) &&
+        Object.keys(record).every((field) => allowedFields.has(field)),
+    ),
+    errorCode: "EEXECUTIONTHREADSCHEMA",
+  };
+}
+
+export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}) {
   const projects = scanJsonDirectory({
     stateDir,
     directoryName: "directory/projects",
@@ -526,11 +564,18 @@ export function inspectNodeDirectory({ stateDir, sessions = [] } = {}) {
     scope: "directory-successors",
     validate: validDirectorySuccessor,
   });
+  const executionThreads = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/execution-threads",
+    scope: "directory-execution-threads",
+    validate: validDirectoryExecutionThread,
+  });
   const checks = [
     ...projects.checks,
     ...nodes.checks,
     ...tombstones.checks,
     ...successors.checks,
+    ...executionThreads.checks,
   ];
   const projectIds = new Set(projects.records.map((record) => record.projectId));
   const seenRoutingIds = new Set();
@@ -687,6 +732,77 @@ export function inspectNodeDirectory({ stateDir, sessions = [] } = {}) {
         : null,
     }),
   );
+  const jobsById = new Map(jobs.map((record) => [record.jobId, record]));
+  const executionJobs = new Set();
+  for (const execution of executionThreads.records) {
+    const job = jobsById.get(execution.jobId);
+    const collidesWithNode = identities.has(`codex:${execution.threadId}`);
+    const addressable = sessionThreadIds.has(execution.threadId);
+    const duplicateJob = executionJobs.has(execution.jobId);
+    executionJobs.add(execution.jobId);
+    checks.push(
+      diagnosticCheck({
+        id: `directory-execution-threads.identity.${safeLabel(execution.threadId)}`,
+        scope: "directory-execution-threads",
+        status: collidesWithNode || addressable || duplicateJob ? "fail" : "pass",
+        summary: collidesWithNode
+          ? "Execution Thread identity collides with a live or Tombstoned Node"
+          : addressable
+            ? "Execution Thread is incorrectly registered as an addressable session"
+            : duplicateJob
+              ? "Job references multiple Execution Thread records"
+              : "Execution Thread remains non-addressable and has unique Job provenance",
+        verification: "records",
+        errorCode: collidesWithNode
+          ? "EEXECUTIONNODECOLLISION"
+          : addressable
+            ? "EEXECUTIONADDRESSABLE"
+            : duplicateJob
+              ? "EEXECUTIONJOBDUPLICATE"
+              : null,
+      }),
+    );
+    const jobMatches = Boolean(
+      job &&
+        (job.kind ?? "delegation") === "delegation" &&
+        job.execution === "fork" &&
+        job.targetThreadId === execution.sourceThreadId &&
+        job.threadId === execution.threadId &&
+        (job.executionThreadId === undefined ||
+          job.executionThreadId === null ||
+          job.executionThreadId === execution.threadId),
+    );
+    checks.push(
+      diagnosticCheck({
+        id: `directory-execution-threads.job.${safeLabel(execution.threadId)}`,
+        scope: "directory-execution-threads",
+        status: jobMatches ? "pass" : "fail",
+        summary: jobMatches
+          ? "Execution Thread matches its retained fork Delegation evidence"
+          : "Execution Thread does not match a retained fork Delegation",
+        verification: "jobs",
+        errorCode: jobMatches ? null : "EEXECUTIONJOB",
+      }),
+    );
+    if (execution.sourceNodeKey) {
+      const source = identities.get(execution.sourceNodeKey);
+      const sourceMatches = Boolean(
+        source && source.projectId === execution.projectId,
+      );
+      checks.push(
+        diagnosticCheck({
+          id: `directory-execution-threads.source.${safeLabel(execution.threadId)}`,
+          scope: "directory-execution-threads",
+          status: sourceMatches ? "pass" : "fail",
+          summary: sourceMatches
+            ? "Execution Thread references a same-Project source Node identity"
+            : "Execution Thread source Node or Project identity is missing or mismatched",
+          verification: "records",
+          errorCode: sourceMatches ? null : "EEXECUTIONSOURCE",
+        }),
+      );
+    }
+  }
   return checks;
 }
 

@@ -15,6 +15,7 @@ const stateDir = mkdtempSync(path.join(os.tmpdir(), "cxmsg-node-directory-state-
 const projectRoot = mkdtempSync(path.join(os.tmpdir(), "cxmsg-node-directory-root-"));
 process.env.CXMSG_STATE_DIR = stateDir;
 const directory = await import(`../src/node-directory.js?test=${Date.now()}`);
+const jobs = await import(`../src/jobs.js?node-directory=${Date.now()}`);
 
 test.after(() => {
   rmSync(stateDir, { recursive: true, force: true });
@@ -26,6 +27,8 @@ const projectId = "12345678-1234-4234-8234-123456789abc";
 const nodeId = "22345678-1234-4234-8234-123456789abc";
 const successorNodeId = "52345678-1234-4234-8234-123456789abc";
 const finalNodeId = "62345678-1234-4234-8234-123456789abc";
+const executionThreadId = "a2345678-1234-4234-8234-123456789abc";
+const executionJobId = "b2345678-1234-4234-8234-123456789abc";
 const discovery = (root) => ({
   kind: "canonical-root",
   key: path.resolve(root),
@@ -214,6 +217,102 @@ test("runtime kind is part of Node identity", async () => {
   assert.notEqual(claude.record.nodeKey, directory.readNode("codex", nodeId).nodeKey);
   assert.equal(directory.listNodes().length, 2);
   assert.equal("selectedEndpoints" in directory.publicNode(claude.record), false);
+});
+
+test("Execution Threads retain bounded Job provenance without becoming Nodes", async () => {
+  jobs.createJob({
+    jobId: executionJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: nodeId,
+    task: "private fixture task",
+    execution: "fork",
+  });
+  const classified = await directory.classifyExecutionThread({
+    threadId: executionThreadId,
+    jobId: executionJobId,
+    sourceThreadId: nodeId,
+    creationMode: "fork",
+  });
+  const repeated = await directory.classifyExecutionThread({
+    threadId: executionThreadId,
+    jobId: executionJobId,
+    sourceThreadId: nodeId,
+    creationMode: "fork",
+  });
+
+  assert.deepEqual(repeated, classified);
+  assert.equal(classified.kind, "execution-thread");
+  assert.equal(classified.sourceNodeKey, `codex:${nodeId}`);
+  assert.equal(classified.projectId, projectId);
+  assert.equal(directory.readNode("codex", executionThreadId), null);
+  assert.equal(directory.listExecutionThreads().length, 1);
+  assert.equal("task" in directory.publicExecutionThread(classified), false);
+  assert.equal("permissions" in directory.publicExecutionThread(classified), false);
+
+  await assert.rejects(
+    directory.classifyExecutionThread({
+      threadId: "f2345678-1234-4234-8234-123456789abc",
+      jobId: "a3345678-1234-4234-8234-123456789abc",
+      sourceThreadId: nodeId,
+      creationMode: "fork",
+    }),
+    /retained fork Delegation/,
+  );
+
+  await assert.rejects(
+    directory.upsertNode({
+      runtimeKind: "codex",
+      nativeId: executionThreadId,
+      displayName: "must-not-be-addressable",
+      projectId,
+    }),
+    /cannot be promoted/,
+  );
+
+  await assert.rejects(
+    directory.classifyExecutionThread({
+      threadId: "c2345678-1234-4234-8234-123456789abc",
+      jobId: executionJobId,
+      sourceThreadId: nodeId,
+      creationMode: "fork",
+    }),
+    /Job already belongs/,
+  );
+  jobs.createJob({
+    jobId: "d2345678-1234-4234-8234-123456789abc",
+    from: "coordinator",
+    target: "successor",
+    threadId: successorNodeId,
+    task: "private collision fixture",
+    execution: "fork",
+  });
+  await assert.rejects(
+    directory.classifyExecutionThread({
+      threadId: nodeId,
+      jobId: "d2345678-1234-4234-8234-123456789abc",
+      sourceThreadId: successorNodeId,
+      creationMode: "fork",
+    }),
+    /Addressable or Tombstoned Nodes/,
+  );
+  jobs.createJob({
+    jobId: "e2345678-1234-4234-8234-123456789abc",
+    from: "coordinator",
+    target: "worker",
+    threadId: nodeId,
+    task: "private inline fixture",
+    execution: "fork",
+  });
+  await assert.rejects(
+    directory.classifyExecutionThread({
+      threadId: nodeId,
+      jobId: "e2345678-1234-4234-8234-123456789abc",
+      sourceThreadId: nodeId,
+      creationMode: "fork",
+    }),
+    /Inline source threads/,
+  );
 });
 
 test("successor links are explicit, same-Project, single-predecessor, and acyclic", async () => {

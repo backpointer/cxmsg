@@ -49,7 +49,9 @@ they carry different authority and delivery semantics.
   stable key is the composite `(runtime kind, native ID)`. Display names,
   process IDs, sockets, and terminal attachments are not Node identity.
 - **Execution Thread**: a thread created to execute a Job, such as a
-  Delegation fork. It is not a Node unless explicitly registered as one.
+  Delegation fork. It is not a Node. Any future conversion to an addressable
+  Node requires a separate explicit promotion lifecycle; ordinary registration
+  or Directory synchronization is not promotion.
 - **Endpoint**: volatile evidence describing how a Node can currently be
   reached or presented, such as a UDS address, process, bridge, or TUI
   attachment.
