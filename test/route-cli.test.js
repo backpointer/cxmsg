@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -95,5 +95,21 @@ test("routed CLI send supports an option delimiter and rejects an unbound claime
   );
   assert.equal(sent.status, 1);
   assert.match(sent.stderr, new RegExp(`quarantined ${messageId}.*sender_unbound`));
+  assert.doesNotMatch(sent.stderr, /App Server/);
+});
+
+test("CLI reports an existing invalid binding and send fails closed", () => {
+  writeFileSync(
+    path.join(stateDir, "route-bindings", "worker.json"),
+    '{"version":1,"sessionName":"worker","role":""}\n',
+    { mode: 0o600 },
+  );
+  const shown = cxmsg("route", "show", "worker", "--json");
+  assert.equal(shown.status, 1);
+  assert.match(shown.stderr, /route binding .* is invalid/);
+
+  const sent = cxmsg("send", "--from", "coordinator", "worker", "blocked body");
+  assert.equal(sent.status, 1);
+  assert.match(sent.stderr, /quarantined .*binding_invalid/);
   assert.doesNotMatch(sent.stderr, /App Server/);
 });

@@ -93,6 +93,13 @@ reusing it with different content fails as an idempotency conflict. Targets
 without an explicit binding retain legacy unscoped-send compatibility during
 migration.
 
+Legacy compatibility applies only when the binding file is genuinely absent.
+If a binding path exists but its file type, owner, mode, link count, JSON, or
+identity schema is invalid, cxmsg quarantines the message as
+`binding_invalid`; it never interprets damage as an unbound target. An explicit
+`route bind` may replace the damaged record after the operator verifies the
+intended session, Project, and role.
+
 Supplying `--sender-role` is an assertion that must match a binding for the
 currently registered sender thread. An unbound, missing, or replacement sender
 is quarantined rather than trusted. Use `--` after send options when an

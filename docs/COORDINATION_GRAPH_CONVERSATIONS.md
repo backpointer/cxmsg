@@ -541,6 +541,12 @@ events. Ordinary Peer Messages are the scope of this gate. Delegation,
 grant-validated Claude requests, and internal terminal-ACK wakes retain their
 separate authorization and correlation paths.
 
+Binding lookup is three-state. Only an absent path is `missing` and eligible
+for migration compatibility. A present record that fails private metadata,
+JSON, filename identity, Project key, Node key, or schema validation is
+`invalid` and quarantined before transport; invalid state is never collapsed
+into `legacy-unbound`.
+
 ### Phase 3: Node Directory and Project identity
 
 - strengthen bridge registry ownership and identity-checked Endpoint selection

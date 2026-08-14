@@ -111,7 +111,7 @@ import {
 import {
   listQuarantine,
   listRouteBindings,
-  readRouteBinding,
+  routeBindingState,
   routePeerMessage,
   writeRouteBinding,
 } from "../src/route-admission.js";
@@ -1780,7 +1780,11 @@ async function commandRoute(args) {
     if (args.some((value) => value !== "--json")) {
       throw new Error("route show contains an unknown option");
     }
-    const binding = readRouteBinding(sessionName);
+    const state = routeBindingState(sessionName);
+    if (state.state === "invalid") {
+      throw new Error(`route binding for session ${sessionName} is invalid`);
+    }
+    const binding = state.record;
     if (!binding) throw new Error(`no route binding for session: ${sessionName}`);
     process.stdout.write(
       jsonOutput

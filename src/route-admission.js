@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -68,6 +69,10 @@ function sessionFilename(sessionName) {
   return `${sessionName}.json`;
 }
 
+function bindingPath(sessionName) {
+  return path.join(ROUTE_BINDINGS_DIR, sessionFilename(sessionName));
+}
+
 function messageFilename(messageId) {
   return `${validateUuid("logical message id", messageId)}.json`;
 }
@@ -130,18 +135,50 @@ export function writeRouteBinding({
   });
 }
 
-export function readRouteBinding(sessionName) {
-  const record = readJson(path.join(ROUTE_BINDINGS_DIR, sessionFilename(sessionName)));
-  return record?.version === 1 &&
+function validRouteBindingRecord(record, sessionName) {
+  return Boolean(
+    record?.version === 1 &&
     record.sessionName === sessionName &&
     UUID_PATTERN.test(record.threadId || "") &&
     NAME_PATTERN.test(record.projectId || "") &&
     (record.projectKey === undefined || UUID_PATTERN.test(record.projectKey)) &&
     (record.nodeKey === undefined ||
       record.nodeKey === directoryNodeKey("codex", record.threadId)) &&
-    NAME_PATTERN.test(record.role || "")
-    ? record
-    : null;
+    NAME_PATTERN.test(record.role || ""),
+  );
+}
+
+export function routeBindingState(sessionName) {
+  const filename = bindingPath(sessionName);
+  let metadata;
+  try {
+    metadata = lstatSync(filename);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { state: "missing", record: null };
+    return { state: "invalid", record: null, errorCode: error?.code || "EBINDINGSTAT" };
+  }
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.nlink !== 1 ||
+    (typeof process.getuid === "function" && metadata.uid !== process.getuid()) ||
+    (metadata.mode & 0o077) !== 0
+  ) {
+    return { state: "invalid", record: null, errorCode: "EBINDINGMETADATA" };
+  }
+  try {
+    const record = JSON.parse(readFileSync(filename, "utf8"));
+    if (!validRouteBindingRecord(record, sessionName)) {
+      return { state: "invalid", record: null, errorCode: "EBINDINGSCHEMA" };
+    }
+    return { state: "valid", record };
+  } catch {
+    return { state: "invalid", record: null, errorCode: "EBINDINGJSON" };
+  }
+}
+
+export function readRouteBinding(sessionName) {
+  return routeBindingState(sessionName).record;
 }
 
 export function listRouteBindings() {
@@ -149,30 +186,30 @@ export function listRouteBindings() {
   return readdirSync(ROUTE_BINDINGS_DIR)
     .filter((name) => name.endsWith(".json"))
     .sort()
-    .map((name) => readJson(path.join(ROUTE_BINDINGS_DIR, name)))
-    .filter(
-      (record) =>
-        record?.version === 1 &&
-        SESSION_PATTERN.test(record.sessionName || "") &&
-        UUID_PATTERN.test(record.threadId || "") &&
-        NAME_PATTERN.test(record.projectId || "") &&
-        (record.projectKey === undefined || UUID_PATTERN.test(record.projectKey)) &&
-        (record.nodeKey === undefined ||
-          record.nodeKey === directoryNodeKey("codex", record.threadId)) &&
-        NAME_PATTERN.test(record.role || ""),
-    );
+    .filter((name) => SESSION_PATTERN.test(name.slice(0, -5)))
+    .map((name) => routeBindingState(name.slice(0, -5)))
+    .filter((state) => state.state === "valid")
+    .map((state) => state.record);
 }
 
 function admission(
-  binding,
+  bindingState,
   route,
-  senderBinding,
+  senderBindingState,
   targetRecord,
   senderRecord,
   now = Date.now(),
 ) {
+  if (bindingState.state === "invalid") {
+    return { state: "quarantined", reason: "binding_invalid" };
+  }
+  const binding = bindingState.record;
+  const senderBinding = senderBindingState.record;
   if (route?.sender_role) {
-    if (!senderBinding) {
+    if (senderBindingState.state === "invalid") {
+      return { state: "quarantined", reason: "sender_binding_invalid" };
+    }
+    if (senderBindingState.state === "missing") {
       return { state: "quarantined", reason: "sender_unbound" };
     }
     if (!senderRecord || senderBinding.threadId !== senderRecord.threadId) {
@@ -191,7 +228,9 @@ function admission(
       return { state: "quarantined", reason: "sender_role_mismatch" };
     }
   }
-  if (!binding) return { state: "admitted", reason: "legacy-unbound" };
+  if (bindingState.state === "missing") {
+    return { state: "admitted", reason: "legacy-unbound" };
+  }
   if (targetRecord && binding.threadId !== targetRecord.threadId) {
     return { state: "quarantined", reason: "target_identity_mismatch" };
   }
@@ -297,8 +336,8 @@ export async function routePeerMessage(
       return;
     }
 
-    const targetBinding = readRouteBinding(target);
-    const senderBinding = readRouteBinding(from);
+    const targetBinding = routeBindingState(target);
+    const senderBinding = routeBindingState(from);
     const decision = admission(
       targetBinding,
       normalizedRoute,

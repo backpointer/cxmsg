@@ -63,6 +63,13 @@ against another malicious process running as the same OS user. If a routed
 message supplies `sender_role`, the sender must have a matching binding pinned
 to its current registered thread or the message is quarantined.
 
+An existing binding path is never equivalent to a missing binding. cxmsg
+requires a private owner-controlled regular file with one link and a valid
+filename-bound identity schema. Symlinks, broad modes, malformed JSON, stale
+Node keys, and incomplete records are `binding_invalid` and fail closed before
+App Server access. The same rule yields `sender_binding_invalid` when a routed
+sender-role assertion references an invalid sender binding.
+
 Route Admission covers ordinary Codex Peer Messages and ordinary Claude bridge
 ingress. User-authorized Delegation, a Claude request validated by a capability
 grant, and the bridge's internal correlated terminal-ACK wake are distinct

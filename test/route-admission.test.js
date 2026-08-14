@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import {
+  mkdtempSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -34,6 +40,8 @@ const ids = {
   senderUnbound: "b2345678-1234-4234-8234-123456789abc",
   senderProjectMismatch: "c3345678-1234-4234-8234-123456789abc",
   targetMismatch: "a1345678-1234-4234-8234-123456789abc",
+  invalidSenderBinding: "d4345678-1234-4234-8234-123456789abc",
+  invalidTargetBinding: "e5345678-1234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -290,4 +298,54 @@ test("logical message conflicts fail and typed envelopes parse explicitly", asyn
   assert.equal(parsed.message, "typed body");
   assert.equal(parsed.route.project_id, "hermes");
   assert.equal(routes.parseTypedPeerEnvelope('{"message":"ordinary json"}'), null);
+});
+
+test("a symlink sender binding is invalid rather than an unbound role assertion", async () => {
+  symlinkSync(
+    path.join(routes.ROUTE_BINDINGS_DIR, "coordinator.json"),
+    path.join(routes.ROUTE_BINDINGS_DIR, "symlink-sender.json"),
+  );
+  let dispatches = 0;
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "symlink-sender",
+      target: "worker",
+      message: "symlink sender binding",
+      route: route(ids.invalidSenderBinding, { sender_role: "coordinator" }),
+      logicalMessageId: ids.invalidSenderBinding,
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+  );
+  assert.equal(outcome.reason, "sender_binding_invalid");
+  assert.equal(dispatches, 0);
+});
+
+test("an existing malformed target binding fails closed before context injection", async () => {
+  const bindingFile = path.join(routes.ROUTE_BINDINGS_DIR, "worker.json");
+  writeFileSync(
+    bindingFile,
+    `${JSON.stringify({ version: 1, sessionName: "worker", role: "" })}\n`,
+    { mode: 0o600 },
+  );
+  assert.equal(routes.routeBindingState("worker").state, "invalid");
+  assert.equal(routes.routeBindingState("missing-worker").state, "missing");
+  let dispatches = 0;
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "unbound-sender",
+      target: "worker",
+      message: "must remain outside model context",
+      route: route(ids.invalidTargetBinding),
+      logicalMessageId: ids.invalidTargetBinding,
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+  );
+  assert.equal(outcome.reason, "binding_invalid");
+  assert.equal(dispatches, 0);
 });
