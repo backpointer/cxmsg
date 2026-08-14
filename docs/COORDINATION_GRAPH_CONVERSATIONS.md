@@ -470,6 +470,13 @@ Raising the WebSocket frame limit is not a substitute for bounded reads.
   with one receipt ID;
 - reconcile stale Job and status metadata.
 
+Initial implementation is complete against `codex-cli 0.147.0`. Automated
+tests cover bounded metadata and turn-page calls, paginated Job result lookup,
+late ACK evidence, redacted JSONL events, and missing-worker reconciliation. A
+live large-thread status smoke test also completes without hydrating rollout
+history. Compatibility remains pinned-version behavior and must be retested
+when the experimental App Server protocol changes.
+
 ### Phase 1: immutable inspection and Doctor foundation
 
 - split Inspector Interfaces from mutating refresh paths;

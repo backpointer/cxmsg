@@ -435,6 +435,13 @@ the reply address itself select the Codex destination. Bridge state and logs
 are stored under `~/.codex/cxmsg/claude-bridges/`; the Claude-visible record is
 removed when the bridge stops.
 
+Thread activity checks use metadata-only `thread/read` plus bounded
+`thread/turns/list` pages; cxmsg does not hydrate the full rollout merely to
+check status, steer a message, refresh a Job, or run mirror preflight. Redacted
+transport, ACK, timeout, and wake evidence is appended to the owner-only
+`~/.codex/cxmsg/events.jsonl`. These JSONL records contain correlation IDs and
+bounded state codes, not message bodies, full socket paths, or error text.
+
 Status and ordinary delivery use an owner-only UDS health check. The cxmsg
 bridge health response binds its target, thread, PID, start time, and a fresh
 nonce to the registry record. A sandbox may deny `kill(pid, 0)` or `ps` with

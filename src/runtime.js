@@ -7,6 +7,7 @@ export const CXMSG_STATE_DIR = process.env.CXMSG_STATE_DIR
 export const DEFAULT_SOCKET_PATH = path.join(CXMSG_STATE_DIR, "app-server.sock");
 export const PID_PATH = path.join(CXMSG_STATE_DIR, "app-server.pid");
 export const LOG_PATH = path.join(CXMSG_STATE_DIR, "app-server.log");
+export const EVENT_LOG_PATH = path.join(CXMSG_STATE_DIR, "events.jsonl");
 export function socketPath() {
   return process.env.CXMSG_SOCKET || DEFAULT_SOCKET_PATH;
 }

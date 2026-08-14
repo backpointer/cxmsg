@@ -26,7 +26,8 @@ test("job refresh tolerates a newly started turn missing from the first read", a
     const refreshed = await refreshJob(
       {
         request: async () => ({
-          thread: { id: "execution-thread", turns: [] },
+          data: [],
+          nextCursor: null,
         }),
       },
       running,
@@ -51,10 +52,8 @@ test("job refresh tolerates a newly started turn missing from the first read", a
     const transientRefreshed = await refreshJob(
       {
         request: async () => ({
-          thread: {
-            id: "execution-thread",
-            turns: [{ id: "new-turn", status: "interrupted", items: [] }],
-          },
+          data: [{ id: "new-turn", status: "interrupted", items: [] }],
+          nextCursor: null,
         }),
       },
       transientRunning,

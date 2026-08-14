@@ -1,0 +1,140 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  findThreadTurn,
+  readThreadForInput,
+  readThreadMetadata,
+} from "../src/thread-activity.js";
+
+test("thread activity reads metadata and the active turn without full history", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      if (method === "thread/read") {
+        return {
+          thread: {
+            id: "thread-1",
+            status: { type: "active" },
+            turns: [],
+          },
+        };
+      }
+      if (method === "thread/turns/list") {
+        return {
+          data: [{ id: "turn-active", status: "inProgress", items: [] }],
+          nextCursor: null,
+        };
+      }
+      assert.fail(`unexpected request: ${method}`);
+    },
+  };
+
+  const metadata = await readThreadMetadata(client, "thread-1");
+  const active = await readThreadForInput(client, metadata);
+
+  assert.equal(active.turns[0].id, "turn-active");
+  assert.deepEqual(calls, [
+    {
+      method: "thread/read",
+      params: { threadId: "thread-1", includeTurns: false },
+    },
+    {
+      method: "thread/turns/list",
+      params: {
+        threadId: "thread-1",
+        limit: 8,
+        sortDirection: "desc",
+        itemsView: "notLoaded",
+      },
+    },
+  ]);
+});
+
+test("turn lookup paginates bounded summary pages", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      if (!params.cursor) {
+        return {
+          data: [{ id: "newer-turn", status: "completed", items: [] }],
+          nextCursor: "page-2",
+        };
+      }
+      return {
+        data: [
+          {
+            id: "target-turn",
+            status: "completed",
+            items: [
+              {
+                type: "agentMessage",
+                phase: "final_answer",
+                text: "bounded result",
+              },
+            ],
+          },
+        ],
+        nextCursor: null,
+      };
+    },
+  };
+
+  const turn = await findThreadTurn(client, "thread-1", "target-turn", {
+    pageSize: 1,
+    maxPages: 2,
+  });
+
+  assert.equal(turn.id, "target-turn");
+  assert.deepEqual(
+    calls.map(({ method, params }) => ({
+      method,
+      cursor: params.cursor || null,
+      itemsView: params.itemsView,
+      limit: params.limit,
+    })),
+    [
+      {
+        method: "thread/turns/list",
+        cursor: null,
+        itemsView: "summary",
+        limit: 1,
+      },
+      {
+        method: "thread/turns/list",
+        cursor: "page-2",
+        itemsView: "summary",
+        limit: 1,
+      },
+    ],
+  );
+});
+
+test("unloaded input threads resume without hydrating turn history", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      return {
+        thread: {
+          id: "thread-1",
+          status: { type: "idle" },
+        },
+      };
+    },
+  };
+
+  const thread = await readThreadForInput(client, {
+    id: "thread-1",
+    status: { type: "notLoaded" },
+  });
+
+  assert.equal(thread.status.type, "idle");
+  assert.deepEqual(calls, [
+    {
+      method: "thread/resume",
+      params: { threadId: "thread-1", includeTurns: false },
+    },
+  ]);
+});

@@ -14,6 +14,7 @@ import {
   truncateUtf8,
 } from "./messaging.js";
 import { readSessionRecord } from "./registry.js";
+import { readThreadMetadata } from "./thread-activity.js";
 
 export const EXECUTION_MODES = new Set(["fork", "inline"]);
 export const APPROVAL_MODES = new Set(["never", "relay", "auto"]);
@@ -38,6 +39,7 @@ async function executionThread(client, sourceThread, record, job) {
     threadId: sourceThread.id,
     approvalPolicy: job.approval === "never" ? "never" : "on-request",
     deferGoalContinuation: true,
+    includeTurns: false,
   };
   if (job.permissions) forkParams.permissions = job.permissions;
   try {
@@ -87,14 +89,11 @@ async function mirrorResult(client, job) {
   try {
     const targetRecord = readSessionRecord(job.target);
     if (!targetRecord) throw new Error(`unknown Codex session: ${job.target}`);
-    const read = await client.request("thread/read", {
-      threadId: targetRecord.threadId,
-      includeTurns: true,
-    });
-    if (read.thread.status?.type === "active") {
+    const thread = await readThreadMetadata(client, targetRecord.threadId);
+    if (thread.status?.type === "active") {
       throw new Error("target session is active; refusing to steer a mirror into unrelated work");
     }
-    const delivery = await deliverPeerMessage(client, read.thread, {
+    const delivery = await deliverPeerMessage(client, thread, {
       from: job.from,
       message: mirrorMessage(job),
     });
@@ -135,14 +134,11 @@ export async function runDelegationWorker(jobId, { Client = AppServerClient } = 
   try {
     await client.connect();
     await validatePermissionProfile(client, record, job.permissions);
-    const read = await client.request("thread/read", {
-      threadId: record.threadId,
-      includeTurns: true,
-    });
-    if (read.thread.status?.type === "active") {
+    const thread = await readThreadMetadata(client, record.threadId);
+    if (thread.status?.type === "active") {
       throw new Error("target session already has an active turn");
     }
-    const targetThread = await executionThread(client, read.thread, record, job);
+    const targetThread = await executionThread(client, thread, record, job);
     const delivery = await deliverDelegatedTask(client, targetThread, {
       from: job.from,
       target: job.target,

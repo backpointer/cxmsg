@@ -12,8 +12,10 @@ import { withFileLock } from "./file-lock.js";
 import { finalTurnResult } from "./messaging.js";
 import { processState } from "./process-state.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
+import { findThreadTurn } from "./thread-activity.js";
 
 const JOBS_DIR = path.join(CXMSG_STATE_DIR, "jobs");
+const WORKER_REGISTRATION_GRACE_MS = 10_000;
 
 function ensureJobsDirectory() {
   mkdirSync(JOBS_DIR, { recursive: true, mode: 0o700 });
@@ -151,16 +153,41 @@ export function activeJobsForTarget(target) {
 
 export async function failJobIfWorkerExited(
   job,
-  { processStateFn = processState } = {},
+  {
+    processStateFn = processState,
+    now = Date.now(),
+    registrationGraceMs = WORKER_REGISTRATION_GRACE_MS,
+  } = {},
 ) {
-  if (
-    job?.kind !== "delegation" ||
-    !isPendingJob(job) ||
-    !Number.isSafeInteger(job.workerPid) ||
-    processStateFn(job.workerPid) !== "missing"
-  ) {
+  if (job?.kind !== "delegation" || !isPendingJob(job)) {
     return job;
   }
+
+  if (!Number.isSafeInteger(job.workerPid)) {
+    const createdAt = Date.parse(job.createdAt);
+    if (!Number.isFinite(createdAt) || now - createdAt < registrationGraceMs) {
+      return job;
+    }
+    return mutateJob(job.jobId, (current) => {
+      if (
+        current.kind !== "delegation" ||
+        !isPendingJob(current) ||
+        Number.isSafeInteger(current.workerPid)
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        status: "failed",
+        failureCode: "worker_missing",
+        error: "delegation worker was not registered before the startup deadline",
+        completedAt: new Date().toISOString(),
+      };
+    });
+  }
+
+  if (processStateFn(job.workerPid) !== "missing") return job;
+
   return mutateJob(job.jobId, (current) => {
     if (
       current.kind !== "delegation" ||
@@ -181,11 +208,7 @@ export async function failJobIfWorkerExited(
 
 export async function refreshJob(client, job) {
   if (!job.turnId) return job;
-  const read = await client.request("thread/read", {
-    threadId: job.threadId,
-    includeTurns: true,
-  });
-  const turn = read.thread.turns.find((candidate) => candidate.id === job.turnId);
+  const turn = await findThreadTurn(client, job.threadId, job.turnId);
   if (!turn) {
     const startedAt = Date.parse(job.turnStartedAt || job.updatedAt || job.createdAt);
     if (Number.isFinite(startedAt) && Date.now() - startedAt < 10_000) {

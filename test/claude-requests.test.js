@@ -79,24 +79,25 @@ test("authorized Claude requests run in a fork and return one correlated reply",
           };
         }
         if (method === "turn/start") return { turn: { id: "request-turn" } };
-        if (method === "thread/read" && params.threadId === "execution-thread") {
+        if (
+          method === "thread/turns/list" &&
+          params.threadId === "execution-thread"
+        ) {
           return {
-            thread: {
-              id: "execution-thread",
-              turns: [
-                {
-                  id: "request-turn",
-                  status: "completed",
-                  items: [
-                    {
-                      type: "agentMessage",
-                      phase: "final_answer",
-                      text: "report accepted",
-                    },
-                  ],
-                },
-              ],
-            },
+            data: [
+              {
+                id: "request-turn",
+                status: "completed",
+                items: [
+                  {
+                    type: "agentMessage",
+                    phase: "final_answer",
+                    text: "report accepted",
+                  },
+                ],
+              },
+            ],
+            nextCursor: null,
           };
         }
         assert.fail(`unexpected App Server request: ${method}`);
@@ -119,6 +120,18 @@ test("authorized Claude requests run in a fork and return one correlated reply",
     assert.equal(
       calls.find((call) => call.method === "thread/fork").params.permissions,
       ":read-only",
+    );
+    assert.equal(
+      calls.find((call) => call.method === "thread/fork").params.includeTurns,
+      false,
+    );
+    assert.equal(
+      calls.find((call) => call.method === "thread/read").params.includeTurns,
+      false,
+    );
+    assert.equal(
+      calls.find((call) => call.method === "thread/turns/list").params.itemsView,
+      "summary",
     );
     const frame = JSON.parse(received.trim());
     assert.match(frame.message.content, new RegExp(`in-reply-to="${REQUEST_ID}"`));

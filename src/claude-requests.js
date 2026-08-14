@@ -15,10 +15,10 @@ import {
   updateJob,
 } from "./jobs.js";
 import {
-  activeTurnId,
   deliverDelegatedTask,
   truncateUtf8,
 } from "./messaging.js";
+import { readThreadMetadata } from "./thread-activity.js";
 
 export const CLAUDE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_REPLY_TEXT_BYTES = 24 * 1024;
@@ -59,11 +59,8 @@ async function validatePermissionProfile(client, record, permissions) {
 
 async function waitForSourceThread(client, job, deadline) {
   while (true) {
-    const read = await client.request("thread/read", {
-      threadId: job.targetThreadId,
-      includeTurns: true,
-    });
-    if (!activeTurnId(read.thread)) return read.thread;
+    const thread = await readThreadMetadata(client, job.targetThreadId);
+    if (thread.status?.type !== "active") return thread;
     if (Date.now() >= deadline) {
       throw new Error("timed out waiting for the target Codex session to become idle");
     }
@@ -76,6 +73,7 @@ async function forkExecutionThread(client, sourceThread, record, permissions, ap
     threadId: sourceThread.id,
     approvalPolicy: approval === "never" ? "never" : "on-request",
     deferGoalContinuation: true,
+    includeTurns: false,
     permissions,
   };
   try {

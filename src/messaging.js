@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { readThreadForInput } from "./thread-activity.js";
 
 export const THREAD_NAME_PREFIX = "cxmsg:";
 export const MAX_MESSAGE_BYTES = 16 * 1024;
@@ -139,13 +140,7 @@ export function finalTurnResult(turn) {
 }
 
 export async function deliverDelegatedTask(client, thread, payload) {
-  let current = thread;
-  if (current.status?.type === "notLoaded") {
-    const resumed = await client.request("thread/resume", {
-      threadId: current.id,
-    });
-    current = resumed.thread;
-  }
+  const current = await readThreadForInput(client, thread);
 
   if (activeTurnId(current)) {
     throw new Error("target session already has an active turn");
@@ -173,14 +168,7 @@ export async function deliverDelegatedTask(client, thread, payload) {
 }
 
 export async function deliverPeerMessage(client, thread, payload) {
-  let current = thread;
-
-  if (current.status?.type === "notLoaded") {
-    const resumed = await client.request("thread/resume", {
-      threadId: current.id,
-    });
-    current = resumed.thread;
-  }
+  const current = await readThreadForInput(client, thread);
 
   if (current.canAcceptDirectInput === false) {
     throw new Error(`session ${displaySessionName(current.name) || current.id} cannot accept direct input`);

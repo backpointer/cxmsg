@@ -2,6 +2,10 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import test from "node:test";
 import { withAppServer } from "../src/app-server-client.js";
+import {
+  listRecentTurns,
+  readThreadMetadata,
+} from "../src/thread-activity.js";
 
 const integrationEnabled = process.env.CXMSG_INTEGRATION === "1";
 
@@ -19,14 +23,14 @@ test(
 
       try {
         await client.request("thread/name/set", { threadId, name });
-        const read = await client.request("thread/read", {
-          threadId,
-          includeTurns: false,
+        const thread = await readThreadMetadata(client, threadId);
+        const turns = await listRecentTurns(client, threadId, {
+          itemsView: "summary",
         });
-        assert.equal(read.thread.id, threadId);
-        assert.equal(read.thread.name, name);
-        assert.equal(read.thread.ephemeral, false);
-
+        assert.equal(thread.id, threadId);
+        assert.equal(thread.name, name);
+        assert.equal(thread.ephemeral, false);
+        assert.deepEqual(turns.data, []);
       } finally {
         await client.request("thread/delete", { threadId });
       }

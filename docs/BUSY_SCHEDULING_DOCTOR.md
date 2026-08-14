@@ -536,6 +536,25 @@ mutations with strong identity evidence, exact finding revalidation, and
 recoverable behavior. Restart, signal, record removal, grant, permission, and
 approval actions remain outside broad automation.
 
+### Phase 0 implementation status
+
+The initial Phase 0 slice is implemented and tested against `codex-cli 0.147.0`:
+
+- the thread activity Adapter uses metadata-only reads and bounded summary or
+  not-loaded turn pages;
+- send, status, bridge wake, Job refresh, Claude request waiting, Delegation,
+  and mirror preflight no longer request full turn history;
+- owner-only JSONL events record redacted transport, ACK, timeout, and wake
+  phases;
+- late valid ACKs record `late=true` before a wake is attempted;
+- delegation Jobs without a registered worker fail after a bounded startup
+  grace period;
+- empty bridge probes are silent, and bridge handler activity is stored
+  separately from advertised bridge availability.
+
+The remaining canonical phases are still proposals and must not be inferred as
+implemented from this status.
+
 ## Acceptance tests
 
 ### Busy and scheduling

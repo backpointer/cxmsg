@@ -86,6 +86,7 @@ import {
   validateMessage,
   validateSessionName,
 } from "../src/messaging.js";
+import { readThreadMetadata } from "../src/thread-activity.js";
 import {
   listSessionRecords,
   readSessionRecord,
@@ -752,11 +753,8 @@ async function commandStatus(name, jsonOutput) {
 
   const state = await withAppServer(async (client) => {
     try {
-      const result = await client.request("thread/read", {
-        threadId: record.threadId,
-        includeTurns: true,
-      });
-      const threadStatus = result.thread.status?.type || "unknown";
+      const thread = await readThreadMetadata(client, record.threadId);
+      const threadStatus = thread.status?.type || "unknown";
       return {
         name,
         threadId: record.threadId,
@@ -764,8 +762,8 @@ async function commandStatus(name, jsonOutput) {
         activity: threadStatus === "active" ? "working" : threadStatus,
         threadStatus,
         attachedPid: attachment?.childPid || null,
-        cwd: result.thread.cwd || record.cwd,
-        updatedAt: result.thread.updatedAt || null,
+        cwd: thread.cwd || record.cwd,
+        updatedAt: thread.updatedAt || null,
         managedByCxmsgAt: record.managedByCxmsgAt || null,
         error: null,
       };
@@ -1447,11 +1445,8 @@ async function commandDelegate(args) {
           throw new Error(`permission profile is blocked: ${permissions}`);
         }
       }
-      const read = await client.request("thread/read", {
-        threadId: record.threadId,
-        includeTurns: true,
-      });
-      if (read.thread.status?.type === "active") {
+      const thread = await readThreadMetadata(client, record.threadId);
+      if (thread.status?.type === "active") {
         throw new Error("target session already has an active turn");
       }
     });
@@ -1614,11 +1609,8 @@ async function commandSend(args) {
   const delivery = await withAppServer(async (client) => {
     const targetRecord = readSessionRecord(target);
     if (!targetRecord) throw new Error(`unknown Codex session: ${target}`);
-    const read = await client.request("thread/read", {
-      threadId: targetRecord.threadId,
-      includeTurns: true,
-    });
-    return deliverPeerMessage(client, read.thread, { from, message });
+    const thread = await readThreadMetadata(client, targetRecord.threadId);
+    return deliverPeerMessage(client, thread, { from, message });
   });
 
   process.stdout.write(

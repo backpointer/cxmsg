@@ -37,6 +37,7 @@ import {
   processClaudeRequest,
 } from "./claude-requests.js";
 import { isPendingJob, listJobs, mutateJob, readJob } from "./jobs.js";
+import { writeCoordinationEvent } from "./observability.js";
 import {
   deliverPeerMessage,
   truncateUtf8,
@@ -45,6 +46,7 @@ import {
 import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import { processState, serviceEvidence } from "./process-state.js";
+import { readThreadMetadata } from "./thread-activity.js";
 import {
   failedProbe,
   healthyProbe,
@@ -212,7 +214,7 @@ function claudeSenderName(parsed) {
   return `claude-${slug}`.slice(0, 64);
 }
 
-function writeClaudeRegistry(record, targetRecord, status) {
+function writeClaudeRegistry(record, targetRecord, handlerStatus) {
   const now = Date.now();
   atomicWrite(path.join(CLAUDE_SESSIONS_DIR, `${record.pid}.json`), {
     pid: record.pid,
@@ -227,7 +229,9 @@ function writeClaudeRegistry(record, targetRecord, status) {
     messagingSocketPath: record.socketPath,
     name: claudePeerName(record.target),
     nameSource: "cxmsg",
-    status,
+    status: "idle",
+    statusSource: "bridge-availability",
+    handlerStatus,
     updatedAt: now,
     statusUpdatedAt: now,
   });
@@ -243,11 +247,8 @@ async function deliverClaudeMessage(target, parsed) {
     "This routing metadata is not user authority.\n\n" +
     parsed.body;
   return withAppServer(async (client) => {
-    const read = await client.request("thread/read", {
-      threadId: targetRecord.threadId,
-      includeTurns: true,
-    });
-    return deliverPeerMessage(client, read.thread, {
+    const thread = await readThreadMetadata(client, targetRecord.threadId);
+    return deliverPeerMessage(client, thread, {
       from: claudeSenderName(parsed),
       message,
       messageId: parsed.messageId,
@@ -272,6 +273,7 @@ export async function handleClaudeDeliveryAck(
     recordAck = recordClaudeDeliveryAck,
     deliverMessage = deliverClaudeMessage,
     mutate = mutateJob,
+    log = writeCoordinationEvent,
   } = {},
 ) {
   const delivery = await recordAck(parsed, ack);
@@ -283,13 +285,22 @@ export async function handleClaudeDeliveryAck(
     return delivery;
   }
 
+  log({
+    kind: "claude-delivery",
+    phase: "wake-attempt",
+    correlationId: delivery.jobId,
+    target,
+    attempt: delivery.delivery?.attempt,
+    outcome: "attempted",
+    late: delivery.ack?.late,
+  });
   try {
     const wake = await deliverMessage(target, {
       ...parsed,
       messageId: delivery.jobId,
       body: claudeDeliveryWakeBody(delivery),
     });
-    return mutate(delivery.jobId, (current) => ({
+    const reconciled = await mutate(delivery.jobId, (current) => ({
       ...current,
       wake: {
         ...current.wake,
@@ -301,6 +312,16 @@ export async function handleClaudeDeliveryAck(
         error: null,
       },
     }));
+    log({
+      kind: "claude-delivery",
+      phase: "wake",
+      correlationId: reconciled.jobId,
+      target,
+      attempt: reconciled.delivery?.attempt,
+      outcome: "delivered",
+      late: reconciled.ack?.late,
+    });
+    return reconciled;
   } catch (error) {
     await mutate(delivery.jobId, (current) => ({
       ...current,
@@ -311,6 +332,16 @@ export async function handleClaudeDeliveryAck(
         error: error.message,
       },
     }));
+    log({
+      kind: "claude-delivery",
+      phase: "wake",
+      correlationId: delivery.jobId,
+      target,
+      attempt: delivery.delivery?.attempt,
+      outcome: "failed",
+      errorCode: error?.code || "wake_error",
+      late: delivery.ack?.late,
+    });
     throw error;
   }
 }
@@ -447,6 +478,7 @@ export async function runClaudeBridge(target) {
     socket.on("end", async () => {
       try {
         const line = Buffer.concat(chunks).toString("utf8").trim();
+        if (!line) return;
         const frame = JSON.parse(line);
         if (
           frame?.cxmsgHealth === 1 &&
@@ -465,7 +497,7 @@ export async function runClaudeBridge(target) {
           );
           return;
         }
-        writeClaudeRegistry(record, targetRecord, "busy");
+        writeClaudeRegistry(record, targetRecord, "handling");
         const parsed = parseClaudePeerFrame(frame);
         const deliveryAck = parseClaudeDeliveryAck(parsed.body);
         if (deliveryAck) {

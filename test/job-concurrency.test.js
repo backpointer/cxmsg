@@ -62,10 +62,8 @@ test("job refresh preserves approval records written while thread state is read"
       ],
     }));
     releaseRead({
-      thread: {
-        id: "execution-thread",
-        turns: [{ id: "turn-1", status: "completed", items: [] }],
-      },
+      data: [{ id: "turn-1", status: "completed", items: [] }],
+      nextCursor: null,
     });
 
     const refreshed = await refreshing;
@@ -110,10 +108,8 @@ test("job refresh preserves approval records written while thread state is read"
       approvals: [{ approvalId: "approval-1", status: "pending" }],
     }));
     releaseActiveRead({
-      thread: {
-        id: "execution-thread",
-        turns: [{ id: "turn-approval", status: "inProgress", items: [] }],
-      },
+      data: [{ id: "turn-approval", status: "inProgress", items: [] }],
+      nextCursor: null,
     });
     assert.equal((await activeRefresh).status, "awaiting_approval");
     assert.equal(readJob(approvalRunning.jobId).status, "awaiting_approval");
@@ -195,6 +191,28 @@ test("job refresh preserves approval records written while thread state is read"
       ).status,
       "running",
     );
+
+    const missingWorker = createJob({
+      jobId: "c2345678-1234-1234-1234-123456789abc",
+      from: "coordinator",
+      target: "worker",
+      targetThreadId: "source-thread",
+      threadId: null,
+      task: "missing worker",
+    });
+    assert.equal(
+      (
+        await failJobIfWorkerExited(missingWorker, {
+          now: Date.parse(missingWorker.createdAt) + 9_000,
+        })
+      ).status,
+      "dispatching",
+    );
+    const reconciledMissingWorker = await failJobIfWorkerExited(missingWorker, {
+      now: Date.parse(missingWorker.createdAt) + 11_000,
+    });
+    assert.equal(reconciledMissingWorker.status, "failed");
+    assert.equal(reconciledMissingWorker.failureCode, "worker_missing");
   } finally {
     await fs.rm(stateDir, { recursive: true, force: true });
     delete process.env.CXMSG_STATE_DIR;

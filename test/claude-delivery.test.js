@@ -228,7 +228,40 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
         ackDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
       },
     });
-    assert.equal((await refreshClaudeDelivery(timedOut)).status, "ack_timeout");
+    timedOut = await refreshClaudeDelivery(timedOut);
+    assert.equal(timedOut.status, "ack_timeout");
+    await assert.rejects(
+      recordClaudeDeliveryAck(
+        {
+          fromSession: "67654321-4321-4321-4321-cba987654321",
+          fromAddress: peer.address,
+        },
+        parseClaudeDeliveryAck(
+          `<cxmsg-ack in-reply-to="${timedOut.jobId}" status="completed">\nWrong late source\n</cxmsg-ack>`,
+        ),
+      ),
+      (error) => error.code === "EACKSOURCE",
+    );
+    assert.equal(readJob(timedOut.jobId).status, "ack_timeout");
+    const lateAck = parseClaudeDeliveryAck(
+      `<cxmsg-ack in-reply-to="${timedOut.jobId}" status="completed">\nLate result\n</cxmsg-ack>`,
+    );
+    timedOut = await recordClaudeDeliveryAck(
+      { fromSession: peer.sessionId, fromAddress: peer.address },
+      lateAck,
+    );
+    assert.equal(timedOut.status, "completed");
+    assert.equal(timedOut.ack.late, true);
+
+    const eventLog = await fs.readFile(path.join(stateDir, "events.jsonl"), "utf8");
+    const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));
+    assert.ok(events.some((event) => event.phase === "transport-attempt"));
+    assert.ok(
+      events.some(
+        (event) => event.phase === "ack-persisted" && event.late === true,
+      ),
+    );
+    assert.doesNotMatch(eventLog, /review the change|Late result|cc-socks/);
   } finally {
     await fs.rm(stateDir, { recursive: true, force: true });
     delete process.env.CXMSG_STATE_DIR;
