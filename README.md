@@ -716,6 +716,11 @@ relay beyond loopback, copy its state record into a repository, or pass its
 token on a command line. Stop it with `cxmsg relay stop` when host fallback is
 not needed.
 
+## Development proposals
+
+- [Busy delivery, scheduling, and doctor improvement plan](docs/BUSY_SCHEDULING_DOCTOR.md)
+- [Domain language](CONTEXT.md)
+
 ## References
 
 - [Unlocking the Codex harness](https://openai.com/ko-KR/index/unlocking-the-codex-harness/)
