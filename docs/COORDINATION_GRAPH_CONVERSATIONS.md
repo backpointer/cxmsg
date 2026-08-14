@@ -630,13 +630,13 @@ latter without replay. Long admitted bodies reference the Phase 2 Message Body
 Store by digest and opaque Content Reference. Legacy `route-deliveries` remain
 readable but are not written for new sends.
 
-This is intentionally not the Scheduler. It supports immediate delivery only,
-one recipient, one dispatch attempt, no automatic retry, and no retention or
-purge. A fail-closed 64 MiB metadata quota reserves bounded space for the
-attempt and terminal evidence of every admitted batch. The current rebuild is
-bounded by a 256 MiB hard scan ceiling; a persistent rebuildable index,
-retention policy, claims, leases, scheduled wake policies, and Job migration
-remain Phase 4 work.
+The initial slice supported immediate delivery only. The current Phase 4 slice
+adds `when-idle` for one recipient while retaining one dispatch attempt and no
+automatic retry, retention, or purge. A fail-closed 64 MiB metadata quota
+reserves bounded space for the attempt and terminal evidence of every admitted
+batch. The current rebuild is bounded by a 256 MiB hard scan ceiling; a
+persistent rebuildable index, broader Trigger policies, retention policy, and
+Job migration remain Phase 4 work.
 
 The P0 diagnostic follow-up shares one 30-second grace between reconciliation
 and Doctor. Doctor reports an aged attempt without evidence as a derived warn,
@@ -648,6 +648,20 @@ records fail closed with bounded segment-and-line diagnostics; partial final
 lines retain the existing uncommitted-tail quarantine rule. Metadata quota
 usage is read from file sizes only, warns at 90 percent, and fails at 100
 percent without automatic deletion or repair.
+
+The first Scheduler slice is now implemented. A typed `when-idle` route stores
+the full body by Content Reference, requires an explicit expiry within seven
+days, and commits `scheduled` before returning. One managed worker uses FIFO
+target lanes, a 256-record per-target bound, and immutable 30-second
+claim/lease events. It observes Idle before and after claim acquisition,
+releases an unused claim on a Busy race, records an attempt immediately before
+`turn/start`, and never replays `unknown`. Expired claims are reclaimable after
+worker or server restart. `cxmsg server start` owns Scheduler startup;
+`cxmsg scheduler start|status|stop` exposes the lifecycle explicitly.
+
+This slice still has no `after-turn`, `after-job`, scheduled Delegation,
+automatic retry, persistent index, retention, purge, or Conversation fan-out.
+Those remain separate Phase 4/6 gates rather than inferred capabilities.
 
 ### Phase 5: Direct Conversation
 

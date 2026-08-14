@@ -9,6 +9,14 @@ export const THREAD_NAME_PREFIX = "cxmsg:";
 export const MAX_MESSAGE_BYTES = 16 * 1024;
 export const MAX_PEER_CONTEXT_FRAGMENT_BYTES = 2 * 1024;
 
+export class TargetBusyError extends Error {
+  constructor(message = "target session already has an active turn") {
+    super(message);
+    this.name = "TargetBusyError";
+    this.code = "ETARGETBUSY";
+  }
+}
+
 export function validateSessionName(name) {
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name || "")) {
     throw new Error(
@@ -309,6 +317,47 @@ export async function deliverPeerMessage(
     additionalContext: peerInput.additionalContext,
     clientUserMessageId: peerInput.messageId,
     // A peer message must never open an approval path or grant escalation.
+    approvalPolicy: "never",
+  });
+  return {
+    delivery: "started",
+    messageId: peerInput.messageId,
+    threadId: current.id,
+    turnId: result.turn.id,
+  };
+}
+
+export async function deliverPeerMessageWhenIdle(
+  client,
+  thread,
+  payload,
+  { storeBody = storeMessageBody, beforeStart = null } = {},
+) {
+  const current = await readThreadForInput(client, thread);
+
+  if (current.canAcceptDirectInput === false) {
+    throw new Error(`session ${displaySessionName(current.name) || current.id} cannot accept direct input`);
+  }
+  if (activeTurnId(current)) throw new TargetBusyError();
+
+  const message = validateStoredMessage(payload.message);
+  const messageId = payload.messageId || randomUUID();
+  const bodyReference =
+    Buffer.byteLength(message, "utf8") > MAX_MESSAGE_BYTES
+      ? await storeBody({ messageId, body: message })
+      : null;
+  const peerInput = peerMessageInput({
+    ...payload,
+    message,
+    messageId,
+    bodyReference,
+  });
+  if (beforeStart) await beforeStart();
+  const result = await client.request("turn/start", {
+    threadId: current.id,
+    input: peerInput.input,
+    additionalContext: peerInput.additionalContext,
+    clientUserMessageId: peerInput.messageId,
     approvalPolicy: "never",
   });
   return {

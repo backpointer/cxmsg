@@ -65,6 +65,16 @@ another append. There is no automatic retention, purge, retry, or repair.
 Delivery Ledger files and their quarantine are runtime state and must never be
 committed, published, or copied into a web snapshot.
 
+`when-idle` scheduling retains the full Message Body in the separate owner-only
+Body Store before the Delivery becomes claimable. The typed route requires an
+explicit expiry no more than seven days away. Claims use random worker and
+claim IDs with a 30-second lease; they are concurrency metadata, never delivery
+or authorization evidence. The Scheduler rechecks the pinned target thread
+after claim acquisition and records the attempt before `turn/start`. A Busy
+race releases the unused claim. An uncertain result becomes `unknown` and is
+not retried automatically. Scheduler stop and stale worker replacement remain
+fail-closed when process identity cannot be verified.
+
 A complete malformed Ledger line fails the whole Ledger closed. Doctor may
 identify only its segment number and line number; it never emits the record.
 An incomplete final line is not committed evidence and is ignored until the

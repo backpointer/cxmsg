@@ -586,9 +586,11 @@ The initial immutable inspection and Doctor foundation is implemented:
 - text and JSON renderers consume the same redacted finding model, and the
   versioned schema is documented in `docs/DOCTOR_SCHEMA_V1.md`.
 
-Repair and Scheduled Delivery checks remain intentionally absent or skipped.
-Canonical Phases 2–7 remain proposals and must not be inferred as implemented
-from this status.
+Repair remains intentionally absent. Doctor now reports missing or unverified
+Scheduler workers and expired claim leases without claiming or dispatching
+them. The first `when-idle` Phase 4 slice is implemented; `after-turn`,
+`after-job`, scheduled Delegation, automatic retry, and Phases 5–7 remain
+proposals and must not be inferred as implemented from this status.
 
 ## Acceptance tests
 
@@ -666,27 +668,41 @@ from this status.
 - mark every web view as diagnostic only unless a separately authorized
   orchestration Interface is implemented.
 
-## Decisions required before implementation
+## Phase 4 decisions fixed for the first Scheduler slice
+
+- expiry has no silent default: `when-idle` requires an explicit future value
+  no more than seven days away;
+- a claim lease is 30 seconds and is not renewed during the bounded first
+  dispatch attempt;
+- `cxmsg server start` starts the Scheduler, `server stop` stops it while
+  preserving queued records, and explicit `scheduler start|status|stop`
+  commands expose the same lifecycle;
+- each pinned target-thread lane is FIFO and accepts at most 256 pending
+  scheduled Deliveries;
+- metadata and bodies retain the existing 64 MiB fail-closed quotas, 8 MiB
+  segments, and 256 MiB scan ceilings; automatic retention and purge remain
+  disabled;
+- stale claims are reclaimed only after lease expiry, and an uncertain
+  transport result becomes terminal `unknown` without automatic replay.
+
+## Decisions required before later Phase 4 slices
 
 The following values must be fixed in code, tests, and reference documentation
-before canonical Phase 4 begins:
+before broader Trigger policies, retention, or migration begin:
 
-- default and maximum schedule expiry;
 - terminal Delivery and schedule metadata retention and cleanup ownership;
-- claim lease duration and renewal interval;
-- scheduler start, supervision, and stop ownership, including whether
-  `cxmsg server stop` releases active leases while preserving queued records and
-  how Doctor reports a missing or intentionally stopped scheduler;
-- per-target queue-depth default and maximum, with enqueue-time rejection when
-  the configured limit is reached;
-- per-target dispatch-lane identity when names are renamed;
+- claim renewal behavior for transport operations that can exceed 30 seconds;
+- distinction between an intentionally stopped Scheduler and an exited worker;
+- any configurable per-target queue depth below the fixed safety maximum;
+- explicit successor migration for a scheduled target; names never transfer a
+  Delivery to a replacement thread;
 - Delivery Ledger metadata, message-body, and terminal evidence retention;
 - total storage quota, segment size, index rebuild limits, and purge behavior;
 - migration treatment for existing Jobs and unavailable ordinary send history;
 - supported Codex CLI version range for notification behavior and
   expected-turn mismatch non-mutation behavior.
 
-Until these are decided, implementations must not choose silent defaults.
+Until these are decided, later slices must not choose silent defaults.
 
 ## Recommended first slice
 

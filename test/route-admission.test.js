@@ -56,6 +56,7 @@ const ids = {
   retainedBody: "d0345678-2234-4234-8234-123456789abc",
   duplicateStore: "e2345678-2234-4234-8234-123456789abc",
   corruptBlocked: "f3345678-2234-4234-8234-123456789abc",
+  scheduled: "a4345678-2234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -165,6 +166,75 @@ test("large admitted bodies are retained by digest reference before dispatch", a
   assert.equal(retained.contentRef, `cxmsg-message:${ids.retainedBody}`);
   assert.equal(retained.messageBytes, Buffer.byteLength(message, "utf8"));
   assert.equal(retained.version, 2);
+});
+
+test("when-idle routes retain even short bodies and do not dispatch immediately", async () => {
+  let dispatches = 0;
+  const expiry = new Date(Date.now() + 60_000).toISOString();
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "worker",
+      message: "deliver after the current turn",
+      route: route(ids.scheduled, {
+        wake_policy: "when-idle",
+        expiry,
+      }),
+      logicalMessageId: ids.scheduled,
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+  );
+  assert.equal(outcome.status, "scheduled");
+  assert.equal(dispatches, 0);
+  const retained = routes.readRouteDelivery(ids.scheduled);
+  assert.equal(retained.contentRef, `cxmsg-message:${ids.scheduled}`);
+  assert.equal(retained.attemptCount, 0);
+
+  const duplicate = await routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "worker",
+      message: "deliver after the current turn",
+      route: route(ids.scheduled, {
+        wake_policy: "when-idle",
+        expiry,
+      }),
+      logicalMessageId: ids.scheduled,
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+  );
+  assert.equal(duplicate.deduplicated, true);
+  assert.equal(duplicate.status, "scheduled");
+  assert.equal(dispatches, 0);
+});
+
+test("when-idle requires a bounded explicit expiry", () => {
+  assert.throws(
+    () =>
+      routes.normalizeRoute(
+        route("b5345678-2234-4234-8234-123456789abc", {
+          wake_policy: "when-idle",
+          expiry: undefined,
+        }),
+      ),
+    /requires expiry/,
+  );
+  assert.throws(
+    () =>
+      routes.normalizeRoute(
+        route("c6345678-2234-4234-8234-123456789abc", {
+          wake_policy: "when-idle",
+          expiry: new Date(Date.now() + routes.MAX_WHEN_IDLE_DELAY_MS + 1_000).toISOString(),
+        }),
+      ),
+    /no more than 7 days/,
+  );
 });
 
 test("missing, mismatched, and expired routes quarantine with zero dispatch", async () => {

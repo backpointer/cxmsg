@@ -48,9 +48,21 @@ function ledgerBatch({
   batchId,
   targetThreadId = THREAD_ID,
   createdAt = "2026-08-14T00:00:00.000Z",
+  wakePolicy = "immediate",
 }) {
   const body = "private body stays absent";
-  const route = null;
+  const route =
+    wakePolicy === "when-idle"
+      ? {
+          schema_version: 1,
+          project_id: "hermes",
+          target_role: "auditor",
+          logical_message_id: messageId,
+          payload_type: "coordination",
+          wake_policy: "when-idle",
+          expiry: "2026-08-14T01:00:00.000Z",
+        }
+      : null;
   return {
     schemaVersion: 1,
     recordType: "ledger-batch",
@@ -63,7 +75,7 @@ function ledgerBatch({
         messageId,
         bytes: Buffer.byteLength(body, "utf8"),
         sha256: createHash("sha256").update(body).digest("hex"),
-        contentRef: null,
+        contentRef: wakePolicy === "when-idle" ? `cxmsg-message:${messageId}` : null,
       },
       route,
       routeFingerprint: createHash("sha256")
@@ -78,8 +90,8 @@ function ledgerBatch({
         targetThreadId,
         admissionState: "admitted",
         admissionReason: "legacy-unbound",
-        wakePolicy: "immediate",
-        state: "created",
+        wakePolicy,
+        state: wakePolicy === "immediate" ? "created" : "scheduled",
         createdAt,
         updatedAt: createdAt,
       },
@@ -431,6 +443,57 @@ test("Route Inspector rebuilds Delivery Ledger evidence without exposing bodies"
     assert.equal(
       reconciled.some((check) => check.errorCode === "ELEDGERATTEMPTSTALE"),
       false,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Route Inspector reports queued work with a missing scheduler and expired claim", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-scheduler-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const segments = path.join(root, "delivery-ledger", "segments");
+    const quarantine = path.join(root, "delivery-ledger", "quarantine");
+    await fs.mkdir(segments, { recursive: true, mode: 0o700 });
+    await fs.mkdir(quarantine, { mode: 0o700 });
+    const messageId = "1edaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const deliveryId = "2edaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const workerId = "3edaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const batch = ledgerBatch({
+      messageId,
+      deliveryId,
+      batchId: "4edaa4e0-fa31-454e-a37e-a37f8807f0e7",
+      wakePolicy: "when-idle",
+    });
+    const claim = {
+      schemaVersion: 1,
+      recordType: "delivery-claim",
+      action: "acquired",
+      messageId,
+      deliveryId,
+      claimId: "5edaa4e0-fa31-454e-a37e-a37f8807f0e7",
+      workerId,
+      claimedAt: "2026-08-14T00:00:01.000Z",
+      leaseUntil: "2026-08-14T00:00:31.000Z",
+    };
+    await fs.writeFile(
+      path.join(segments, "segment-00000001.jsonl"),
+      `${JSON.stringify(batch)}\n${JSON.stringify(claim)}\n`,
+      { mode: 0o600 },
+    );
+    const checks = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+      now: Date.parse("2026-08-14T00:01:00.000Z"),
+    });
+    assert.equal(
+      checks.find((check) => check.errorCode === "ESCHEDULECLAIMEXPIRED").status,
+      "warn",
+    );
+    assert.equal(
+      checks.find((check) => check.errorCode === "ESCHEDULERDOWN").status,
+      "warn",
     );
   } finally {
     await fs.rm(root, { recursive: true, force: true });

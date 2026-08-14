@@ -159,16 +159,25 @@ import {
   hostRelayRequest,
   readHostRelayRecord,
 } from "../src/host-relay.js";
+import {
+  readSchedulerRecord,
+  SCHEDULER_LIFECYCLE_LOCK_PATH,
+  SCHEDULER_LOG_PATH,
+  SCHEDULER_RECORD_PATH,
+} from "../src/scheduler.js";
+import { withFileLock } from "../src/file-lock.js";
 
 const codexBin = process.env.CODEX_BIN || "codex";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const claudeBridgeWorker = path.join(scriptDir, "claude-bridge-worker.js");
 const delegationWorker = path.join(scriptDir, "delegation-worker.js");
 const hostRelayWorker = path.join(scriptDir, "host-relay-worker.js");
+const schedulerWorker = path.join(scriptDir, "scheduler-worker.js");
 
 function usage(exitCode = 0) {
   const output = `Usage:
   cxmsg server start|status|stop
+  cxmsg scheduler start|status|stop
   cxmsg open <name> [-- <codex resume options>]
   cxmsg attach <name> [-- <codex resume options>]
   cxmsg detach <name>
@@ -181,7 +190,7 @@ function usage(exitCode = 0) {
   cxmsg send [--from <name>] [--project <id>] [--target-role <role>]
              [--sender-role <role>] [--task <id>] [--logical-message-id <uuid>]
              [--payload-type <type>] [--expiry <timestamp>]
-             [--wake-policy immediate] [--] <target> <message...>
+             [--wake-policy immediate|when-idle] [--] <target> <message...>
   cxmsg route bind <session> --project <id> --role <role>
   cxmsg route show <session> [--json]
   cxmsg route list [--json]
@@ -393,6 +402,109 @@ async function ensureServer() {
   await startServer();
 }
 
+function schedulerState() {
+  const record = readSchedulerRecord();
+  if (!record) return { status: "stopped", record: null, process: "missing", identity: "unavailable" };
+  const process = processState(record.pid);
+  const identity =
+    process === "missing"
+      ? "unavailable"
+      : processIdentity(record.pid, [schedulerWorker]).state;
+  const status =
+    process === "alive" && identity === "matched"
+      ? "running"
+      : process === "missing"
+        ? "stopped"
+        : "unreachable";
+  return { status, record, process, identity };
+}
+
+async function startScheduler() {
+  return withFileLock(SCHEDULER_LIFECYCLE_LOCK_PATH, async () => {
+    const current = schedulerState();
+    if (current.status === "running") return current.record.pid;
+    if (current.record && current.process !== "missing") {
+      throw new Error(
+        `cannot verify scheduler pid ${current.record.pid}; refusing to replace it`,
+      );
+    }
+    if (current.record && existsSync(SCHEDULER_RECORD_PATH)) {
+      unlinkSync(SCHEDULER_RECORD_PATH);
+    }
+    mkdirSync(CXMSG_STATE_DIR, { recursive: true, mode: 0o700 });
+    chmodSync(CXMSG_STATE_DIR, 0o700);
+    const logFd = openSync(SCHEDULER_LOG_PATH, "a", 0o600);
+    const child = spawn(process.execPath, [schedulerWorker], {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+    });
+    closeSync(logFd);
+    let childError = null;
+    child.once("error", (error) => {
+      childError = error;
+    });
+    child.unref();
+    if (!child.pid) throw new Error("failed to start scheduler worker");
+    const ready = await waitUntil(() => {
+      if (childError) return true;
+      const record = readSchedulerRecord();
+      return record?.pid === child.pid || processState(child.pid) === "missing";
+    });
+    if (childError) throw childError;
+    const started = schedulerState();
+    if (!ready || started.status !== "running") {
+      throw new Error(`scheduler did not become ready; inspect ${SCHEDULER_LOG_PATH}`);
+    }
+    return started.record.pid;
+  });
+}
+
+async function stopScheduler() {
+  return withFileLock(SCHEDULER_LIFECYCLE_LOCK_PATH, async () => {
+    const state = schedulerState();
+    if (!state.record) return false;
+    if (state.process === "missing") {
+      if (existsSync(SCHEDULER_RECORD_PATH)) unlinkSync(SCHEDULER_RECORD_PATH);
+      return false;
+    }
+    if (state.status !== "running" || state.identity !== "matched") {
+      throw new Error(
+        `scheduler pid ${state.record.pid} identity is unverified; refusing to signal it`,
+      );
+    }
+    process.kill(state.record.pid, "SIGTERM");
+    await waitUntil(() => processState(state.record.pid) === "missing", 5_000);
+    if (processState(state.record.pid) !== "missing") {
+      throw new Error(`scheduler pid ${state.record.pid} did not stop`);
+    }
+    if (existsSync(SCHEDULER_RECORD_PATH)) unlinkSync(SCHEDULER_RECORD_PATH);
+    return true;
+  });
+}
+
+async function ensureScheduler() {
+  await ensureServer();
+  return startScheduler();
+}
+
+async function commandScheduler(action) {
+  if (!action || !["start", "status", "stop"].includes(action)) usage(2);
+  if (action === "start") {
+    const pid = await ensureScheduler();
+    process.stdout.write(`cxmsg scheduler is running (pid ${pid}).\n`);
+    return;
+  }
+  if (action === "stop") {
+    const stopped = await stopScheduler();
+    process.stdout.write(`cxmsg scheduler is ${stopped ? "stopped" : "not running"}.\n`);
+    return;
+  }
+  const state = schedulerState();
+  process.stdout.write(
+    `${state.status}\tpid=${state.record?.pid || "-"}\tverification=${state.identity}\n`,
+  );
+}
+
 async function createOrFindSession(client, name, cwd = process.cwd()) {
   return withSessionLock(name, async () => {
     const existing = readSessionRecord(name);
@@ -442,7 +554,10 @@ async function commandServer(action) {
 
   if (action === "start") {
     const pid = await startServer();
-    process.stdout.write(`Codex app-server is running (pid ${pid}).\n`);
+    const schedulerPid = await startScheduler();
+    process.stdout.write(
+      `Codex app-server is running (pid ${pid}); scheduler pid ${schedulerPid}.\n`,
+    );
     return;
   }
   if (action === "stop") {
@@ -454,6 +569,7 @@ async function commandServer(action) {
         `cannot stop app-server while remote TUI attachments are active: ${attachments.map((record) => record.name).join(", ")}`,
       );
     }
+    await stopScheduler();
     const state = await serverState();
     if (!state.running) {
       if (state.safeToSignal) {
@@ -1752,6 +1868,13 @@ async function commandSend(args) {
     process.exitCode = 1;
     return;
   }
+  if (outcome.status === "scheduled") {
+    await ensureScheduler();
+    process.stdout.write(
+      `${outcome.deduplicated ? "deduplicated" : "scheduled"} ${outcome.logicalMessageId} for ${target} (when-idle)\n`,
+    );
+    return;
+  }
   if (outcome.deduplicated) {
     process.stdout.write(
       `deduplicated ${outcome.logicalMessageId} for ${target} (${outcome.status})\n`,
@@ -2457,6 +2580,9 @@ async function main() {
   switch (command) {
     case "server":
       await commandServer(args[0]);
+      break;
+    case "scheduler":
+      await commandScheduler(args[0]);
       break;
     case "create":
       await commandCreate(args[0]);

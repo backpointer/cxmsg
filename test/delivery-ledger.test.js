@@ -30,16 +30,27 @@ const ids = {
   targetThread: "21345678-1234-4234-8234-123456789abc",
   turn: "31345678-1234-4234-8234-123456789abc",
   secondMessage: "41345678-1234-4234-8234-123456789abc",
+  scheduledMessage: "51345678-1234-4234-8234-123456789abc",
+  worker: "61345678-1234-4234-8234-123456789abc",
+  recoveryMessage: "81345678-1234-4234-8234-123456789abc",
+  boundedMessage: "a1345678-1234-4234-8234-123456789abc",
+  rejectedMessage: "b1345678-1234-4234-8234-123456789abc",
+  boundedThread: "c1345678-1234-4234-8234-123456789abc",
 };
 
-function logicalMessage(messageId = ids.message, body = "private coordination body") {
+function logicalMessage(
+  messageId = ids.message,
+  body = "private coordination body",
+  wakePolicy = "immediate",
+) {
   const route = {
     schema_version: 1,
     project_id: "hermes",
     target_role: "auditor",
     logical_message_id: messageId,
     payload_type: "coordination",
-    wake_policy: "immediate",
+    wake_policy: wakePolicy,
+    ...(wakePolicy === "when-idle" ? { expiry: "2026-08-14T03:00:00.000Z" } : {}),
   };
   return {
     messageId,
@@ -135,6 +146,132 @@ test("attempt and evidence records rebuild the strongest proven state", async ()
   assert.equal(ledger.listDeliveryLedger().length, 1);
 });
 
+test("when-idle Delivery uses an expiring claim before one dispatch attempt", async () => {
+  const scheduled = logicalMessage(ids.scheduledMessage, "scheduled body", "when-idle");
+  scheduled.body.contentRef = `cxmsg-message:${ids.scheduledMessage}`;
+  const committed = await ledger.commitSingleRecipientDelivery({
+    logicalMessage: scheduled,
+    target: "auditor",
+    targetThreadId: ids.targetThread,
+    admissionState: "admitted",
+    admissionReason: "binding_match",
+    wakePolicy: "when-idle",
+    now: "2026-08-14T01:00:00.000Z",
+  });
+  assert.equal(committed.record.delivery.state, "scheduled");
+
+  const first = await ledger.claimScheduledDelivery(ids.scheduledMessage, {
+    workerId: ids.worker,
+    leaseMs: 30_000,
+    now: "2026-08-14T01:00:01.000Z",
+  });
+  assert.equal(first.acquired, true);
+  const competing = await ledger.claimScheduledDelivery(ids.scheduledMessage, {
+    workerId: "71345678-1234-4234-8234-123456789abc",
+    leaseMs: 30_000,
+    now: "2026-08-14T01:00:02.000Z",
+  });
+  assert.equal(competing.acquired, false);
+  assert.equal(competing.claim.claimId, first.claim.claimId);
+
+  await ledger.releaseScheduledDeliveryClaim(ids.scheduledMessage, {
+    claimId: first.claim.claimId,
+    workerId: ids.worker,
+    reason: "target_busy",
+    now: "2026-08-14T01:00:03.000Z",
+  });
+  const second = await ledger.claimScheduledDelivery(ids.scheduledMessage, {
+    workerId: ids.worker,
+    leaseMs: 30_000,
+    now: "2026-08-14T01:00:04.000Z",
+  });
+  const attempt = await ledger.beginScheduledDelivery(ids.scheduledMessage, {
+    claimId: second.claim.claimId,
+    workerId: ids.worker,
+    now: "2026-08-14T01:00:05.000Z",
+  });
+  await ledger.appendDeliveryEvidence(ids.scheduledMessage, {
+    attemptId: attempt.attemptId,
+    state: "turn_started",
+    evidenceKind: "dispatch-result",
+    turnId: ids.turn,
+    transportResult: "started",
+    observedAt: "2026-08-14T01:00:06.000Z",
+  });
+  const rebuilt = ledger.readDeliveryLedger(ids.scheduledMessage);
+  assert.equal(rebuilt.delivery.state, "turn_started");
+  assert.equal(rebuilt.delivery.claimCount, 2);
+  await assert.rejects(
+    ledger.claimScheduledDelivery(ids.scheduledMessage, {
+      workerId: ids.worker,
+      now: "2026-08-14T01:00:07.000Z",
+    }),
+    /not claimable/,
+  );
+});
+
+test("an expired claim is reclaimable after scheduler restart", async () => {
+  const scheduled = logicalMessage(ids.recoveryMessage, "recover body", "when-idle");
+  scheduled.body.contentRef = `cxmsg-message:${ids.recoveryMessage}`;
+  await ledger.commitSingleRecipientDelivery({
+    logicalMessage: scheduled,
+    target: "auditor",
+    targetThreadId: ids.targetThread,
+    admissionState: "admitted",
+    admissionReason: "binding_match",
+    wakePolicy: "when-idle",
+    now: "2026-08-14T02:00:00.000Z",
+  });
+  const abandoned = await ledger.claimScheduledDelivery(ids.recoveryMessage, {
+    workerId: ids.worker,
+    leaseMs: 1_000,
+    now: "2026-08-14T02:00:01.000Z",
+  });
+  const recovered = await ledger.claimScheduledDelivery(ids.recoveryMessage, {
+    workerId: "91345678-1234-4234-8234-123456789abc",
+    leaseMs: 30_000,
+    now: abandoned.claim.leaseUntil,
+  });
+  assert.equal(recovered.acquired, true);
+  assert.notEqual(recovered.claim.claimId, abandoned.claim.claimId);
+  assert.equal(ledger.readDeliveryLedger(ids.recoveryMessage).delivery.claimCount, 2);
+});
+
+test("the per-target queue bound rejects before committing another batch", async () => {
+  const first = logicalMessage(ids.boundedMessage, "first queued", "when-idle");
+  first.body.contentRef = `cxmsg-message:${ids.boundedMessage}`;
+  await ledger.commitSingleRecipientDelivery(
+    {
+      logicalMessage: first,
+      target: "bounded-auditor",
+      targetThreadId: ids.boundedThread,
+      admissionState: "admitted",
+      admissionReason: "binding_match",
+      wakePolicy: "when-idle",
+      now: "2026-08-14T02:00:00.000Z",
+    },
+    { scheduledPerTargetLimit: 1 },
+  );
+  const second = logicalMessage(ids.rejectedMessage, "second queued", "when-idle");
+  second.body.contentRef = `cxmsg-message:${ids.rejectedMessage}`;
+  await assert.rejects(
+    ledger.commitSingleRecipientDelivery(
+      {
+        logicalMessage: second,
+        target: "bounded-auditor",
+        targetThreadId: ids.boundedThread,
+        admissionState: "admitted",
+        admissionReason: "binding_match",
+        wakePolicy: "when-idle",
+        now: "2026-08-14T02:00:01.000Z",
+      },
+      { scheduledPerTargetLimit: 1 },
+    ),
+    /queue.*reached 1/,
+  );
+  assert.equal(ledger.readDeliveryLedger(ids.rejectedMessage), null);
+});
+
 test("an incomplete active tail is quarantined before a new batch is appended", async () => {
   const active = path.join(
     ledger.DELIVERY_LEDGER_SEGMENTS_DIR,
@@ -153,7 +290,7 @@ test("an incomplete active tail is quarantined before a new batch is appended", 
   });
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_QUARANTINE_DIR).length, 1);
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_SEGMENTS_DIR).length, 1);
-  assert.equal(ledger.listDeliveryLedger().length, 2);
+  assert.equal(ledger.listDeliveryLedger().length, 5);
 });
 
 test("Ledger scans reject broad modes and symlink segments", () => {

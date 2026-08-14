@@ -147,6 +147,13 @@ number and line number without record contents. `ELEDGERQUOTAWARN` starts at
 90 percent of actual segment bytes and required `ELEDGERQUOTA` starts at 100
 percent. Doctor performs no reconciliation, retry, archive, purge, or repair.
 
+Scheduled Delivery findings remain read-only. `ESCHEDULERDOWN` reports queued
+Deliveries without a registered worker, `ESCHEDULERUNVERIFIED` preserves an
+`EPERM` process result, and `ESCHEDULECLAIMEXPIRED` identifies a reclaimable
+lease without claiming or dispatching it. Invalid scheduler metadata is
+`ESCHEDULERSCHEMA`. Doctor never starts the Scheduler, acquires a claim,
+extends a lease, reads the retained body, or starts a model turn.
+
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.
 

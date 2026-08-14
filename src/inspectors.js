@@ -495,8 +495,10 @@ function inspectDeliveryLedger(
         logicalMessageId: message.messageId,
         target: delivery.target,
         admissionState: delivery.admissionState,
+        wakePolicy: delivery.wakePolicy,
         ...(delivery.targetThreadId ? { targetThreadId: delivery.targetThreadId } : {}),
         attemptStartedAt: activeAttempt?.startedAt || null,
+        claimLeaseUntil: delivery.claim?.leaseUntil || null,
         updatedAt: delivery.updatedAt,
         status:
           delivery.admissionState === "quarantined"
@@ -1584,6 +1586,7 @@ export function inspectRouteState({
   now = Date.now(),
   reconcileGraceMs = ROUTE_RECONCILE_GRACE_MS,
   ledgerQuotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+  processStateFn = processState,
 } = {}) {
   const bindings = scanJsonDirectory({
     stateDir,
@@ -1690,6 +1693,25 @@ export function inspectRouteState({
       }
       continue;
     }
+    if (
+      delivery.version === 2 &&
+      delivery.status === "scheduled" &&
+      delivery.claimLeaseUntil &&
+      Date.parse(delivery.claimLeaseUntil) <= now
+    ) {
+      checks.push(
+        diagnosticCheck({
+          id: `delivery-ledger.expired-claim.${safeLabel(delivery.logicalMessageId)}`,
+          scope: "schedules",
+          status: "warn",
+          summary: "A scheduled Delivery retains an expired claim lease",
+          verification: "records",
+          errorCode: "ESCHEDULECLAIMEXPIRED",
+          remediation: "Start the scheduler to reclaim the Delivery; do not replay it manually",
+          required: false,
+        }),
+      );
+    }
     if (["dispatching", "unknown"].includes(delivery.status)) {
       const legacyIdentity = !delivery.targetThreadId;
       checks.push(
@@ -1730,6 +1752,93 @@ export function inspectRouteState({
       required: false,
     }),
   );
+  const scheduled = ledger.records.filter((delivery) => delivery.status === "scheduled");
+  const schedulerPath = path.join(stateDir, "scheduler.json");
+  const schedulerMetadata = secureMetadata(schedulerPath, "file");
+  if (schedulerMetadata.status === "missing") {
+    checks.push(
+      diagnosticCheck({
+        id: "schedules.worker",
+        scope: "schedules",
+        status: scheduled.length > 0 ? "warn" : "pass",
+        summary:
+          scheduled.length > 0
+            ? `${scheduled.length} scheduled Delivery record(s) have no registered scheduler worker`
+            : "No scheduled Deliveries require a scheduler worker",
+        verification: "metadata",
+        errorCode: scheduled.length > 0 ? "ESCHEDULERDOWN" : null,
+        remediation: scheduled.length > 0 ? "Run cxmsg scheduler start" : null,
+        required: false,
+      }),
+    );
+  } else if (schedulerMetadata.status !== "secure") {
+    checks.push(
+      metadataFinding(
+        "schedules.worker.metadata",
+        "schedules",
+        "Scheduler worker record",
+        schedulerMetadata,
+      ),
+    );
+  } else {
+    let scheduler = null;
+    try {
+      scheduler = JSON.parse(readFileSync(schedulerPath, "utf8"));
+    } catch {}
+    const valid = Boolean(
+      scheduler?.version === 1 &&
+        Number.isSafeInteger(scheduler.pid) &&
+        scheduler.pid > 1 &&
+        UUID_PATTERN.test(scheduler.workerId || "") &&
+        Number.isFinite(Date.parse(scheduler.startedAt || "")),
+    );
+    if (!valid) {
+      checks.push(
+        diagnosticCheck({
+          id: "schedules.worker.schema",
+          scope: "schedules",
+          status: "fail",
+          summary: "Scheduler worker record is invalid",
+          verification: "schema",
+          errorCode: "ESCHEDULERSCHEMA",
+        }),
+      );
+    } else {
+      const workerState = processStateFn(scheduler.pid);
+      checks.push(
+        diagnosticCheck({
+          id: "schedules.worker.process",
+          scope: "schedules",
+          status:
+            workerState === "alive"
+              ? "pass"
+              : workerState === "unverified"
+                ? "unknown"
+                : scheduled.length > 0
+                  ? "warn"
+                  : "pass",
+          summary:
+            workerState === "alive"
+              ? "Scheduler worker process is live"
+              : workerState === "unverified"
+                ? "Scheduler worker process cannot be verified by this caller"
+                : "Scheduler worker process is missing",
+          verification: "process",
+          errorCode:
+            workerState === "alive"
+              ? null
+              : workerState === "unverified"
+                ? "ESCHEDULERUNVERIFIED"
+                : "ESCHEDULEREXITED",
+          remediation:
+            workerState === "missing" && scheduled.length > 0
+              ? "Run cxmsg scheduler start"
+              : null,
+          required: false,
+        }),
+      );
+    }
+  }
   return checks;
 }
 

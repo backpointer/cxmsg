@@ -106,10 +106,34 @@ evidence. The Ledger stores body byte count, digest, and an optional opaque
 Content Reference, never the raw body. Legacy `route-deliveries` records remain
 readable for reconciliation but new sends do not create them.
 
-The first Ledger slice supports immediate single-recipient delivery only. It
-does not schedule, retry, purge, fan out, or infer task completion. An
-ambiguous dispatch remains `unknown`, and only positive App Server acceptance
-evidence may strengthen it to `turn_started`. Storage uses private 8 MiB JSONL
+The Ledger also supports the first scheduled-delivery policy, `when-idle`.
+It retains every scheduled body before enqueue, requires an explicit expiry no
+more than seven days away, and starts no turn while the target is Busy:
+
+```bash
+cxmsg send \
+  --from coordinator \
+  --project hermes \
+  --target-role auditor \
+  --logical-message-id <uuid> \
+  --wake-policy when-idle \
+  --expiry 2026-08-16T12:00:00Z \
+  worker \
+  "Review handoff <id> after the current turn."
+```
+
+`cxmsg server start` starts the Scheduler with App Server. It can also be
+managed with `cxmsg scheduler start|status|stop`. The worker checks the target
+again after acquiring a 30-second claim, releases the claim if the target has
+become Busy, and records one attempt immediately before `turn/start`. Expired
+claims are recoverable after restart. Each target lane is FIFO and accepts at
+most 256 pending scheduled Deliveries. A transport result whose mutation is
+uncertain becomes `unknown` and is never replayed automatically.
+
+This slice does not yet implement `after-turn`, `after-job`, automatic retry,
+retention, purge, group fan-out, or task-completion inference. An ambiguous
+dispatch remains `unknown`, and only positive App Server acceptance evidence
+may strengthen it to `turn_started`. Storage uses private 8 MiB JSONL
 segments, a 64 MiB fail-closed quota with bounded terminal-evidence reserve,
 and a 256 MiB hard scan ceiling. Automatic retention and purge remain disabled
 until their policy is explicitly selected.
@@ -857,6 +881,9 @@ signal.
   thread IDs; unregistered Codex threads are not exposed as peers.
 - If the target has an active turn, the message is appended with `turn/steer`.
 - If the target is idle, a new turn is started with `approvalPolicy: "never"`.
+- A routed `--wake-policy when-idle` message is retained instead of steered.
+  The Scheduler starts it only after two bounded Idle observations surrounding
+  claim acquisition. It still uses `approvalPolicy: "never"`.
 - The message body is supplied as `additionalContext` with kind `untrusted`.
 - Inline Message Bodies larger than 2 KiB are split on UTF-8 boundaries into ordered
   `additionalContext` fragments. Every fragment carries the same message ID,
@@ -874,6 +901,8 @@ signal.
   body is represented only by byte count, digest, and optional Content
   Reference. Dispatch-attempt and evidence records remain distinct; neither
   `turn_started` nor a peer reply proves durable task completion.
+- Scheduled claim ownership and lease timestamps are concurrency fields, not
+  delivery evidence. A missing or expired claim never authorizes manual replay.
 - Peer-triggered turns cannot open an approval path. Operations outside the
   target's existing sandbox and permissions fail normally.
 - Offline stored threads are resumed before delivery.

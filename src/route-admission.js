@@ -16,7 +16,10 @@ import {
   commitSingleRecipientDelivery,
   readDeliveryLedger,
 } from "./delivery-ledger.js";
-import { ROUTE_RECONCILE_GRACE_MS } from "./delivery-policy.js";
+import {
+  MAX_WHEN_IDLE_DELAY_MS,
+  ROUTE_RECONCILE_GRACE_MS,
+} from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
 import {
   MAX_STORED_MESSAGE_BYTES,
@@ -42,6 +45,7 @@ export { ROUTE_RECONCILE_GRACE_MS };
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+export { MAX_WHEN_IDLE_DELAY_MS };
 
 function validateName(label, value) {
   if (!NAME_PATTERN.test(value || "")) {
@@ -108,8 +112,8 @@ export function normalizeRoute(route, logicalMessageId = route?.logical_message_
     payload_type: validateName("payload_type", route.payload_type || "coordination"),
     wake_policy: route.wake_policy || "immediate",
   };
-  if (normalized.wake_policy !== "immediate") {
-    throw new Error("Phase 2.5 routed send supports only wake_policy=immediate");
+  if (!["immediate", "when-idle"].includes(normalized.wake_policy)) {
+    throw new Error("routed send supports wake_policy=immediate|when-idle");
   }
   if (route.task_id) normalized.task_id = validateName("task_id", route.task_id);
   if (route.sender_role) {
@@ -119,6 +123,13 @@ export function normalizeRoute(route, logicalMessageId = route?.logical_message_
     const expiry = new Date(route.expiry);
     if (!Number.isFinite(expiry.getTime())) throw new Error("expiry must be an ISO timestamp");
     normalized.expiry = expiry.toISOString();
+  }
+  if (normalized.wake_policy === "when-idle") {
+    if (!normalized.expiry) throw new Error("when-idle routed send requires expiry");
+    const delay = Date.parse(normalized.expiry) - Date.now();
+    if (delay <= 0 || delay > MAX_WHEN_IDLE_DELAY_MS) {
+      throw new Error("when-idle expiry must be in the future and no more than 7 days away");
+    }
   }
   return normalized;
 }
@@ -350,7 +361,7 @@ function ledgerRouteDelivery(record) {
   const status =
     delivery.admissionState === "quarantined"
       ? "quarantined"
-      : delivery.state === "created" && activeAttempt
+      : ["created", "scheduled"].includes(delivery.state) && activeAttempt
         ? "dispatching"
         : delivery.state;
   return {
@@ -378,6 +389,15 @@ function ledgerRouteDelivery(record) {
     errorCode: delivery.errorCode || null,
     attemptId: activeAttempt?.attemptId || null,
     attemptCount: delivery.attempts.length,
+    claim: delivery.claim
+      ? {
+          claimId: delivery.claim.claimId,
+          workerId: delivery.claim.workerId,
+          claimedAt: delivery.claim.claimedAt,
+          leaseUntil: delivery.claim.leaseUntil,
+        }
+      : null,
+    claimCount: delivery.claimCount,
   };
 }
 
@@ -511,7 +531,8 @@ export async function routePeerMessage(
     const now = new Date().toISOString();
     const messageBytes = Buffer.byteLength(message, "utf8");
     const bodyReference =
-      decision.state === "admitted" && messageBytes > MAX_MESSAGE_BYTES
+      decision.state === "admitted" &&
+      (messageBytes > MAX_MESSAGE_BYTES || normalizedRoute?.wake_policy === "when-idle")
         ? await storeMessageBody({ messageId: logicalMessageId, body: message })
         : null;
     if (decision.state === "quarantined") {
@@ -573,6 +594,9 @@ export async function routePeerMessage(
     errorCode: prepared.record.admissionReason,
   });
   if (prepared.record.admissionState === "quarantined") {
+    return publicOutcome(prepared.record);
+  }
+  if (prepared.record.status === "scheduled") {
     return publicOutcome(prepared.record);
   }
 

@@ -85,16 +85,6 @@ export async function runDoctor({
     state.sessions,
     { deep, socketPath },
   ));
-  checks.push({
-    id: "schedules.records",
-    scope: "schedules",
-    status: "skipped",
-    summary: "Scheduled Delivery records are not implemented in this release",
-    verification: "not-implemented",
-    repairable: false,
-    required: false,
-  });
-
   return {
     schemaVersion: DOCTOR_SCHEMA_VERSION,
     overall: doctorOverall(checks),
