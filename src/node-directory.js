@@ -29,6 +29,8 @@ export const EXECUTION_THREADS_DIR = path.join(
   NODE_DIRECTORY_DIR,
   "execution-threads",
 );
+export const ENDPOINT_HISTORY_LIMIT = 64;
+export const ENDPOINT_TRANSPORT_LIMIT = 16;
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -40,6 +42,43 @@ const ENDPOINT_STATUSES = new Set([
   "stale",
   "unknown",
   "mismatched",
+]);
+const ENDPOINT_DECISIONS = new Set([
+  "baseline-imported",
+  "selected",
+  "replaced",
+  "refreshed",
+  "older-rejected",
+  "conflict-rejected",
+]);
+const SUCCESSFUL_ENDPOINT_DECISIONS = new Set([
+  "baseline-imported",
+  "selected",
+  "replaced",
+  "refreshed",
+]);
+const ENDPOINT_OBSERVATION_FIELDS = new Set([
+  "transport",
+  "endpointId",
+  "nodeKey",
+  "generation",
+  "status",
+  "decision",
+  "address",
+  "sessionName",
+  "firstObservedAt",
+  "lastObservedAt",
+  "observationCount",
+]);
+const ENDPOINT_FIELDS = new Set([
+  "transport",
+  "endpointId",
+  "nodeKey",
+  "generation",
+  "status",
+  "address",
+  "sessionName",
+  "observedAt",
 ]);
 const NODE_TOMBSTONE_FIELDS = new Set([
   "version",
@@ -215,6 +254,7 @@ function validProject(record) {
 }
 
 function validNode(record) {
+  const endpoints = Object.entries(record?.selectedEndpoints || {});
   return Boolean(
     record?.version === 1 &&
       RUNTIME_KINDS.has(record.runtimeKind) &&
@@ -230,7 +270,8 @@ function validNode(record) {
       ) &&
       record.selectedEndpoints &&
       typeof record.selectedEndpoints === "object" &&
-      Object.entries(record.selectedEndpoints).every(
+      endpoints.length <= ENDPOINT_TRANSPORT_LIMIT &&
+      endpoints.every(
         ([transport, endpoint]) =>
           IDENTIFIER_PATTERN.test(transport) &&
           endpoint?.transport === transport &&
@@ -238,8 +279,46 @@ function validNode(record) {
           IDENTIFIER_PATTERN.test(endpoint.endpointId || "") &&
           Number.isSafeInteger(endpoint.generation) &&
           endpoint.generation >= 0 &&
-          ENDPOINT_STATUSES.has(endpoint.status),
-      ),
+          ENDPOINT_STATUSES.has(endpoint.status) &&
+          Number.isFinite(Date.parse(endpoint.observedAt || "")) &&
+          (endpoint.address === undefined ||
+            (typeof endpoint.address === "string" &&
+              Buffer.byteLength(endpoint.address, "utf8") <= 1_024 &&
+              !/[\u0000-\u001f\u007f]/.test(endpoint.address))) &&
+          (endpoint.sessionName === undefined ||
+            (typeof endpoint.sessionName === "string" &&
+              endpoint.sessionName.length <= 128)) &&
+          Object.keys(endpoint).every((field) => ENDPOINT_FIELDS.has(field)),
+      ) &&
+      (record.endpointHistory === undefined ||
+        (Array.isArray(record.endpointHistory) &&
+          record.endpointHistory.length <= ENDPOINT_HISTORY_LIMIT &&
+          record.endpointHistory.every(
+            (observation) =>
+              observation?.nodeKey === record.nodeKey &&
+              IDENTIFIER_PATTERN.test(observation.transport || "") &&
+              IDENTIFIER_PATTERN.test(observation.endpointId || "") &&
+              Number.isSafeInteger(observation.generation) &&
+              observation.generation >= 0 &&
+              ENDPOINT_STATUSES.has(observation.status) &&
+              ENDPOINT_DECISIONS.has(observation.decision) &&
+              Number.isFinite(Date.parse(observation.firstObservedAt || "")) &&
+              Number.isFinite(Date.parse(observation.lastObservedAt || "")) &&
+              Date.parse(observation.firstObservedAt) <=
+                Date.parse(observation.lastObservedAt) &&
+              Number.isSafeInteger(observation.observationCount) &&
+              observation.observationCount >= 1 &&
+              (observation.address === undefined ||
+                (typeof observation.address === "string" &&
+                  Buffer.byteLength(observation.address, "utf8") <= 1_024 &&
+                  !/[\u0000-\u001f\u007f]/.test(observation.address))) &&
+              (observation.sessionName === undefined ||
+                (typeof observation.sessionName === "string" &&
+                  observation.sessionName.length <= 128)) &&
+              Object.keys(observation).every((field) =>
+                ENDPOINT_OBSERVATION_FIELDS.has(field),
+              ),
+          ))),
   );
 }
 
@@ -493,16 +572,120 @@ function normalizeEndpoint(nodeIdentity, endpoint) {
   if (!ENDPOINT_STATUSES.has(endpoint.status)) {
     throw new Error("Endpoint status is invalid");
   }
+  const address = endpoint.address === undefined ? null : String(endpoint.address);
+  if (
+    address &&
+    (Buffer.byteLength(address, "utf8") > 1_024 ||
+      /[\u0000-\u001f\u007f]/.test(address))
+  ) {
+    throw new Error("Endpoint address must be at most 1024 printable UTF-8 bytes");
+  }
+  const sessionName =
+    endpoint.sessionName === undefined ? null : String(endpoint.sessionName);
+  if (sessionName && sessionName.length > 128) {
+    throw new Error("Endpoint session name exceeds 128 characters");
+  }
   return {
     transport,
     endpointId: validateIdentifier("endpoint id", endpoint.endpointId),
     nodeKey: nodeIdentity,
     generation,
     status: endpoint.status,
-    ...(endpoint.address ? { address: String(endpoint.address) } : {}),
-    ...(endpoint.sessionName ? { sessionName: String(endpoint.sessionName) } : {}),
+    ...(address ? { address } : {}),
+    ...(sessionName ? { sessionName } : {}),
     observedAt: new Date().toISOString(),
   };
+}
+
+function endpointObservation(candidate, decision, observedAt = candidate.observedAt) {
+  return {
+    transport: candidate.transport,
+    endpointId: candidate.endpointId,
+    nodeKey: candidate.nodeKey,
+    generation: candidate.generation,
+    status: candidate.status,
+    decision,
+    ...(candidate.address ? { address: candidate.address } : {}),
+    ...(candidate.sessionName ? { sessionName: candidate.sessionName } : {}),
+    firstObservedAt: observedAt,
+    lastObservedAt: observedAt,
+    observationCount: 1,
+  };
+}
+
+function sameEndpointObservation(left, right) {
+  return Boolean(
+    left &&
+      left.transport === right.transport &&
+      left.endpointId === right.endpointId &&
+      left.nodeKey === right.nodeKey &&
+      left.generation === right.generation &&
+      left.status === right.status &&
+      left.decision === right.decision &&
+      (left.address || null) === (right.address || null) &&
+      (left.sessionName || null) === (right.sessionName || null),
+  );
+}
+
+function compactEndpointHistory(history, selectedEndpoints) {
+  if (history.length <= ENDPOINT_HISTORY_LIMIT) return history;
+  const required = new Set();
+  for (const selected of Object.values(selectedEndpoints)) {
+    for (let index = history.length - 1; index >= 0; index -= 1) {
+      const observation = history[index];
+      if (
+        SUCCESSFUL_ENDPOINT_DECISIONS.has(observation.decision) &&
+        observation.transport === selected.transport &&
+        observation.endpointId === selected.endpointId &&
+        observation.generation === selected.generation
+      ) {
+        required.add(index);
+        break;
+      }
+    }
+  }
+  const retained = new Set(required);
+  for (
+    let index = history.length - 1;
+    index >= 0 && retained.size < ENDPOINT_HISTORY_LIMIT;
+    index -= 1
+  ) {
+    retained.add(index);
+  }
+  return history.filter((_, index) => retained.has(index));
+}
+
+function appendEndpointObservation(history, candidate, decision, selectedEndpoints) {
+  const observation = endpointObservation(candidate, decision);
+  const last = history.at(-1);
+  if (sameEndpointObservation(last, observation)) {
+    history[history.length - 1] = {
+      ...last,
+      lastObservedAt: observation.lastObservedAt,
+      observationCount: Math.min(
+        Number.MAX_SAFE_INTEGER,
+        last.observationCount + 1,
+      ),
+    };
+  } else {
+    history.push(observation);
+  }
+  return compactEndpointHistory(history, selectedEndpoints);
+}
+
+function initialEndpointHistory(current, now) {
+  if (Array.isArray(current?.endpointHistory)) {
+    return current.endpointHistory.map((observation) => ({ ...observation }));
+  }
+  return Object.values(current?.selectedEndpoints || {}).map((selected) =>
+    endpointObservation(
+      selected,
+      "baseline-imported",
+      Number.isFinite(Date.parse(selected.observedAt || ""))
+        ? selected.observedAt
+        : now,
+    ),
+  );
 }
 
 export async function upsertNode({
@@ -550,7 +733,16 @@ export async function upsertNode({
     if (alias) alias.lastSeenAt = now;
     else aliases.push({ value: displayName, firstSeenAt: now, lastSeenAt: now });
     const selectedEndpoints = { ...(current?.selectedEndpoints || {}) };
+    if (
+      candidate &&
+      !selectedEndpoints[candidate.transport] &&
+      Object.keys(selectedEndpoints).length >= ENDPOINT_TRANSPORT_LIMIT
+    ) {
+      throw new Error("Node Endpoint transport limit reached");
+    }
+    let endpointHistory = initialEndpointHistory(current, now);
     let endpointSelection = "none";
+    let endpointConflict = null;
     if (candidate) {
       const selected = selectedEndpoints[candidate.transport];
       if (!selected || candidate.generation > selected.generation) {
@@ -563,10 +755,27 @@ export async function upsertNode({
         selectedEndpoints[candidate.transport] = candidate;
         endpointSelection = "refreshed";
       } else if (candidate.generation === selected.generation) {
-        throw new Error("Endpoint generation collision has conflicting identity");
+        endpointSelection = "conflict-rejected";
+        endpointConflict = new Error(
+          "Endpoint generation collision has conflicting identity; rejected observation was recorded",
+        );
       } else {
         endpointSelection = "older-rejected";
       }
+      endpointHistory = appendEndpointObservation(
+        endpointHistory,
+        candidate,
+        endpointSelection,
+        selectedEndpoints,
+      );
+    }
+    if (endpointConflict) {
+      atomicWrite(NODES_DIR, nodeFilename(runtimeKind, nativeId), {
+        ...current,
+        endpointHistory,
+        updatedAt: now,
+      });
+      throw endpointConflict;
     }
     const record = atomicWrite(NODES_DIR, nodeFilename(runtimeKind, nativeId), {
       version: 1,
@@ -576,6 +785,7 @@ export async function upsertNode({
       projectId: projectId.toLowerCase(),
       aliases,
       selectedEndpoints,
+      endpointHistory,
       createdAt: current?.createdAt || now,
       updatedAt: now,
     });
@@ -846,7 +1056,10 @@ export function publicProject(record, { includePaths = false } = {}) {
   };
 }
 
-export function publicNode(record, { includeEndpoints = false } = {}) {
+export function publicNode(
+  record,
+  { includeEndpoints = false, includeHistory = false } = {},
+) {
   if (!validNode(record)) throw new Error("invalid Node record");
   return {
     version: record.version,
@@ -856,7 +1069,9 @@ export function publicNode(record, { includeEndpoints = false } = {}) {
     projectId: record.projectId,
     aliases: record.aliases,
     endpointTransports: Object.keys(record.selectedEndpoints).sort(),
+    endpointHistoryCount: record.endpointHistory?.length || 0,
     ...(includeEndpoints ? { selectedEndpoints: record.selectedEndpoints } : {}),
+    ...(includeHistory ? { endpointHistory: record.endpointHistory || [] } : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };

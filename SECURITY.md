@@ -93,6 +93,15 @@ successors. Endpoint selection accepts a newer generation or refresh of the
 same generation and exact Endpoint identity; conflicting equal generations do
 not overwrite the selected Endpoint.
 
+Endpoint history is owner-only, bounded to 64 observations and 16 selected
+transport kinds per Node, and excluded from default CLI and Doctor output.
+Identical repeated observations are coalesced. Compaction retains the latest
+successful evidence for each selected transport rather than silently severing
+selection provenance. Older and equal-generation conflicting observations are
+recorded as rejected evidence while the selected Endpoint remains unchanged.
+`--history` is an explicit local disclosure because observations may contain
+socket addresses and presentation aliases.
+
 Node removal writes an owner-only reduced Tombstone and removes the live Node
 record. Tombstones contain no Endpoint, PID, socket, address, token, message
 body, permission profile, or process claim. Their presence blocks automatic

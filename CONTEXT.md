@@ -54,7 +54,8 @@ they carry different authority and delivery semantics.
   or Directory synchronization is not promotion.
 - **Endpoint**: volatile evidence describing how a Node can currently be
   reached or presented, such as a UDS address, process, bridge, or TUI
-  attachment.
+  attachment. Bounded Endpoint history records selection and rejection
+  evidence but does not become Node identity.
 - **Project**: a stable private identity grouping one or more working roots.
   A path helps discover Project membership but is not Project identity.
 - **Cluster**: an explicit logical grouping of Nodes independent of Project and

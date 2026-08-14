@@ -95,6 +95,15 @@ an explicit operator lifecycle action but never permits Doctor to delete or
 Tombstone a Node. `ENODELIFECYCLE` reports interrupted transitions where live
 and tombstoned records coexist; Doctor never chooses either record as truth.
 
+Endpoint history findings validate the 64-observation and 16-transport bounds,
+schema, chronological ordering, monotonic successful generations, justified
+older/conflict rejections, and agreement between the latest successful history
+and every selected Endpoint. Legacy Nodes with selected Endpoints but no
+history receive `EENDPOINTHISTORYLEGACY`; one subsequent explicit sync imports
+their selections as baseline evidence. `EENDPOINTHISTORY` is fail-closed
+diagnostic evidence only. Doctor never prints an Endpoint address or rewrites
+history.
+
 Execution Thread findings validate bounded Job provenance without reading task
 or result bodies. An Execution Thread must not collide with a Node or
 Tombstone, appear in the addressable session registry, or share its Job with

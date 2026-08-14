@@ -108,7 +108,40 @@ test("Directory CLI exposes explicit Tombstone and successor lifecycle", async (
     nativeId: successorThreadId,
     displayName: "successor",
     projectId: project.projectId,
+    endpoint: {
+      transport: "codex-app-server",
+      endpointId: `app-server:${successorThreadId}`,
+      generation: 1,
+      status: "reachable",
+      address: "uds:/private/endpoint-history.sock",
+    },
   });
+
+  const hiddenHistory = cxmsg(
+    "directory",
+    "node",
+    "show",
+    "codex",
+    successorThreadId,
+    "--json",
+  );
+  assert.equal(hiddenHistory.status, 0, hiddenHistory.stderr);
+  assert.equal("endpointHistory" in JSON.parse(hiddenHistory.stdout), false);
+  assert.doesNotMatch(hiddenHistory.stdout, /endpoint-history\.sock/);
+  const explicitHistory = cxmsg(
+    "directory",
+    "node",
+    "show",
+    "codex",
+    successorThreadId,
+    "--history",
+    "--json",
+  );
+  assert.equal(explicitHistory.status, 0, explicitHistory.stderr);
+  assert.equal(
+    JSON.parse(explicitHistory.stdout).endpointHistory[0].address,
+    "uds:/private/endpoint-history.sock",
+  );
 
   const tombstoned = cxmsg(
     "directory",

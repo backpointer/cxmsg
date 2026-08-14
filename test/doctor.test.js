@@ -311,7 +311,31 @@ test("Node Directory Inspector validates private identity references without pat
       nativeId: THREAD_ID,
       projectId,
       aliases: [{ value: "worker" }],
-      selectedEndpoints: {},
+      selectedEndpoints: {
+        "codex-app-server": {
+          transport: "codex-app-server",
+          endpointId: `app-server:${THREAD_ID}`,
+          nodeKey: `codex:${THREAD_ID}`,
+          generation: 1,
+          status: "reachable",
+          address: "uds:/private/endpoint-that-must-not-be-rendered.sock",
+          observedAt: "2026-08-14T00:00:00.000Z",
+        },
+      },
+      endpointHistory: [
+        {
+          transport: "codex-app-server",
+          endpointId: `app-server:${THREAD_ID}`,
+          nodeKey: `codex:${THREAD_ID}`,
+          generation: 1,
+          status: "reachable",
+          decision: "selected",
+          address: "uds:/private/endpoint-that-must-not-be-rendered.sock",
+          firstObservedAt: "2026-08-14T00:00:00.000Z",
+          lastObservedAt: "2026-08-14T00:00:00.000Z",
+          observationCount: 1,
+        },
+      ],
     });
     await writeJson(path.join(tombstones, `claude--${predecessorId}.json`), {
       version: 1,
@@ -370,6 +394,12 @@ test("Node Directory Inspector validates private identity references without pat
     );
     assert.equal(
       checks.find((check) =>
+        check.id.startsWith("directory-nodes.endpoint-history"),
+      ).status,
+      "pass",
+    );
+    assert.equal(
+      checks.find((check) =>
         check.id.startsWith("directory-node-tombstones.lifecycle"),
       ).status,
       "pass",
@@ -391,7 +421,7 @@ test("Node Directory Inspector validates private identity references without pat
     );
     assert.doesNotMatch(
       JSON.stringify(checks),
-      /project-that-must-not-be-rendered|private\/redacted\.sock/,
+      /project-that-must-not-be-rendered|endpoint-that-must-not-be-rendered/,
     );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
@@ -437,6 +467,37 @@ test("Node Directory Inspector reports lifecycle conflicts and successor cycles 
         selectedEndpoints: {},
       });
     }
+    await writeJson(path.join(nodes, `codex--${secondId}.json`), {
+      version: 1,
+      nodeKey: `codex:${secondId}`,
+      runtimeKind: "codex",
+      nativeId: secondId,
+      projectId,
+      aliases: [{ value: "worker" }],
+      selectedEndpoints: {
+        "codex-app-server": {
+          transport: "codex-app-server",
+          endpointId: `selected:${secondId}`,
+          nodeKey: `codex:${secondId}`,
+          generation: 2,
+          status: "reachable",
+          observedAt: "2026-08-14T00:02:00.000Z",
+        },
+      },
+      endpointHistory: [
+        {
+          transport: "codex-app-server",
+          endpointId: `older:${secondId}`,
+          nodeKey: `codex:${secondId}`,
+          generation: 1,
+          status: "stale",
+          decision: "older-rejected",
+          firstObservedAt: "2026-08-14T00:01:00.000Z",
+          lastObservedAt: "2026-08-14T00:01:00.000Z",
+          observationCount: 1,
+        },
+      ],
+    });
     await writeJson(path.join(tombstones, `codex--${firstId}.json`), {
       version: 1,
       nodeKey: `codex:${firstId}`,
@@ -496,6 +557,7 @@ test("Node Directory Inspector reports lifecycle conflicts and successor cycles 
     assert.ok(
       checks.some((check) => check.errorCode === "EEXECUTIONNODECOLLISION"),
     );
+    assert.ok(checks.some((check) => check.errorCode === "EENDPOINTHISTORY"));
     assert.doesNotMatch(JSON.stringify(checks), /redacted-project/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });

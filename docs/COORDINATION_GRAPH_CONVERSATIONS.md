@@ -581,12 +581,20 @@ or Conversation members. Historical classification is an explicit command and
 requires retained fork, source/execution thread, and turn evidence; ambiguous
 Jobs and arbitrary App Server threads are not inferred.
 
+Bounded Endpoint history is now implemented inside owner-only Node records.
+The current selected Endpoint remains a separate projection. Successful
+selection, replacement, refresh, imported baseline, older rejection, and
+equal-generation conflict decisions are retained without changing the existing
+CAS result. Identical observations coalesce and bounded compaction preserves
+the latest successful evidence for each selected transport. Default CLI and
+Doctor output never render Endpoint addresses from history.
+
 Phase 3 still has no automatic Project merge or move, successor inference,
-Endpoint history retention, Cluster, or web projection. Execution Thread
-classification remains separate from addressable Node synchronization. An older
-Endpoint generation is rejected and an equal generation with conflicting
-identity fails closed. Those omitted lifecycle transitions require explicit
-records and tests in the remaining Phase 3 work.
+Cluster, or web projection. Execution Thread classification remains separate
+from addressable Node synchronization. An older Endpoint generation is rejected
+and an equal generation with conflicting identity fails closed. Those omitted
+lifecycle transitions require explicit records and tests in the remaining
+Phase 3 work.
 
 ### Phase 4: Delivery Ledger and scheduling
 

@@ -172,8 +172,8 @@ function usage(exitCode = 0) {
   cxmsg directory project ensure <routing-id> <root> [--json]
   cxmsg directory sync --project <routing-id> [--codex-only|--claude-only] [--json]
   cxmsg directory projects [--json] [--paths]
-  cxmsg directory nodes [--json] [--endpoints]
-  cxmsg directory node show <codex|claude> <native-id> [--json] [--endpoints]
+  cxmsg directory nodes [--json] [--endpoints] [--history]
+  cxmsg directory node show <codex|claude> <native-id> [--json] [--endpoints] [--history]
   cxmsg directory node tombstone <codex|claude> <native-id> [--reason <id>] [--json]
   cxmsg directory tombstones [--json]
   cxmsg directory successor add <codex|claude> <native-id> <codex|claude> <native-id> [--json]
@@ -1904,9 +1904,16 @@ async function commandDirectory(args) {
   if (operation === "nodes") {
     const jsonOutput = args.includes("--json");
     const includeEndpoints = args.includes("--endpoints");
-    if (args.some((value) => !["--json", "--endpoints"].includes(value))) usage(2);
+    const includeHistory = args.includes("--history");
+    if (
+      args.some(
+        (value) => !["--json", "--endpoints", "--history"].includes(value),
+      )
+    ) {
+      usage(2);
+    }
     const nodes = listNodes().map((record) =>
-      publicNode(record, { includeEndpoints }),
+      publicNode(record, { includeEndpoints, includeHistory }),
     );
     jsonOrLines(
       nodes,
@@ -2059,16 +2066,19 @@ async function commandDirectory(args) {
     }
     if (nodeOperation !== "show") usage(2);
     const includeEndpoints = args.includes("--endpoints");
+    const includeHistory = args.includes("--history");
     if (
       !runtimeKind ||
       !nativeId ||
-      args.some((value) => !["--json", "--endpoints"].includes(value))
+      args.some(
+        (value) => !["--json", "--endpoints", "--history"].includes(value),
+      )
     ) {
       usage(2);
     }
     const record = readNode(runtimeKind, nativeId);
     if (!record) throw new Error(`unknown Directory Node: ${runtimeKind}:${nativeId}`);
-    const node = publicNode(record, { includeEndpoints });
+    const node = publicNode(record, { includeEndpoints, includeHistory });
     process.stdout.write(
       jsonOutput
         ? `${JSON.stringify(node, null, 2)}\n`

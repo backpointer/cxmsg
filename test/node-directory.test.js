@@ -151,6 +151,32 @@ test("Node identity survives alias changes and endpoint selection is monotonic",
       sessionName: "auditor",
     },
   });
+  const refreshed = await directory.upsertNode({
+    runtimeKind: "codex",
+    nativeId: nodeId,
+    displayName: "auditor",
+    projectId,
+    endpoint: {
+      transport: "codex-app-server",
+      endpointId: `app-server:${nodeId}`,
+      generation: 11,
+      status: "reachable",
+      sessionName: "auditor",
+    },
+  });
+  const refreshedAgain = await directory.upsertNode({
+    runtimeKind: "codex",
+    nativeId: nodeId,
+    displayName: "auditor",
+    projectId,
+    endpoint: {
+      transport: "codex-app-server",
+      endpointId: `app-server:${nodeId}`,
+      generation: 11,
+      status: "reachable",
+      sessionName: "auditor",
+    },
+  });
   const older = await directory.upsertNode({
     runtimeKind: "codex",
     nativeId: nodeId,
@@ -171,6 +197,8 @@ test("Node identity survives alias changes and endpoint selection is monotonic",
     ["worker", "auditor"],
   );
   assert.equal(renamed.endpointSelection, "replaced");
+  assert.equal(refreshed.endpointSelection, "refreshed");
+  assert.equal(refreshedAgain.endpointSelection, "refreshed");
   assert.equal(older.endpointSelection, "older-rejected");
   assert.equal(
     older.record.selectedEndpoints["codex-app-server"].generation,
@@ -180,7 +208,14 @@ test("Node identity survives alias changes and endpoint selection is monotonic",
 
   const publicRecord = directory.publicNode(older.record);
   assert.deepEqual(publicRecord.endpointTransports, ["codex-app-server"]);
+  assert.equal(publicRecord.endpointHistoryCount, 4);
   assert.equal("selectedEndpoints" in publicRecord, false);
+  assert.equal("endpointHistory" in publicRecord, false);
+  assert.deepEqual(
+    older.record.endpointHistory.map((observation) => observation.decision),
+    ["selected", "replaced", "refreshed", "older-rejected"],
+  );
+  assert.equal(older.record.endpointHistory[2].observationCount, 2);
 
   await assert.rejects(
     directory.upsertNode({
@@ -195,7 +230,49 @@ test("Node identity survives alias changes and endpoint selection is monotonic",
         status: "unknown",
       },
     }),
-    /generation collision/,
+    /generation collision.*recorded/,
+  );
+  const afterConflict = directory.readNode("codex", nodeId);
+  assert.equal(
+    afterConflict.selectedEndpoints["codex-app-server"].endpointId,
+    `app-server:${nodeId}`,
+  );
+  assert.equal(afterConflict.endpointHistory.at(-1).decision, "conflict-rejected");
+  assert.equal(
+    directory.publicNode(afterConflict, { includeHistory: true }).endpointHistory
+      .at(-1).endpointId,
+    "app-server:conflict",
+  );
+});
+
+test("Endpoint history remains bounded while preserving selected evidence", async () => {
+  for (let index = 0; index < 70; index += 1) {
+    await directory.upsertNode({
+      runtimeKind: "codex",
+      nativeId: nodeId,
+      displayName: "auditor",
+      projectId,
+      endpoint: {
+        transport: "codex-app-server",
+        endpointId: `older:${index}`,
+        generation: index % 10,
+        status: "stale",
+      },
+    });
+  }
+  const node = directory.readNode("codex", nodeId);
+  assert.equal(node.endpointHistory.length, directory.ENDPOINT_HISTORY_LIMIT);
+  assert.ok(
+    node.endpointHistory.some(
+      (observation) =>
+        ["selected", "replaced", "refreshed"].includes(observation.decision) &&
+        observation.endpointId === `app-server:${nodeId}` &&
+        observation.generation === 11,
+    ),
+  );
+  assert.equal(
+    node.selectedEndpoints["codex-app-server"].endpointId,
+    `app-server:${nodeId}`,
   );
 });
 
@@ -217,6 +294,46 @@ test("runtime kind is part of Node identity", async () => {
   assert.notEqual(claude.record.nodeKey, directory.readNode("codex", nodeId).nodeKey);
   assert.equal(directory.listNodes().length, 2);
   assert.equal("selectedEndpoints" in directory.publicNode(claude.record), false);
+});
+
+test("a pre-history selected Endpoint imports as baseline on explicit sync", async () => {
+  const legacyNodeId = "f3345678-1234-4234-8234-123456789abc";
+  const created = await directory.upsertNode({
+    runtimeKind: "codex",
+    nativeId: legacyNodeId,
+    displayName: "legacy-endpoint",
+    projectId,
+    endpoint: {
+      transport: "codex-app-server",
+      endpointId: `app-server:${legacyNodeId}`,
+      generation: 7,
+      status: "reachable",
+    },
+  });
+  const legacy = { ...created.record };
+  delete legacy.endpointHistory;
+  writeFileSync(
+    path.join(directory.NODES_DIR, `codex--${legacyNodeId}.json`),
+    `${JSON.stringify(legacy, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+
+  const synchronized = await directory.upsertNode({
+    runtimeKind: "codex",
+    nativeId: legacyNodeId,
+    displayName: "legacy-endpoint",
+    projectId,
+    endpoint: {
+      transport: "codex-app-server",
+      endpointId: `app-server:${legacyNodeId}`,
+      generation: 7,
+      status: "reachable",
+    },
+  });
+  assert.deepEqual(
+    synchronized.record.endpointHistory.map((entry) => entry.decision),
+    ["baseline-imported", "refreshed"],
+  );
 });
 
 test("Execution Threads retain bounded Job provenance without becoming Nodes", async () => {

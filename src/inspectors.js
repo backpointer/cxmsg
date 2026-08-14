@@ -35,6 +35,53 @@ const PENDING_JOB_STATES = new Set([
   "running",
   "awaiting_approval",
 ]);
+const ENDPOINT_HISTORY_LIMIT = 64;
+const ENDPOINT_TRANSPORT_LIMIT = 16;
+const ENDPOINT_STATUSES = new Set([
+  "reachable",
+  "external-writer",
+  "unreachable",
+  "stale",
+  "unknown",
+  "mismatched",
+]);
+const ENDPOINT_DECISIONS = new Set([
+  "baseline-imported",
+  "selected",
+  "replaced",
+  "refreshed",
+  "older-rejected",
+  "conflict-rejected",
+]);
+const SUCCESSFUL_ENDPOINT_DECISIONS = new Set([
+  "baseline-imported",
+  "selected",
+  "replaced",
+  "refreshed",
+]);
+const ENDPOINT_OBSERVATION_FIELDS = new Set([
+  "transport",
+  "endpointId",
+  "nodeKey",
+  "generation",
+  "status",
+  "decision",
+  "address",
+  "sessionName",
+  "firstObservedAt",
+  "lastObservedAt",
+  "observationCount",
+]);
+const ENDPOINT_FIELDS = new Set([
+  "transport",
+  "endpointId",
+  "nodeKey",
+  "generation",
+  "status",
+  "address",
+  "sessionName",
+  "observedAt",
+]);
 
 export function diagnosticCheck({
   id,
@@ -428,21 +475,59 @@ function validDirectoryNode(record, stem) {
             alias.value.length > 0 &&
             alias.value.length <= 128,
         ) &&
+        endpoints.length <= ENDPOINT_TRANSPORT_LIMIT &&
         endpoints.every(
           ([transport, endpoint]) =>
             endpoint?.transport === transport &&
             endpoint.nodeKey === record.nodeKey &&
             Number.isSafeInteger(endpoint.generation) &&
             endpoint.generation >= 0 &&
-            [
-              "reachable",
-              "external-writer",
-              "unreachable",
-              "stale",
-              "unknown",
-              "mismatched",
-            ].includes(endpoint.status),
-        ),
+            ENDPOINT_STATUSES.has(endpoint.status) &&
+            Number.isFinite(Date.parse(endpoint.observedAt || "")) &&
+            (endpoint.address === undefined ||
+              (typeof endpoint.address === "string" &&
+                Buffer.byteLength(endpoint.address, "utf8") <= 1_024 &&
+                !/[\u0000-\u001f\u007f]/.test(endpoint.address))) &&
+            (endpoint.sessionName === undefined ||
+              (typeof endpoint.sessionName === "string" &&
+                endpoint.sessionName.length <= 128)) &&
+            Object.keys(endpoint).every((field) => ENDPOINT_FIELDS.has(field)),
+        ) &&
+        (record.endpointHistory === undefined ||
+          (Array.isArray(record.endpointHistory) &&
+            record.endpointHistory.length <= ENDPOINT_HISTORY_LIMIT &&
+            record.endpointHistory.every(
+              (observation) =>
+                observation?.nodeKey === record.nodeKey &&
+                /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(
+                  observation.transport || "",
+                ) &&
+                /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(
+                  observation.endpointId || "",
+                ) &&
+                Number.isSafeInteger(observation.generation) &&
+                observation.generation >= 0 &&
+                ENDPOINT_STATUSES.has(observation.status) &&
+                ENDPOINT_DECISIONS.has(observation.decision) &&
+                Number.isFinite(
+                  Date.parse(observation.firstObservedAt || ""),
+                ) &&
+                Number.isFinite(Date.parse(observation.lastObservedAt || "")) &&
+                Date.parse(observation.firstObservedAt) <=
+                  Date.parse(observation.lastObservedAt) &&
+                Number.isSafeInteger(observation.observationCount) &&
+                observation.observationCount >= 1 &&
+                (observation.address === undefined ||
+                  (typeof observation.address === "string" &&
+                    Buffer.byteLength(observation.address, "utf8") <= 1_024 &&
+                    !/[\u0000-\u001f\u007f]/.test(observation.address))) &&
+                (observation.sessionName === undefined ||
+                  (typeof observation.sessionName === "string" &&
+                    observation.sessionName.length <= 128)) &&
+                Object.keys(observation).every((field) =>
+                  ENDPOINT_OBSERVATION_FIELDS.has(field),
+                ),
+            ))),
     ),
     errorCode: "ENODESCHEMA",
   };
@@ -631,6 +716,103 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
         }),
       );
     }
+    const selected = new Map(Object.entries(node.selectedEndpoints));
+    if (node.endpointHistory === undefined) {
+      if (selected.size) {
+        checks.push(
+          diagnosticCheck({
+            id: `directory-nodes.endpoint-history.${safeLabel(node.nodeKey)}`,
+            scope: "directory-nodes",
+            status: "warn",
+            summary: "Node has selected Endpoint evidence from before history tracking",
+            verification: "legacy-record",
+            errorCode: "EENDPOINTHISTORYLEGACY",
+            remediation:
+              "Synchronize the Node once to import selected Endpoints as bounded baseline history",
+            required: false,
+          }),
+        );
+      }
+      continue;
+    }
+    const latestSuccessful = new Map();
+    let historyConsistent = true;
+    let previousTime = -Infinity;
+    for (const observation of node.endpointHistory) {
+      const observedAt = Date.parse(observation.lastObservedAt);
+      if (observedAt < previousTime) historyConsistent = false;
+      previousTime = observedAt;
+      const previous = latestSuccessful.get(observation.transport);
+      if (SUCCESSFUL_ENDPOINT_DECISIONS.has(observation.decision)) {
+        if (previous && observation.generation < previous.generation) {
+          historyConsistent = false;
+        }
+        if (previous && observation.decision === "selected") {
+          historyConsistent = false;
+        }
+        if (
+          previous &&
+          observation.decision === "replaced" &&
+          observation.generation <= previous.generation
+        ) {
+          historyConsistent = false;
+        }
+        if (
+          previous &&
+          observation.decision === "refreshed" &&
+          (observation.generation !== previous.generation ||
+            observation.endpointId !== previous.endpointId)
+        ) {
+          historyConsistent = false;
+        }
+        latestSuccessful.set(observation.transport, observation);
+      } else if (observation.decision === "older-rejected") {
+        if (!previous || observation.generation >= previous.generation) {
+          historyConsistent = false;
+        }
+      } else if (observation.decision === "conflict-rejected") {
+        if (
+          !previous ||
+          observation.generation !== previous.generation ||
+          observation.endpointId === previous.endpointId
+        ) {
+          historyConsistent = false;
+        }
+      }
+    }
+    for (const [transport, endpoint] of selected) {
+      const latest = latestSuccessful.get(transport);
+      if (
+        !latest ||
+        latest.endpointId !== endpoint.endpointId ||
+        latest.generation !== endpoint.generation ||
+        latest.status !== endpoint.status ||
+        (latest.address || null) !== (endpoint.address || null) ||
+        (latest.sessionName || null) !== (endpoint.sessionName || null)
+      ) {
+        historyConsistent = false;
+      }
+    }
+    if (
+      [...latestSuccessful.keys()].some((transport) => !selected.has(transport))
+    ) {
+      historyConsistent = false;
+    }
+    checks.push(
+      diagnosticCheck({
+        id: `directory-nodes.endpoint-history.${safeLabel(node.nodeKey)}`,
+        scope: "directory-nodes",
+        status: historyConsistent ? "pass" : "fail",
+        summary: historyConsistent
+          ? "Endpoint history is bounded and consistent with selected Endpoint evidence"
+          : "Endpoint history conflicts with selection or rejection invariants",
+        verification: "records",
+        errorCode: historyConsistent ? null : "EENDPOINTHISTORY",
+        remediation: historyConsistent
+          ? null
+          : "Inspect the owner-only Node record; Doctor will not rewrite Endpoint history",
+      }),
+    );
   }
   const liveNodes = new Map(nodes.records.map((record) => [record.nodeKey, record]));
   const retiredNodes = new Map(

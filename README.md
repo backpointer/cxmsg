@@ -139,14 +139,25 @@ cxmsg directory successors --json
 cxmsg directory execution sync --json
 cxmsg directory execution-threads --json
 cxmsg directory execution-thread show <thread-id> --json
+cxmsg directory node show codex <thread-id> --history --json
 ```
 
-Project paths are omitted by default. `directory projects --paths` and
-`directory node show ... --endpoints` are explicit local disclosure options.
+Project paths are omitted by default. `directory projects --paths`,
+`directory node show ... --endpoints`, and `directory node show ... --history`
+are explicit local disclosure options.
 The stable Node key is `(runtime kind, native ID)`, encoded as
 `codex:<thread-id>` or `claude:<session-id>`; names are mutable aliases.
 Endpoint PID, UDS address, App Server presentation name, status, and generation
 remain volatile evidence and are not Node identity.
+
+Each Node retains at most 64 Endpoint observations across at most 16 transport
+kinds. Selection decisions distinguish `selected`, `replaced`, `refreshed`,
+`older-rejected`, and `conflict-rejected`; an imported pre-history selection is
+marked `baseline-imported`. Repeated identical observations are coalesced with
+a count and first/last timestamps. Compaction preserves the latest successful
+evidence for every currently selected transport. A rejected observation never
+overwrites the selected Endpoint. Default Node output exposes only the history
+count; `--history` may reveal owner-private addresses and session aliases.
 
 Removing a registered Codex session creates a reduced Node Tombstone when that
 Node is present in the Directory. Operators can also Tombstone a retired Node
