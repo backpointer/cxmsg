@@ -588,8 +588,8 @@ The initial immutable inspection and Doctor foundation is implemented:
 
 Repair remains intentionally absent. Doctor now reports missing or unverified
 Scheduler workers and expired claim leases without claiming or dispatching
-them. The first `when-idle` Phase 4 slice is implemented; `after-turn`,
-`after-job`, scheduled Delegation, automatic retry, and Phases 5–7 remain
+them. The `when-idle`, `after-turn`, and `after-job` Phase 4 Peer Message slices
+are implemented; scheduled Delegation, automatic retry, and Phases 5–7 remain
 proposals and must not be inferred as implemented from this status.
 
 The Phase 4 operational-hardening follow-up is also implemented. Scheduler
@@ -602,6 +602,18 @@ unclaimed schedule, or explicitly rebuild the cache; Doctor only reports index
 and heartbeat inconsistencies and performs none of those mutations. A real UDS
 scheduled wake test is opt-in through `CXMSG_SCHEDULER_INTEGRATION=1` because it
 starts a model turn and consumes tokens.
+
+The exact-Trigger follow-up validates the referenced turn or Job before
+enqueue, records it inside the typed route, and rechecks it before and after
+claim acquisition. A running Trigger is `waiting-trigger`; missing,
+unavailable, unknown, or unsupported evidence is observationally `blocked`.
+Neither state is Delivery evidence. A Trigger that regresses after claim
+releases that unused claim with zero dispatch attempts. Failed terminal Jobs
+are eligible by design. `status --json` exposes bounded active/recent terminal
+turn IDs without contents, while Doctor checks exact Job references without
+refreshing, claiming, or dispatching them. Polling is currently the bounded
+reconciliation fallback; notification cursor durability remains future Turn
+Lifecycle work.
 
 ## Acceptance tests
 
@@ -681,7 +693,7 @@ starts a model turn and consumes tokens.
 
 ## Phase 4 decisions fixed for the first Scheduler slice
 
-- expiry has no silent default: `when-idle` requires an explicit future value
+- expiry has no silent default: every scheduled policy requires an explicit future value
   no more than seven days away;
 - a claim lease is 30 seconds and is not renewed during the bounded first
   dispatch attempt;
@@ -699,7 +711,8 @@ starts a model turn and consumes tokens.
 ## Decisions required before later Phase 4 slices
 
 The following values must be fixed in code, tests, and reference documentation
-before broader Trigger policies, retention, or migration begin:
+before retention, migration, or additional Trigger policies beyond the current
+exact-turn and exact-Job slice begin:
 
 - terminal Delivery and schedule metadata retention and cleanup ownership;
 - claim renewal behavior for transport operations that can exceed 30 seconds;

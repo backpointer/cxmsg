@@ -510,6 +510,18 @@ function inspectDeliveryLedger(
         target: delivery.target,
         admissionState: delivery.admissionState,
         wakePolicy: delivery.wakePolicy,
+        triggerKind:
+          delivery.wakePolicy === "after-turn"
+            ? "turn"
+            : delivery.wakePolicy === "after-job"
+              ? "job"
+              : null,
+        triggerId:
+          delivery.wakePolicy === "after-turn"
+            ? message.route?.trigger_turn_id || null
+            : delivery.wakePolicy === "after-job"
+              ? message.route?.trigger_job_id || null
+              : null,
         ...(delivery.targetThreadId ? { targetThreadId: delivery.targetThreadId } : {}),
         attemptStartedAt: activeAttempt?.startedAt || null,
         claimLeaseUntil: delivery.claim?.leaseUntil || null,
@@ -1855,6 +1867,71 @@ export function inspectRouteState({
           verification: "records",
           errorCode: "ESCHEDULECLAIMEXPIRED",
           remediation: "Start the scheduler to reclaim the Delivery; do not replay it manually",
+          required: false,
+        }),
+      );
+    }
+    if (
+      delivery.version === 2 &&
+      delivery.status === "scheduled" &&
+      delivery.triggerKind === "turn"
+    ) {
+      checks.push(
+        diagnosticCheck({
+          id: `schedules.trigger.turn.${safeLabel(delivery.logicalMessageId)}`,
+          scope: "schedules",
+          status: "pass",
+          summary: "Scheduled Delivery retains an exact bounded turn trigger identity",
+          verification: "records",
+          required: false,
+        }),
+      );
+    }
+    if (
+      delivery.version === 2 &&
+      delivery.status === "scheduled" &&
+      delivery.triggerKind === "job"
+    ) {
+      const jobPath = path.join(stateDir, "jobs", `${delivery.triggerId}.json`);
+      const metadata = secureMetadata(jobPath, "file");
+      let validJob = false;
+      let blockedJob = false;
+      if (metadata.status === "secure") {
+        try {
+          const job = JSON.parse(readFileSync(jobPath, "utf8"));
+          validJob =
+            job?.version === 1 &&
+            job.jobId === delivery.triggerId &&
+            typeof job.status === "string";
+          blockedJob = validJob && job.status === "unknown";
+        } catch {}
+      }
+      const missing = metadata.status === "missing";
+      checks.push(
+        diagnosticCheck({
+          id: `schedules.trigger.job.${safeLabel(delivery.logicalMessageId)}`,
+          scope: "schedules",
+          status: validJob && !blockedJob ? "pass" : missing || blockedJob ? "warn" : "fail",
+          summary: validJob
+            ? blockedJob
+              ? "Scheduled Delivery references a Job with unverifiable terminal state"
+              : "Scheduled Delivery references an existing bounded Job identity"
+            : missing
+              ? "Scheduled Delivery references a missing Job"
+              : "Scheduled Delivery Job trigger failed private schema validation",
+          verification: metadata.status === "secure" ? "records" : metadata.status,
+          errorCode:
+            validJob && !blockedJob
+              ? null
+              : blockedJob
+                ? "ETRIGGERBLOCKED"
+                : missing
+                  ? "ETRIGGERJOBMISSING"
+                  : "ETRIGGERJOBSCHEMA",
+          remediation:
+            validJob && !blockedJob
+              ? null
+              : "Do not dispatch manually; restore or reconcile the exact referenced Job evidence",
           required: false,
         }),
       );

@@ -166,6 +166,13 @@ Doctor never starts or restarts the Scheduler, acquires or releases a claim,
 cancels a Delivery, rebuilds the index, reads the retained body, or starts a
 model turn.
 
+Exact Trigger findings are also read-only. An `after-turn` record receives a
+schema-only check because default Doctor does not call App Server turn history.
+For `after-job`, `ETRIGGERJOBMISSING` means the exact referenced owner-only Job
+record disappeared, `ETRIGGERJOBSCHEMA` means its bounded metadata is invalid,
+and `ETRIGGERBLOCKED` means its durable status is `unknown`. None of these
+findings permits manual dispatch or changes the Delivery state.
+
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.
 

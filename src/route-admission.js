@@ -19,6 +19,7 @@ import {
 import {
   MAX_WHEN_IDLE_DELAY_MS,
   ROUTE_RECONCILE_GRACE_MS,
+  SCHEDULED_WAKE_POLICIES,
 } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
 import {
@@ -112,8 +113,10 @@ export function normalizeRoute(route, logicalMessageId = route?.logical_message_
     payload_type: validateName("payload_type", route.payload_type || "coordination"),
     wake_policy: route.wake_policy || "immediate",
   };
-  if (!["immediate", "when-idle"].includes(normalized.wake_policy)) {
-    throw new Error("routed send supports wake_policy=immediate|when-idle");
+  if (!["immediate", ...SCHEDULED_WAKE_POLICIES].includes(normalized.wake_policy)) {
+    throw new Error(
+      "routed send supports wake_policy=immediate|when-idle|after-turn|after-job",
+    );
   }
   if (route.task_id) normalized.task_id = validateName("task_id", route.task_id);
   if (route.sender_role) {
@@ -124,12 +127,24 @@ export function normalizeRoute(route, logicalMessageId = route?.logical_message_
     if (!Number.isFinite(expiry.getTime())) throw new Error("expiry must be an ISO timestamp");
     normalized.expiry = expiry.toISOString();
   }
-  if (normalized.wake_policy === "when-idle") {
-    if (!normalized.expiry) throw new Error("when-idle routed send requires expiry");
+  if (SCHEDULED_WAKE_POLICIES.includes(normalized.wake_policy)) {
+    if (!normalized.expiry) {
+      throw new Error(`${normalized.wake_policy} routed send requires expiry`);
+    }
     const delay = Date.parse(normalized.expiry) - Date.now();
     if (delay <= 0 || delay > MAX_WHEN_IDLE_DELAY_MS) {
-      throw new Error("when-idle expiry must be in the future and no more than 7 days away");
+      throw new Error("scheduled expiry must be in the future and no more than 7 days away");
     }
+  }
+  if (normalized.wake_policy === "after-turn") {
+    normalized.trigger_turn_id = validateUuid("trigger_turn_id", route.trigger_turn_id);
+  } else if (route.trigger_turn_id !== undefined) {
+    throw new Error("trigger_turn_id requires wake_policy=after-turn");
+  }
+  if (normalized.wake_policy === "after-job") {
+    normalized.trigger_job_id = validateUuid("trigger_job_id", route.trigger_job_id);
+  } else if (route.trigger_job_id !== undefined) {
+    throw new Error("trigger_job_id requires wake_policy=after-job");
   }
   return normalized;
 }
@@ -484,7 +499,7 @@ export async function routePeerMessage(
     logicalMessageId = route?.logical_message_id || randomUUID(),
   },
   dispatch,
-  { log = writeCoordinationEvent } = {},
+  { log = writeCoordinationEvent, validateTrigger = null } = {},
 ) {
   validateName("sender", from);
   validateName("target", target);
@@ -528,11 +543,26 @@ export async function routePeerMessage(
       targetRecord,
       readSessionRecord(from),
     );
+    if (
+      decision.state === "admitted" &&
+      normalizedRoute &&
+      ["after-turn", "after-job"].includes(normalizedRoute.wake_policy)
+    ) {
+      if (typeof validateTrigger !== "function") {
+        throw new Error(`${normalizedRoute.wake_policy} requires trigger validation`);
+      }
+      await validateTrigger({
+        route: normalizedRoute,
+        target,
+        targetThreadId: targetRecord?.threadId || null,
+      });
+    }
     const now = new Date().toISOString();
     const messageBytes = Buffer.byteLength(message, "utf8");
     const bodyReference =
       decision.state === "admitted" &&
-      (messageBytes > MAX_MESSAGE_BYTES || normalizedRoute?.wake_policy === "when-idle")
+      (messageBytes > MAX_MESSAGE_BYTES ||
+        SCHEDULED_WAKE_POLICIES.includes(normalizedRoute?.wake_policy))
         ? await storeMessageBody({ messageId: logicalMessageId, body: message })
         : null;
     if (decision.state === "quarantined") {

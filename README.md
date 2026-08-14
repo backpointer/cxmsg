@@ -106,9 +106,10 @@ evidence. The Ledger stores body byte count, digest, and an optional opaque
 Content Reference, never the raw body. Legacy `route-deliveries` records remain
 readable for reconciliation but new sends do not create them.
 
-The Ledger also supports the first scheduled-delivery policy, `when-idle`.
-It retains every scheduled body before enqueue, requires an explicit expiry no
-more than seven days away, and starts no turn while the target is Busy:
+The Ledger supports `when-idle`, `after-turn`, and `after-job` scheduled
+delivery. It retains every scheduled body before enqueue, requires an explicit
+expiry no more than seven days away, and starts no turn while the target is
+Busy:
 
 ```bash
 cxmsg send \
@@ -121,6 +122,28 @@ cxmsg send \
   worker \
   "Review handoff <id> after the current turn."
 ```
+
+Exact Trigger examples use the same route and expiry:
+
+```bash
+cxmsg send --from coordinator --project hermes --target-role auditor \
+  --after-turn <turn-id> --expiry 2026-08-16T12:00:00Z \
+  worker "Continue after that exact turn reaches a terminal state."
+
+cxmsg send --from coordinator --project hermes --target-role auditor \
+  --after-job <job-id> --expiry 2026-08-16T12:00:00Z \
+  worker "Use the result after that exact Job reaches any terminal state."
+```
+
+The referenced turn or Job must exist at enqueue time. `after-turn` accepts a
+running or recognized terminal turn pinned to the target thread; `after-job`
+fires for success or failure. A pending Trigger remains `waiting-trigger`; a
+missing, unavailable, unknown, or unsupported state is observationally
+`blocked` and never becomes permission to wake. Trigger readiness is checked
+again after claim acquisition. If it regresses, the unused claim is released
+without recording a dispatch attempt. A blocked earlier Trigger does not hold
+an otherwise eligible target lane. `cxmsg status <target> --json` exposes only
+the bounded active and recent terminal turn IDs, never turn contents.
 
 `cxmsg server start` starts the Scheduler with App Server. It can also be
 managed with `cxmsg scheduler start|status|stop`. The worker checks the target
@@ -151,7 +174,7 @@ coordination event log; retained bodies and endpoint paths are never included.
 `cxmsg doctor` validates the index/checkpoint and heartbeat without rebuilding,
 restarting, claiming, cancelling, or dispatching anything.
 
-This slice does not yet implement `after-turn`, `after-job`, automatic retry,
+This slice does not yet implement scheduled Delegation, automatic retry,
 retention, purge, group fan-out, or task-completion inference. The index is
 bounded to 4,096 Logical Messages and is not a retention mechanism. An ambiguous
 dispatch remains `unknown`, and only positive App Server acceptance evidence

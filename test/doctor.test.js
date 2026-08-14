@@ -50,17 +50,20 @@ function ledgerBatch({
   targetThreadId = THREAD_ID,
   createdAt = "2026-08-14T00:00:00.000Z",
   wakePolicy = "immediate",
+  triggerId = null,
 }) {
   const body = "private body stays absent";
   const route =
-    wakePolicy === "when-idle"
+    wakePolicy !== "immediate"
       ? {
           schema_version: 1,
           project_id: "hermes",
           target_role: "auditor",
           logical_message_id: messageId,
           payload_type: "coordination",
-          wake_policy: "when-idle",
+          ...(wakePolicy === "after-turn" ? { trigger_turn_id: triggerId } : {}),
+          ...(wakePolicy === "after-job" ? { trigger_job_id: triggerId } : {}),
+          wake_policy: wakePolicy,
           expiry: "2026-08-14T01:00:00.000Z",
         }
       : null;
@@ -76,7 +79,7 @@ function ledgerBatch({
         messageId,
         bytes: Buffer.byteLength(body, "utf8"),
         sha256: createHash("sha256").update(body).digest("hex"),
-        contentRef: wakePolicy === "when-idle" ? `cxmsg-message:${messageId}` : null,
+        contentRef: wakePolicy !== "immediate" ? `cxmsg-message:${messageId}` : null,
       },
       route,
       routeFingerprint: createHash("sha256")
@@ -169,6 +172,48 @@ test("healthy Doctor fixtures are redacted and mutate zero state files", async (
     assert.equal(doctorExitCode(report), 0);
     assert.deepEqual(after, before);
     assert.doesNotMatch(rendered, /private task body|private result body|project-that-must-not-be-rendered/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Route Inspector validates scheduled Job trigger references without dispatch", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-trigger-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const segments = path.join(root, "delivery-ledger", "segments");
+    const quarantine = path.join(root, "delivery-ledger", "quarantine");
+    const jobs = path.join(root, "jobs");
+    await fs.mkdir(segments, { recursive: true, mode: 0o700 });
+    await fs.mkdir(quarantine, { mode: 0o700 });
+    await fs.mkdir(jobs, { mode: 0o700 });
+    const messageId = "7edaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const jobId = "8edaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const batch = ledgerBatch({
+      messageId,
+      deliveryId: "9edaa4e0-fa31-454e-a37e-a37f8807f0e7",
+      batchId: "aedaa4e0-fa31-454e-a37e-a37f8807f0e7",
+      wakePolicy: "after-job",
+      triggerId: jobId,
+    });
+    await fs.writeFile(
+      path.join(segments, "segment-00000001.jsonl"),
+      `${JSON.stringify(batch)}\n`,
+      { mode: 0o600 },
+    );
+    await writeJson(path.join(jobs, `${jobId}.json`), {
+      version: 1,
+      jobId,
+      status: "running",
+    });
+    const inspect = () =>
+      inspectRouteState({
+        stateDir: root,
+        sessions: [{ name: "worker", threadId: THREAD_ID }],
+      }).find((check) => check.id === `schedules.trigger.job.${messageId.slice(0, 8)}`);
+    assert.equal(inspect().status, "pass");
+    await fs.rm(path.join(jobs, `${jobId}.json`));
+    assert.equal(inspect().errorCode, "ETRIGGERJOBMISSING");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

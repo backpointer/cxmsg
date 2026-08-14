@@ -57,6 +57,9 @@ const ids = {
   duplicateStore: "e2345678-2234-4234-8234-123456789abc",
   corruptBlocked: "f3345678-2234-4234-8234-123456789abc",
   scheduled: "a4345678-2234-4234-8234-123456789abc",
+  afterTurn: "b4345678-2234-4234-8234-123456789abc",
+  afterJob: "c4345678-2234-4234-8234-123456789abc",
+  crossProjectTrigger: "f4345678-2234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -237,6 +240,87 @@ test("when-idle requires a bounded explicit expiry", () => {
   );
 });
 
+test("after-turn and after-job require exact validated trigger identities", async () => {
+  const expiry = new Date(Date.now() + 60_000).toISOString();
+  const triggerTurnId = "d4345678-2234-4234-8234-123456789abc";
+  const triggerJobId = "e4345678-2234-4234-8234-123456789abc";
+  assert.throws(
+    () =>
+      routes.normalizeRoute(
+        route(ids.afterTurn, { wake_policy: "after-turn", expiry }),
+      ),
+    /trigger_turn_id/,
+  );
+  assert.throws(
+    () =>
+      routes.normalizeRoute(
+        route(ids.afterJob, { wake_policy: "after-job", expiry }),
+      ),
+    /trigger_job_id/,
+  );
+
+  let validations = 0;
+  const afterTurn = await routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "worker",
+      message: "follow the exact turn",
+      route: route(ids.afterTurn, {
+        wake_policy: "after-turn",
+        trigger_turn_id: triggerTurnId,
+        expiry,
+      }),
+    },
+    async () => assert.fail("scheduled route must not dispatch at enqueue"),
+    {
+      validateTrigger: async ({ route: validated, targetThreadId }) => {
+        validations += 1;
+        assert.equal(validated.trigger_turn_id, triggerTurnId);
+        assert.equal(targetThreadId, "81345678-1234-4234-8234-123456789abc");
+      },
+    },
+  );
+  assert.equal(afterTurn.status, "scheduled");
+  assert.equal(validations, 1);
+  assert.equal(routes.readRouteDelivery(ids.afterTurn).contentRef, `cxmsg-message:${ids.afterTurn}`);
+
+  await assert.rejects(
+    () =>
+      routes.routePeerMessage(
+        {
+          from: "coordinator",
+          target: "worker",
+          message: "follow the exact job",
+          route: route(ids.afterJob, {
+            wake_policy: "after-job",
+            trigger_job_id: triggerJobId,
+            expiry,
+          }),
+        },
+        async () => assert.fail("scheduled route must not dispatch at enqueue"),
+      ),
+    /requires trigger validation/,
+  );
+  assert.equal(routes.readRouteDelivery(ids.afterJob), null);
+
+  const quarantined = await routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "worker",
+      message: "must not inspect a cross-project trigger",
+      route: route(ids.crossProjectTrigger, {
+        project_id: "stock",
+        wake_policy: "after-job",
+        trigger_job_id: triggerJobId,
+        expiry,
+      }),
+    },
+    async () => assert.fail("quarantined route must not dispatch"),
+  );
+  assert.equal(quarantined.admissionState, "quarantined");
+  assert.equal(quarantined.reason, "project_mismatch");
+});
+
 test("missing, mismatched, and expired routes quarantine with zero dispatch", async () => {
   let dispatches = 0;
   const dispatch = async () => {
@@ -278,7 +362,7 @@ test("missing, mismatched, and expired routes quarantine with zero dispatch", as
   assert.equal(expired.reason, "expired");
   assert.equal(dispatches, 0);
   const quarantined = routes.listQuarantine();
-  assert.equal(quarantined.length, 3);
+  assert.equal(quarantined.length, 4);
   assert.ok(quarantined.every((record) => !("message" in record)));
   assert.ok(quarantined.every((record) => record.messageSha256));
 });

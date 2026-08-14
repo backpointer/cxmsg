@@ -22,6 +22,7 @@ import path from "node:path";
 import {
   MAX_WHEN_IDLE_DELAY_MS,
   SCHEDULED_DELIVERY_PER_TARGET_LIMIT,
+  SCHEDULED_WAKE_POLICIES,
 } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
@@ -151,15 +152,25 @@ function validBatch(record) {
       (delivery.targetThreadId === null || UUID_PATTERN.test(delivery.targetThreadId || "")) &&
       ["admitted", "quarantined"].includes(delivery.admissionState) &&
       typeof delivery.admissionReason === "string" &&
-      ["immediate", "when-idle"].includes(delivery.wakePolicy) &&
+      ["immediate", ...SCHEDULED_WAKE_POLICIES].includes(delivery.wakePolicy) &&
       delivery.state === (delivery.wakePolicy === "immediate" ? "created" : "scheduled") &&
       (delivery.wakePolicy === "immediate" ||
-        (message.body.contentRef === `cxmsg-message:${message.messageId}` &&
-          message.route?.wake_policy === "when-idle" &&
+        ((delivery.admissionState === "quarantined"
+          ? message.body.contentRef === null
+          : message.body.contentRef === `cxmsg-message:${message.messageId}`) &&
+          message.route?.wake_policy === delivery.wakePolicy &&
           validTimestamp(message.route.expiry) &&
           Date.parse(message.route.expiry) > Date.parse(message.createdAt) &&
           Date.parse(message.route.expiry) - Date.parse(message.createdAt) <=
-            MAX_WHEN_IDLE_DELAY_MS)) &&
+            MAX_WHEN_IDLE_DELAY_MS &&
+          (delivery.wakePolicy === "after-turn"
+            ? UUID_PATTERN.test(message.route.trigger_turn_id || "") &&
+              message.route.trigger_job_id === undefined
+            : message.route.trigger_turn_id === undefined) &&
+          (delivery.wakePolicy === "after-job"
+            ? UUID_PATTERN.test(message.route.trigger_job_id || "") &&
+              message.route.trigger_turn_id === undefined
+            : message.route.trigger_job_id === undefined))) &&
       validTimestamp(delivery.createdAt) &&
       delivery.createdAt === delivery.updatedAt
   );
@@ -639,7 +650,10 @@ function applyDeliveryEvent(projected, record) {
     throw new Error(`quarantined Delivery has transport evidence: ${record.messageId}`);
   }
   if (record.recordType === "delivery-claim") {
-    if (projected.delivery.wakePolicy !== "when-idle" || projected.delivery.state !== "scheduled") {
+    if (
+      !SCHEDULED_WAKE_POLICIES.includes(projected.delivery.wakePolicy) ||
+      projected.delivery.state !== "scheduled"
+    ) {
       throw new Error(`Delivery claim is not scheduled: ${record.messageId}`);
     }
     if (projected.delivery.attempts.length > 0) {
@@ -675,7 +689,7 @@ function applyDeliveryEvent(projected, record) {
       projected.delivery.state === "created" &&
       (record.claimId === undefined || record.claimId === null);
     const scheduled =
-      projected.delivery.wakePolicy === "when-idle" &&
+      SCHEDULED_WAKE_POLICIES.includes(projected.delivery.wakePolicy) &&
       projected.delivery.state === "scheduled" &&
       projected.delivery.claim?.claimId === record.claimId;
     if ((!immediate && !scheduled) || projected.delivery.attempts.length > 0) {
@@ -766,7 +780,11 @@ export async function listDeliveryLedgerIndexed() {
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () =>
     [...readDeliveryIndexLocked().values()]
       .map((record) => structuredClone(record))
-      .sort((left, right) => left.committedAt.localeCompare(right.committedAt)),
+      .sort(
+        (left, right) =>
+          left.committedAt.localeCompare(right.committedAt) ||
+          left.logicalMessage.messageId.localeCompare(right.logicalMessage.messageId),
+      ),
   );
 }
 
@@ -818,8 +836,8 @@ export async function commitSingleRecipientDelivery(
   if (!["admitted", "quarantined"].includes(admissionState)) {
     throw new Error("invalid Delivery admission state");
   }
-  if (!["immediate", "when-idle"].includes(wakePolicy)) {
-    throw new Error("Ledger v1 supports only immediate or when-idle wake");
+  if (!["immediate", ...SCHEDULED_WAKE_POLICIES].includes(wakePolicy)) {
+    throw new Error("Ledger v1 does not support this wake policy");
   }
   if (!validTimestamp(now)) throw new Error("invalid Delivery timestamp");
 
@@ -841,12 +859,13 @@ export async function commitSingleRecipientDelivery(
       return { record: existing, created: false };
     }
     if (
-      wakePolicy === "when-idle" &&
+      SCHEDULED_WAKE_POLICIES.includes(wakePolicy) &&
       [...messages.values()].filter(
         (message) =>
           (message.delivery.targetThreadId || message.delivery.target) ===
             (targetThreadId || target) &&
-          message.delivery.wakePolicy === "when-idle" &&
+          message.delivery.admissionState === "admitted" &&
+          SCHEDULED_WAKE_POLICIES.includes(message.delivery.wakePolicy) &&
           message.delivery.state === "scheduled" &&
           message.delivery.attempts.length === 0,
       ).length >= scheduledPerTargetLimit
@@ -956,11 +975,11 @@ export async function claimScheduledDelivery(
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
     if (
       record.delivery.admissionState !== "admitted" ||
-      record.delivery.wakePolicy !== "when-idle" ||
+      !SCHEDULED_WAKE_POLICIES.includes(record.delivery.wakePolicy) ||
       record.delivery.state !== "scheduled" ||
       record.delivery.attempts.length > 0
     ) {
-      throw new Error("Delivery is not claimable for when-idle dispatch");
+      throw new Error("Delivery is not claimable for scheduled dispatch");
     }
     const claimedAt = Date.parse(now);
     if (record.delivery.claim && Date.parse(record.delivery.claim.leaseUntil) > claimedAt) {
@@ -1066,7 +1085,7 @@ export async function beginScheduledDelivery(
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
     if (
       record.delivery.admissionState !== "admitted" ||
-      record.delivery.wakePolicy !== "when-idle" ||
+      !SCHEDULED_WAKE_POLICIES.includes(record.delivery.wakePolicy) ||
       record.delivery.state !== "scheduled" ||
       record.delivery.attempts.length > 0 ||
       record.delivery.claim?.claimId !== claimId ||
@@ -1120,7 +1139,7 @@ export async function cancelScheduledDelivery(
     }
     if (
       record.delivery.admissionState !== "admitted" ||
-      record.delivery.wakePolicy !== "when-idle" ||
+      !SCHEDULED_WAKE_POLICIES.includes(record.delivery.wakePolicy) ||
       record.delivery.state !== "scheduled" ||
       record.delivery.attempts.length > 0
     ) {

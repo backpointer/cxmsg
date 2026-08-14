@@ -28,6 +28,7 @@ function run(...args) {
 test("deliveries CLI lists, shows, cancels, and rebuilds without body disclosure", async () => {
   const messageId = "71345678-3234-4234-8234-123456789abc";
   const threadId = "81345678-3234-4234-8234-123456789abc";
+  const triggerJobId = "91345678-3234-4234-8234-123456789abc";
   const body = "private scheduled CLI body";
   const route = {
     schema_version: 1,
@@ -35,7 +36,8 @@ test("deliveries CLI lists, shows, cancels, and rebuilds without body disclosure
     target_role: "auditor",
     logical_message_id: messageId,
     payload_type: "coordination",
-    wake_policy: "when-idle",
+    wake_policy: "after-job",
+    trigger_job_id: triggerJobId,
     expiry: "2026-08-15T01:00:00.000Z",
   };
   const reference = await bodies.storeMessageBody({ messageId, body });
@@ -59,13 +61,17 @@ test("deliveries CLI lists, shows, cancels, and rebuilds without body disclosure
     targetThreadId: threadId,
     admissionState: "admitted",
     admissionReason: "binding_match",
-    wakePolicy: "when-idle",
+    wakePolicy: "after-job",
     now: "2026-08-15T00:00:00.000Z",
   });
 
   const listed = run("deliveries", "list", "--status", "scheduled", "--json");
   assert.equal(listed.status, 0, listed.stderr);
   assert.equal(JSON.parse(listed.stdout)[0].logicalMessageId, messageId);
+  assert.deepEqual(JSON.parse(listed.stdout)[0].trigger, {
+    kind: "job",
+    id: triggerJobId,
+  });
   assert.doesNotMatch(listed.stdout, /private scheduled CLI body/);
 
   const shown = run("deliveries", "show", messageId, "--json");

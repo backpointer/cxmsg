@@ -149,7 +149,11 @@ import {
 } from "../src/route-admission.js";
 import {
   findClientUserMessage,
+  findThreadTurn,
+  isTerminalTurnStatus,
+  listRecentTurns,
   readThreadMetadata,
+  summarizeTurnLifecycle,
 } from "../src/thread-activity.js";
 import {
   listSessionRecords,
@@ -202,7 +206,9 @@ function usage(exitCode = 0) {
   cxmsg send [--from <name>] [--project <id>] [--target-role <role>]
              [--sender-role <role>] [--task <id>] [--logical-message-id <uuid>]
              [--payload-type <type>] [--expiry <timestamp>]
-             [--wake-policy immediate|when-idle] [--] <target> <message...>
+             [--wake-policy immediate|when-idle|after-turn|after-job]
+             [--after-turn <turn-id>|--after-job <job-id>]
+             [--] <target> <message...>
   cxmsg route bind <session> --project <id> --role <role>
   cxmsg route show <session> [--json]
   cxmsg route list [--json]
@@ -548,6 +554,18 @@ function deliveryProjection(record) {
     createdAt: record.logicalMessage.createdAt,
     updatedAt: delivery.updatedAt,
     expiry: record.logicalMessage.route?.expiry || null,
+    trigger:
+      delivery.wakePolicy === "after-turn"
+        ? {
+            kind: "turn",
+            id: record.logicalMessage.route.trigger_turn_id,
+          }
+        : delivery.wakePolicy === "after-job"
+          ? {
+              kind: "job",
+              id: record.logicalMessage.route.trigger_job_id,
+            }
+          : null,
     body: {
       bytes: record.logicalMessage.body.bytes,
       sha256: record.logicalMessage.body.sha256,
@@ -1120,6 +1138,13 @@ async function commandStatus(name, jsonOutput) {
     try {
       const thread = await readThreadMetadata(client, record.threadId);
       const threadStatus = thread.status?.type || "unknown";
+      let recent = { data: [], nextCursor: "unavailable" };
+      try {
+        recent = await listRecentTurns(client, record.threadId, {
+          itemsView: "notLoaded",
+        });
+      } catch {}
+      const lifecycle = summarizeTurnLifecycle(recent);
       return {
         name,
         threadId: record.threadId,
@@ -1129,6 +1154,7 @@ async function commandStatus(name, jsonOutput) {
         attachedPid: attachment?.childPid || null,
         cwd: thread.cwd || record.cwd,
         updatedAt: thread.updatedAt || null,
+        ...lifecycle,
         managedByCxmsgAt: record.managedByCxmsgAt || null,
         error: null,
       };
@@ -1142,6 +1168,9 @@ async function commandStatus(name, jsonOutput) {
         attachedPid: attachment?.childPid || null,
         cwd: record.cwd,
         updatedAt: null,
+        activeTurnId: null,
+        recentTerminalTurnIds: [],
+        recentTurnWindowComplete: false,
         managedByCxmsgAt: record.managedByCxmsgAt || null,
         error: error.message,
       };
@@ -1958,6 +1987,26 @@ async function commandWait(args) {
   printJob(job, jsonOutput);
 }
 
+async function validatePeerTrigger({ route, targetThreadId }) {
+  if (route.wake_policy === "after-job") {
+    const job = readJob(route.trigger_job_id);
+    if (!job || typeof job.status !== "string") {
+      throw new Error(`after-job trigger does not exist or is invalid: ${route.trigger_job_id}`);
+    }
+    return;
+  }
+  if (route.wake_policy !== "after-turn") return;
+  if (!targetThreadId) throw new Error("after-turn target has no registered thread");
+  await ensureServer();
+  const turn = await withAppServer((client) =>
+    findThreadTurn(client, targetThreadId, route.trigger_turn_id),
+  );
+  if (!turn) throw new Error(`after-turn trigger does not exist: ${route.trigger_turn_id}`);
+  if (turn.status !== "inProgress" && !isTerminalTurnStatus(turn.status)) {
+    throw new Error("after-turn trigger has an unsupported status");
+  }
+}
+
 async function commandSend(args) {
   let from = process.env.CODEX_SESSION_NAME || "";
   const routeOptions = {};
@@ -1976,6 +2025,13 @@ async function commandSend(args) {
     else if (option === "--payload-type") routeOptions.payload_type = value;
     else if (option === "--expiry") routeOptions.expiry = value;
     else if (option === "--wake-policy") routeOptions.wake_policy = value;
+    else if (option === "--after-turn") {
+      routeOptions.wake_policy = "after-turn";
+      routeOptions.trigger_turn_id = value;
+    } else if (option === "--after-job") {
+      routeOptions.wake_policy = "after-job";
+      routeOptions.trigger_job_id = value;
+    }
     else throw new Error(`unknown send option: ${option}`);
   }
   validateSessionName(from);
@@ -2013,6 +2069,7 @@ async function commandSend(args) {
         });
       });
     },
+    { validateTrigger: validatePeerTrigger },
   );
 
   if (outcome.admissionState === "quarantined") {
@@ -2025,7 +2082,7 @@ async function commandSend(args) {
   if (outcome.status === "scheduled") {
     await ensureScheduler();
     process.stdout.write(
-      `${outcome.deduplicated ? "deduplicated" : "scheduled"} ${outcome.logicalMessageId} for ${target} (when-idle)\n`,
+      `${outcome.deduplicated ? "deduplicated" : "scheduled"} ${outcome.logicalMessageId} for ${target} (${routeOptions.wake_policy})\n`,
     );
     return;
   }

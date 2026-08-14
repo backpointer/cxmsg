@@ -24,17 +24,24 @@ const ids = {
   worker: "42345678-2234-4234-8234-123456789abc",
   turn: "52345678-2234-4234-8234-123456789abc",
   expired: "62345678-2234-4234-8234-123456789abc",
+  blocked: "72345678-2234-4234-8234-123456789abc",
+  eligible: "82345678-2234-4234-8234-123456789abc",
+  triggerTurn: "92345678-2234-4234-8234-123456789abc",
+  triggerJob: "a2345678-2234-4234-8234-123456789abc",
+  triggerDispatch: "b2345678-2234-4234-8234-123456789abc",
+  triggerRegression: "c2345678-2234-4234-8234-123456789abc",
 };
 
-async function scheduledRecord(messageId, body) {
+async function scheduledRecord(messageId, body, wakePolicy = "when-idle", trigger = {}) {
   const route = {
     schema_version: 1,
     project_id: "hermes",
     target_role: "auditor",
     logical_message_id: messageId,
     payload_type: "coordination",
-    wake_policy: "when-idle",
+    wake_policy: wakePolicy,
     expiry: "2026-08-15T01:00:00.000Z",
+    ...trigger,
   };
   const reference = await bodies.storeMessageBody({ messageId, body });
   return (
@@ -58,7 +65,7 @@ async function scheduledRecord(messageId, body) {
       targetThreadId: ids.targetThread,
       admissionState: "admitted",
       admissionReason: "binding_match",
-      wakePolicy: "when-idle",
+      wakePolicy,
       now: "2026-08-15T00:00:00.000Z",
     })
   ).record;
@@ -79,6 +86,154 @@ test("worker lifecycle writes a versioned heartbeat record and removes it on exi
   assert.equal(observed.workerId, record.workerId);
   assert.ok(Number.isFinite(Date.parse(observed.heartbeatAt)));
   assert.equal(existsSync(scheduler.SCHEDULER_RECORD_PATH), false);
+});
+
+test("explicit triggers wait, block safely, and do not hold an eligible target lane", async () => {
+  const blocked = await scheduledRecord(
+    ids.blocked,
+    "after turn",
+    "after-turn",
+    { trigger_turn_id: ids.triggerTurn },
+  );
+  const eligible = await scheduledRecord(ids.eligible, "when idle");
+  assert.equal(
+    (await scheduler.scheduledTriggerReadiness(blocked, {}, {
+      findTurn: async () => ({ id: ids.triggerTurn, status: "inProgress" }),
+    })).state,
+    "waiting-trigger",
+  );
+  assert.deepEqual(
+    await scheduler.scheduledTriggerReadiness(blocked, {}, {
+      findTurn: async () => null,
+    }),
+    { state: "blocked", errorCode: "ETRIGGERNOTFOUND" },
+  );
+  assert.deepEqual(
+    await scheduler.scheduledTriggerReadiness(blocked, {}, {
+      findTurn: async () => ({ id: ids.turn, status: "completed" }),
+    }),
+    { state: "blocked", errorCode: "ETRIGGERMISMATCH" },
+  );
+  assert.equal(
+    (await scheduler.scheduledTriggerReadiness(blocked, {}, {
+      findTurn: async () => ({ id: ids.triggerTurn, status: "completed" }),
+    })).state,
+    "eligible",
+  );
+
+  const dispatched = [];
+  await scheduler.runSchedulerPass({}, ids.worker, {
+    now: () => Date.parse("2026-08-15T00:00:01.000Z"),
+    triggerReadiness: async (record) =>
+      record.logicalMessage.messageId === ids.blocked
+        ? { state: "blocked", errorCode: "ETRIGGERNOTFOUND" }
+        : { state: "eligible" },
+    dispatch: async (record) => {
+      dispatched.push(record.logicalMessage.messageId);
+      return { state: "observed" };
+    },
+  });
+  assert.deepEqual(dispatched, [eligible.logicalMessage.messageId]);
+
+  assert.equal(
+    (await scheduler.scheduledTriggerReadiness(
+      {
+        ...blocked,
+        logicalMessage: {
+          ...blocked.logicalMessage,
+          route: {
+            ...blocked.logicalMessage.route,
+            wake_policy: "after-job",
+            trigger_job_id: ids.triggerJob,
+          },
+        },
+        delivery: { ...blocked.delivery, wakePolicy: "after-job" },
+      },
+      {},
+      { job: () => ({ jobId: ids.triggerJob, status: "failed" }) },
+    )).state,
+    "eligible",
+  );
+});
+
+test("a terminal trigger is rechecked after claim and starts exactly one turn", async () => {
+  const record = await scheduledRecord(
+    ids.triggerDispatch,
+    "triggered dispatch",
+    "after-job",
+    { trigger_job_id: ids.triggerJob },
+  );
+  let triggerChecks = 0;
+  let starts = 0;
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    {
+      now: () => Date.parse("2026-08-15T00:02:00.000Z"),
+      triggerReadiness: async () => {
+        triggerChecks += 1;
+        return { state: "eligible" };
+      },
+      session: () => ({ name: "auditor", threadId: ids.targetThread }),
+      readThread: async () => ({ id: ids.targetThread, status: { type: "idle" } }),
+      deliver: async (_client, _thread, _payload, options) => {
+        starts += 1;
+        await options.beforeStart();
+        return { delivery: "started", turnId: ids.turn };
+      },
+      log: async () => {},
+    },
+  );
+  assert.equal(outcome.state, "turn_started");
+  assert.equal(triggerChecks, 2);
+  assert.equal(starts, 1);
+  assert.equal(
+    ledger.readDeliveryLedger(ids.triggerDispatch).delivery.state,
+    "turn_started",
+  );
+});
+
+test("a trigger that becomes unverifiable after claim releases without an attempt", async () => {
+  const record = await scheduledRecord(
+    ids.triggerRegression,
+    "trigger regression",
+    "after-turn",
+    { trigger_turn_id: ids.triggerTurn },
+  );
+  let triggerChecks = 0;
+  let starts = 0;
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    {
+      now: () => Date.parse("2026-08-15T00:03:00.000Z"),
+      triggerReadiness: async () => {
+        triggerChecks += 1;
+        return triggerChecks === 1
+          ? { state: "eligible" }
+          : { state: "blocked", errorCode: "ETRIGGERUNAVAILABLE" };
+      },
+      session: () => ({ name: "auditor", threadId: ids.targetThread }),
+      readThread: async () => ({ id: ids.targetThread, status: { type: "idle" } }),
+      deliver: async () => {
+        starts += 1;
+        return { delivery: "started", turnId: ids.turn };
+      },
+      log: async () => {},
+    },
+  );
+  assert.deepEqual(outcome, {
+    state: "blocked",
+    errorCode: "ETRIGGERUNAVAILABLE",
+    messageId: ids.triggerRegression,
+  });
+  assert.equal(starts, 0);
+  const retained = ledger.readDeliveryLedger(ids.triggerRegression).delivery;
+  assert.equal(retained.state, "scheduled");
+  assert.equal(retained.claim, null);
+  assert.equal(retained.attempts.length, 0);
 });
 
 test("when-idle stays queued while busy and starts exactly once after idle", async () => {

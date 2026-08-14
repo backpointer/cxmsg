@@ -4,6 +4,36 @@ export const RECENT_TURN_LIMIT = 8;
 export const MAX_TURN_SEARCH_PAGES = 8;
 export const CLIENT_MESSAGE_SEARCH_PAGE_SIZE = 64;
 export const MAX_CLIENT_MESSAGE_SEARCH_PAGES = 8;
+const TURN_ID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+export const TERMINAL_TURN_STATUSES = Object.freeze([
+  "completed",
+  "failed",
+  "interrupted",
+  "cancelled",
+  "canceled",
+]);
+
+export function isTerminalTurnStatus(status) {
+  return TERMINAL_TURN_STATUSES.includes(status);
+}
+
+export function summarizeTurnLifecycle(page) {
+  const turns = Array.isArray(page?.data) ? page.data : [];
+  return {
+    activeTurnId:
+      turns.find(
+        (turn) =>
+          turn?.status === "inProgress" && TURN_ID_PATTERN.test(turn.id || ""),
+      )?.id || null,
+    recentTerminalTurnIds: turns
+      .filter(
+        (turn) =>
+          TURN_ID_PATTERN.test(turn?.id || "") && isTerminalTurnStatus(turn.status),
+      )
+      .map((turn) => turn.id),
+    recentTurnWindowComplete: !page?.nextCursor,
+  };
+}
 
 function boundedPositiveInteger(value, fallback, maximum) {
   if (!Number.isSafeInteger(value) || value < 1) return fallback;

@@ -5,7 +5,29 @@ import {
   findThreadTurn,
   readThreadForInput,
   readThreadMetadata,
+  summarizeTurnLifecycle,
 } from "../src/thread-activity.js";
+
+test("turn lifecycle summary exposes IDs and statuses without turn contents", () => {
+  const summary = summarizeTurnLifecycle({
+    data: [
+      { id: "12345678-1234-4234-8234-123456789abc", status: "inProgress", items: [{ text: "private" }] },
+      { id: "22345678-1234-4234-8234-123456789abc", status: "completed", items: [{ text: "private" }] },
+      { id: "32345678-1234-4234-8234-123456789abc", status: "failed", error: "private" },
+      { id: "unbounded-invalid", status: "completed", items: [{ text: "private" }] },
+    ],
+    nextCursor: "older",
+  });
+  assert.deepEqual(summary, {
+    activeTurnId: "12345678-1234-4234-8234-123456789abc",
+    recentTerminalTurnIds: [
+      "22345678-1234-4234-8234-123456789abc",
+      "32345678-1234-4234-8234-123456789abc",
+    ],
+    recentTurnWindowComplete: false,
+  });
+  assert.doesNotMatch(JSON.stringify(summary), /private/);
+});
 
 test("thread activity reads metadata and the active turn without full history", async () => {
   const calls = [];

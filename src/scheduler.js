@@ -28,12 +28,21 @@ import {
   readMessageBody,
 } from "./message-bodies.js";
 import {
+  failJobIfWorkerExited,
+  isPendingJob,
+  readJob,
+} from "./jobs.js";
+import {
   deliverPeerMessageWhenIdle,
   TargetBusyError,
 } from "./messaging.js";
 import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
-import { readThreadMetadata } from "./thread-activity.js";
+import {
+  findThreadTurn,
+  isTerminalTurnStatus,
+  readThreadMetadata,
+} from "./thread-activity.js";
 import { writeCoordinationEvent } from "./observability.js";
 
 export const SCHEDULER_RECORD_PATH = path.join(CXMSG_STATE_DIR, "scheduler.json");
@@ -113,22 +122,88 @@ function wholeStoredBody(contentRef) {
   return parts.join("");
 }
 
-async function eligibleScheduledDeliveries(now) {
+export async function scheduledTriggerReadiness(
+  record,
+  client,
+  {
+    findTurn = findThreadTurn,
+    job = readJob,
+    pendingJob = isPendingJob,
+    refreshPendingJob = failJobIfWorkerExited,
+  } = {},
+) {
+  const route = record.logicalMessage.route;
+  if (record.delivery.wakePolicy === "when-idle") return { state: "eligible" };
+  if (record.delivery.wakePolicy === "after-turn") {
+    let turn;
+    try {
+      turn = await findTurn(
+        client,
+        record.delivery.targetThreadId,
+        route?.trigger_turn_id,
+      );
+    } catch {
+      return { state: "blocked", errorCode: "ETRIGGERUNAVAILABLE" };
+    }
+    if (!turn) return { state: "blocked", errorCode: "ETRIGGERNOTFOUND" };
+    if (turn.id !== route?.trigger_turn_id) {
+      return { state: "blocked", errorCode: "ETRIGGERMISMATCH" };
+    }
+    if (turn.status === "inProgress") return { state: "waiting-trigger" };
+    return isTerminalTurnStatus(turn.status)
+      ? { state: "eligible" }
+      : { state: "blocked", errorCode: "ETRIGGERSTATUS" };
+  }
+  if (record.delivery.wakePolicy === "after-job") {
+    let current;
+    try {
+      current = job(route?.trigger_job_id);
+      if (current && pendingJob(current)) {
+        current = await refreshPendingJob(current);
+      }
+    } catch {
+      return { state: "blocked", errorCode: "ETRIGGERUNAVAILABLE" };
+    }
+    if (!current) return { state: "blocked", errorCode: "ETRIGGERNOTFOUND" };
+    if (current.jobId !== route?.trigger_job_id) {
+      return { state: "blocked", errorCode: "ETRIGGERMISMATCH" };
+    }
+    if (pendingJob(current)) return { state: "waiting-trigger" };
+    return typeof current.status === "string" && current.status !== "unknown"
+      ? { state: "eligible" }
+      : { state: "blocked", errorCode: "ETRIGGERSTATUS" };
+  }
+  return { state: "blocked", errorCode: "ETRIGGERPOLICY" };
+}
+
+async function eligibleScheduledDeliveries(
+  client,
+  now,
+  triggerReadiness = scheduledTriggerReadiness,
+) {
   const firstByTarget = new Map();
+  const expired = [];
   for (const record of await listDeliveryLedgerIndexed()) {
     const delivery = record.delivery;
     if (
       delivery.admissionState !== "admitted" ||
-      delivery.wakePolicy !== "when-idle" ||
+      !["when-idle", "after-turn", "after-job"].includes(delivery.wakePolicy) ||
       delivery.state !== "scheduled" ||
       delivery.attempts.length > 0
     ) {
       continue;
     }
+    const expiry = Date.parse(record.logicalMessage.route?.expiry || "");
+    if (Number.isFinite(expiry) && expiry <= now) {
+      expired.push(record);
+      continue;
+    }
+    const readiness = await triggerReadiness(record, client);
+    if (readiness.state !== "eligible") continue;
     const lane = delivery.targetThreadId || delivery.target;
     if (!firstByTarget.has(lane)) firstByTarget.set(lane, record);
   }
-  return [...firstByTarget.values()].filter((record) => {
+  return [...expired, ...firstByTarget.values()].filter((record) => {
     const claim = record.delivery.claim;
     return !claim || Date.parse(claim.leaseUntil) <= now;
   });
@@ -153,6 +228,7 @@ export async function dispatchScheduledDelivery(
     session = readSessionRecord,
     readThread = readThreadMetadata,
     deliver = deliverPeerMessageWhenIdle,
+    triggerReadiness = scheduledTriggerReadiness,
     log = writeCoordinationEvent,
   } = {},
 ) {
@@ -178,6 +254,11 @@ export async function dispatchScheduledDelivery(
       errorCode: "EDELIVERYEXPIRED",
     });
     return { state: "expired", messageId };
+  }
+
+  const readiness = await triggerReadiness(record, client);
+  if (readiness.state !== "eligible") {
+    return { ...readiness, messageId };
   }
 
   const target = session(delivery.target);
@@ -220,6 +301,24 @@ export async function dispatchScheduledDelivery(
       const error = new Error("scheduled Delivery target identity changed after claim");
       error.code = "ETARGETIDENTITY";
       throw error;
+    }
+    const currentReadiness = await triggerReadiness(record, client);
+    if (currentReadiness.state !== "eligible") {
+      await releaseScheduledDeliveryClaim(messageId, {
+        claimId: claimResult.claim.claimId,
+        workerId,
+        reason: "dispatch_unavailable",
+        now: new Date(now()).toISOString(),
+      });
+      await log({
+        kind: "scheduled-delivery",
+        phase: "claim-release",
+        correlationId: messageId,
+        target: delivery.target,
+        outcome: currentReadiness.state,
+        errorCode: currentReadiness.errorCode || null,
+      });
+      return { ...currentReadiness, messageId };
     }
     const current = await readThread(client, currentTarget.threadId);
     if (current.status?.type === "active") throw new TargetBusyError();
@@ -309,11 +408,21 @@ export async function dispatchScheduledDelivery(
 export async function runSchedulerPass(
   client,
   workerId,
-  { now = () => Date.now(), dispatch = dispatchScheduledDelivery } = {},
+  {
+    now = () => Date.now(),
+    dispatch = dispatchScheduledDelivery,
+    triggerReadiness = scheduledTriggerReadiness,
+  } = {},
 ) {
   const outcomes = [];
-  for (const record of await eligibleScheduledDeliveries(now())) {
-    outcomes.push(await dispatch(record, client, workerId, { now }));
+  for (const record of await eligibleScheduledDeliveries(
+    client,
+    now(),
+    triggerReadiness,
+  )) {
+    outcomes.push(
+      await dispatch(record, client, workerId, { now, triggerReadiness }),
+    );
   }
   return outcomes;
 }

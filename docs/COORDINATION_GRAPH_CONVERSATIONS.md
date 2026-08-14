@@ -669,8 +669,19 @@ before an attempt and refuses an active lease. A live stalled worker is never
 silently replaced, and the cache is capped at 4,096 Logical Messages until a
 retention policy is selected.
 
-This slice still has no `after-turn`, `after-job`, scheduled Delegation,
-automatic retry, retention, purge, or Conversation fan-out.
+The exact-Trigger slice adds `after-turn` and `after-job`. Both pin a UUID in
+the immutable route, require that reference to exist before enqueue, retain the
+body before scheduling, and recheck readiness after claim. A running Trigger
+waits, a recognized terminal Trigger becomes eligible, and missing or
+unverifiable evidence is observationally blocked without an attempt. Terminal
+failed Jobs are eligible because this slice means "after any terminal Job",
+not success-only. Bounded `status --json` turn IDs and read-only Doctor Job
+reference checks expose no turn or message content. The current implementation
+uses bounded reconciliation polling; durable App Server notification cursors
+remain later Turn Lifecycle work.
+
+This slice still has no scheduled Delegation, automatic retry, retention,
+purge, or Conversation fan-out.
 Those remain separate Phase 4/6 gates rather than inferred capabilities.
 
 ### Phase 5: Direct Conversation

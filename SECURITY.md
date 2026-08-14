@@ -73,9 +73,14 @@ causes a full bounded rebuild from the Ledger; malformed metadata, unsafe file
 identity, symlinks, or more than 4,096 projected messages fail closed. Doctor
 only compares the cache with Ledger truth and never repairs it implicitly.
 
-`when-idle` scheduling retains the full Message Body in the separate owner-only
-Body Store before the Delivery becomes claimable. The typed route requires an
-explicit expiry no more than seven days away. Claims use random worker and
+Scheduled delivery retains the full Message Body in the separate owner-only
+Body Store before the Delivery becomes claimable. `when-idle`, `after-turn`,
+and `after-job` routes require an explicit expiry no more than seven days away.
+Exact turn and Job identities are validated at enqueue; trigger readiness is
+checked again before and after claim. Missing or unverifiable evidence is
+blocked, not eligible, and an unused claim is released without an attempt.
+Trigger completion creates no authority and cannot infer task completion.
+Claims use random worker and
 claim IDs with a 30-second lease; they are concurrency metadata, never delivery
 or authorization evidence. The Scheduler rechecks the pinned target thread
 after claim acquisition and records the attempt before `turn/start`. A Busy
