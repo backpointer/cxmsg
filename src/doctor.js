@@ -4,6 +4,7 @@ import {
   inspectAttachments,
   inspectBridges,
   inspectJobs,
+  inspectMessageBodies,
   inspectPermissions,
   inspectRegisteredThreads,
   inspectRelay,
@@ -41,6 +42,9 @@ export async function runDoctor({
   checks.push(...(adapters.inspectRuntime || inspectRuntime)());
   const state = (adapters.inspectState || inspectState)({ stateDir, target });
   checks.push(...state.checks);
+  checks.push(
+    ...(adapters.inspectMessageBodies || inspectMessageBodies)({ stateDir }),
+  );
   checks.push(...(adapters.inspectJobs || inspectJobs)(state.jobs));
   checks.push(...(adapters.inspectAttachments || inspectAttachments)(state.attachments));
   checks.push(...await (adapters.inspectPermissions || inspectPermissions)(

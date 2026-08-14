@@ -633,7 +633,9 @@ signal.
   owner-only Message Body Store. The injected envelope contains a 2 KiB preview,
   opaque Content Reference, total byte count, and SHA-256 digest. It never
   contains the storage path. Storage uses 8 MiB append-only segments, a 64 MiB
-  fail-closed quota, and no automatic deletion.
+  fail-closed write quota, and no automatic deletion. Existing bodies remain
+  readable above the write quota through a separate 256 MiB bounded scan
+  ceiling, so quota exhaustion does not strand retained content.
 - Peer-triggered turns cannot open an approval path. Operations outside the
   target's existing sandbox and permissions fail normally.
 - Offline stored threads are resumed before delivery.

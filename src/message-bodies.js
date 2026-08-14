@@ -25,6 +25,7 @@ export const DEFAULT_MESSAGE_READ_BYTES = 16 * 1024;
 export const MAX_MESSAGE_READ_BYTES = 64 * 1024;
 export const MESSAGE_BODY_SEGMENT_BYTES = 8 * 1024 * 1024;
 export const MESSAGE_BODY_STORE_QUOTA_BYTES = 64 * 1024 * 1024;
+export const MESSAGE_BODY_MAX_SCAN_BYTES = 256 * 1024 * 1024;
 
 export const MESSAGE_BODIES_DIR = path.join(CXMSG_STATE_DIR, "message-bodies");
 export const MESSAGE_BODY_SEGMENTS_DIR = path.join(MESSAGE_BODIES_DIR, "segments");
@@ -125,11 +126,20 @@ function readSegmentRecords(filename) {
   });
 }
 
-function listRecords(maxBytes = MESSAGE_BODY_STORE_QUOTA_BYTES) {
-  if (currentStoreBytes() > maxBytes) {
-    throw new Error("message body store quota exceeded; no content was deleted");
+function listRecords(maxScanBytes = MESSAGE_BODY_MAX_SCAN_BYTES) {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const filenames = allSegmentPaths();
+      const totalBytes = currentStoreBytes(filenames);
+      if (totalBytes > maxScanBytes) {
+        throw new Error("message body store exceeds the bounded scan limit");
+      }
+      return filenames.flatMap(readSegmentRecords);
+    } catch (error) {
+      if (error?.code !== "ENOENT" || attempt > 0) throw error;
+    }
   }
-  return allSegmentPaths().flatMap(readSegmentRecords);
+  throw new Error("message body store could not be scanned");
 }
 
 function bodyReference(record) {
@@ -142,8 +152,8 @@ function bodyReference(record) {
   };
 }
 
-function currentStoreBytes() {
-  return allSegmentPaths().reduce(
+function currentStoreBytes(filenames = allSegmentPaths()) {
+  return filenames.reduce(
     (total, filename) => total + assertPrivateRegularFile(filename).size,
     0,
   );
@@ -231,7 +241,7 @@ export async function storeMessageBody(
   ensureStore();
   return withFileLock(MESSAGE_BODY_LOCK_PATH, async () => {
     const bodySha256 = createHash("sha256").update(body).digest("hex");
-    const existing = listRecords(quotaBytes).find(
+    const existing = listRecords().find(
       (record) => record.messageId === messageId,
     );
     if (existing) {

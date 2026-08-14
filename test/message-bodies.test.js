@@ -84,11 +84,18 @@ test("partial active segments are quarantined without losing complete records", 
 
 test("stored body limit is 256 KiB and quota failure deletes nothing", async () => {
   const maximum = "a".repeat(256 * 1024);
-  await bodies.storeMessageBody(
+  const maximumStored = await bodies.storeMessageBody(
     { messageId: largeId, body: maximum },
     { quotaBytes: 2 * 1024 * 1024, segmentBytes: 1024 * 1024 },
   );
   assert.equal(bodies.messageBodyInfo(largeId).bodyBytes, 256 * 1024);
+  assert.deepEqual(
+    await bodies.storeMessageBody(
+      { messageId: largeId, body: maximum },
+      { quotaBytes: 256 * 1024, segmentBytes: 1024 * 1024 },
+    ),
+    maximumStored,
+  );
   await assert.rejects(
     bodies.storeMessageBody({
       messageId: "42345678-1234-4234-8234-123456789abc",

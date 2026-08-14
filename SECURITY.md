@@ -38,8 +38,11 @@ Long Codex Peer Message bodies are stored separately under the owner-only
 Message Body Store. Content References expose a message UUID, byte count, and
 SHA-256 digest, never a filesystem path. Reads are bounded and digest-verified.
 The initial store rejects writes above its quota and does not automatically
-purge data. Its segments may contain private coordination text and must never
-be committed, published, exposed in web snapshots, or treated as authority.
+purge data. Reads use a separate bounded scan ceiling so write-quota exhaustion
+does not make existing content inaccessible. Doctor checks only directory and
+segment metadata, quarantine counts, and quota usage; it never parses Message
+Bodies. Store segments may contain private coordination text and must never be
+committed, published, exposed in web snapshots, or treated as authority.
 
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after

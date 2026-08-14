@@ -13,6 +13,10 @@ import {
   probeClaudeBridge,
 } from "./claude-bridge.js";
 import { hostRelayRequest } from "./host-relay.js";
+import {
+  MESSAGE_BODY_SEGMENT_BYTES,
+  MESSAGE_BODY_STORE_QUOTA_BYTES,
+} from "./message-bodies.js";
 import { processIdentity, processState, serviceEvidence } from "./process-state.js";
 import { EVENT_LOG_ARCHIVES, EVENT_LOG_MAX_BYTES } from "./runtime.js";
 import { failedProbe } from "./socket-probe.js";
@@ -451,6 +455,168 @@ export function inspectState({ stateDir, target = null } = {}) {
       ? bridges.records.filter((record) => record.target === target)
       : bridges.records,
   };
+}
+
+export function inspectMessageBodies({
+  stateDir,
+  quotaBytes = MESSAGE_BODY_STORE_QUOTA_BYTES,
+  segmentBytes = MESSAGE_BODY_SEGMENT_BYTES,
+} = {}) {
+  const scope = "message-bodies";
+  const root = path.join(stateDir, "message-bodies");
+  const rootEvidence = secureMetadata(root, "directory");
+  if (rootEvidence.status === "missing") {
+    return [
+      metadataFinding(
+        "message-bodies.directory",
+        scope,
+        "Message Body Store directory",
+        rootEvidence,
+        { required: false },
+      ),
+    ];
+  }
+  const checks = [
+    metadataFinding(
+      "message-bodies.directory",
+      scope,
+      "Message Body Store directory",
+      rootEvidence,
+    ),
+  ];
+  if (rootEvidence.status !== "secure") return checks;
+
+  const collections = [
+    {
+      name: "segments",
+      pattern: /^segment-\d{8}\.jsonl$/,
+      partial: false,
+    },
+    {
+      name: "quarantine",
+      pattern: /^segment-\d{8}\.partial-[0-9a-f-]+\.jsonl$/i,
+      partial: true,
+    },
+  ];
+  let totalBytes = 0;
+  let partialSegments = 0;
+  for (const collection of collections) {
+    const directory = path.join(root, collection.name);
+    const evidence = secureMetadata(directory, "directory");
+    checks.push(
+      metadataFinding(
+        `message-bodies.${collection.name}.directory`,
+        scope,
+        `Message Body Store ${collection.name} directory`,
+        evidence,
+      ),
+    );
+    if (evidence.status !== "secure") continue;
+    let names;
+    try {
+      names = readdirSync(directory).sort();
+    } catch (error) {
+      checks.push(
+        diagnosticCheck({
+          id: `message-bodies.${collection.name}.enumeration`,
+          scope,
+          status: "unknown",
+          summary: `Message Body Store ${collection.name} could not be enumerated`,
+          verification: "unavailable",
+          errorCode: errorCode(error),
+        }),
+      );
+      continue;
+    }
+    const invalidNames = names.filter((name) => !collection.pattern.test(name));
+    if (invalidNames.length > 0) {
+      checks.push(
+        diagnosticCheck({
+          id: `message-bodies.${collection.name}.names`,
+          scope,
+          status: "fail",
+          summary: `Message Body Store ${collection.name} contains unexpected entries`,
+          verification: "metadata",
+          errorCode: "EMESSAGEBODYNAME",
+        }),
+      );
+    }
+    for (const name of names.filter((candidate) => collection.pattern.test(candidate))) {
+      const fileEvidence = secureMetadata(path.join(directory, name), "file");
+      const label = safeLabel(name);
+      if (fileEvidence.status !== "secure") {
+        checks.push(
+          metadataFinding(
+            `message-bodies.${collection.name}.${label}.metadata`,
+            scope,
+            `Message Body Store ${collection.name} segment`,
+            fileEvidence,
+          ),
+        );
+        continue;
+      }
+      totalBytes += fileEvidence.metadata.size;
+      if (fileEvidence.metadata.size > segmentBytes) {
+        checks.push(
+          diagnosticCheck({
+            id: `message-bodies.${collection.name}.${label}.size`,
+            scope,
+            status: "fail",
+            summary: `Message Body Store ${collection.name} segment exceeds its size bound`,
+            verification: "metadata",
+            errorCode: "EMESSAGEBODYSEGMENT",
+          }),
+        );
+      }
+      if (collection.partial) partialSegments += 1;
+    }
+  }
+
+  checks.push(
+    diagnosticCheck({
+      id: "message-bodies.quarantine.count",
+      scope,
+      status: partialSegments > 0 ? "warn" : "pass",
+      summary:
+        partialSegments > 0
+          ? `${partialSegments} quarantined Message Body Store segment(s) require retained operator review`
+          : "No partial Message Body Store segments are quarantined",
+      verification: "metadata",
+      errorCode: partialSegments > 0 ? "EMESSAGEBODYPARTIAL" : null,
+      remediation:
+        partialSegments > 0
+          ? "Retain quarantined segments until an explicit audited purge policy exists"
+          : null,
+      required: false,
+    }),
+  );
+  const quotaRatio = quotaBytes > 0 ? totalBytes / quotaBytes : Infinity;
+  checks.push(
+    diagnosticCheck({
+      id: "message-bodies.quota.usage",
+      scope,
+      status: quotaRatio >= 0.9 ? "warn" : "pass",
+      summary:
+        quotaRatio > 1
+          ? "Message Body Store exceeds its configured write quota"
+          : quotaRatio >= 0.9
+            ? "Message Body Store is at least 90 percent of its configured write quota"
+            : "Message Body Store is below 90 percent of its configured write quota",
+      verification: "metadata",
+      errorCode:
+        quotaRatio > 1
+          ? "EMESSAGEBODYQUOTA"
+          : quotaRatio >= 0.9
+            ? "EMESSAGEBODYQUOTANEAR"
+            : null,
+      remediation:
+        quotaRatio >= 0.9
+          ? "Do not delete segments manually; define and run an explicit audited purge after retained references are accounted for"
+          : null,
+      required: false,
+    }),
+  );
+  return checks;
 }
 
 export function inspectJobs(jobs, { now = Date.now(), processStateFn = processState } = {}) {

@@ -16,6 +16,7 @@ import {
   inspectAppServer,
   inspectBridges,
   inspectJobs,
+  inspectMessageBodies,
   inspectState,
 } from "../src/inspectors.js";
 import { CLAUDE_BRIDGE_IMPLEMENTATION_REVISION } from "../src/claude-bridge.js";
@@ -162,6 +163,62 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   ], { processStateFn: () => "unverified" });
   assert.equal(unverified[0].status, "unknown");
   assert.equal(unverified[0].errorCode, "EPERM");
+});
+
+test("Message Body Store Inspector reports private metadata, quarantine, and quota", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-bodies-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const store = path.join(root, "message-bodies");
+    const segments = path.join(store, "segments");
+    const quarantine = path.join(store, "quarantine");
+    await fs.mkdir(segments, { recursive: true, mode: 0o700 });
+    await fs.mkdir(quarantine, { mode: 0o700 });
+    await fs.writeFile(path.join(segments, "segment-00000001.jsonl"), "1234567890", {
+      mode: 0o600,
+    });
+    await fs.writeFile(
+      path.join(
+        quarantine,
+        "segment-00000002.partial-12345678-1234-4234-8234-123456789abc.jsonl",
+      ),
+      "12345678901234567890",
+      { mode: 0o600 },
+    );
+
+    const checks = inspectMessageBodies({
+      stateDir: root,
+      quotaBytes: 25,
+      segmentBytes: 100,
+    });
+    assert.equal(
+      checks.find((check) => check.id === "message-bodies.directory").status,
+      "pass",
+    );
+    assert.equal(
+      checks.find((check) => check.id === "message-bodies.quarantine.count")
+        .errorCode,
+      "EMESSAGEBODYPARTIAL",
+    );
+    assert.equal(
+      checks.find((check) => check.id === "message-bodies.quota.usage")
+        .errorCode,
+      "EMESSAGEBODYQUOTA",
+    );
+
+    await fs.chmod(path.join(segments, "segment-00000001.jsonl"), 0o644);
+    const insecure = inspectMessageBodies({ stateDir: root });
+    assert.ok(
+      insecure.some(
+        (check) =>
+          check.scope === "message-bodies" &&
+          check.status === "fail" &&
+          check.verification === "broad-mode",
+      ),
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Bridge Inspector distinguishes current, unknown, and stale implementations", async () => {

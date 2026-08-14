@@ -504,6 +504,11 @@ reads. Codex Peer Messages over the inline limit use this primitive before
 transport, but this does not claim that the Phase 4 Delivery Ledger, retention,
 purge, index, claim, lease, or reconciliation work is complete.
 
+The 64 MiB write quota and 256 MiB hard scan ceiling are separate. New writes
+fail after the write quota, while retained bodies remain readable and
+idempotent retries remain verifiable. One bounded retry tolerates an active
+segment being atomically renamed into Quarantine during an unlocked read.
+
 ### Phase 2.5: Route Admission, Quarantine, and minimum deduplication
 
 - parse the versioned routing envelope before model-context injection;
@@ -564,7 +569,9 @@ and tests: 256 KiB maximum Message Body, 16 KiB inline threshold, 16 KiB
 default read, 64 KiB maximum range read, 8 MiB append segment, and 64 MiB total
 quota. Quota exhaustion rejects the new body and deletes nothing. Automatic
 retention and purge remain disabled until the Phase 4 policy and audit behavior
-are explicitly decided.
+are explicitly decided. The temporary pre-index reader has a 256 MiB aggregate
+scan ceiling; the Phase 4 rebuildable index replaces its linear scan rather
+than silently raising that ceiling.
 
 - private Project ID creation and explicit declaration format;
 - worktree discovery, Project move, merge, split, and Tombstone rules;

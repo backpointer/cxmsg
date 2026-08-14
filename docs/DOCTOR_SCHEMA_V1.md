@@ -46,8 +46,8 @@ Every check contains:
 
 - `id` is a stable machine-oriented check identifier.
 - `scope` groups checks such as `runtime`, `state`, `sessions`, `jobs`,
-  `permissions`, `app-server`, `attachments`, `bridges`, `relay`, or
-  `schedules`.
+  `permissions`, `app-server`, `attachments`, `bridges`, `relay`,
+  `message-bodies`, or `schedules`.
 - `status` is `pass`, `warn`, `fail`, `unknown`, or `skipped`.
 - `summary` is bounded operator text with no private body data.
 - `verification` is bounded evidence such as `metadata`, `registry`,
@@ -66,6 +66,14 @@ recorded revision differs from the current executable. Both are warnings:
 Doctor reports the need for an explicit bridge restart but never performs it.
 The implementation revision is independent of the package version so local or
 unreleased code changes cannot be hidden behind an unchanged semantic version.
+Maintainers increment the implementation revision whenever the long-running
+bridge worker's loaded behavior or health contract changes; changing only the
+package version is not a substitute.
+
+Message Body Store findings inspect owner, mode, type, segment size,
+Quarantine count, and write-quota usage without parsing Message Body text.
+`EMESSAGEBODYPARTIAL` and `EMESSAGEBODYQUOTA` are retained operational
+warnings, not permission for Doctor to purge or rewrite a segment.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.
