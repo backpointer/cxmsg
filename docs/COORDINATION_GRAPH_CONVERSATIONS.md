@@ -638,6 +638,17 @@ bounded by a 256 MiB hard scan ceiling; a persistent rebuildable index,
 retention policy, claims, leases, scheduled wake policies, and Job migration
 remain Phase 4 work.
 
+The P0 diagnostic follow-up shares one 30-second grace between reconciliation
+and Doctor. Doctor reports an aged attempt without evidence as a derived warn,
+not as a Ledger transition, and the warning disappears after reconciliation
+records `unknown` or `turn_started`. A Logical Message ID present in both the
+Ledger and legacy storage is a required identity failure while runtime lookup
+continues to prefer the Ledger without another dispatch. Complete invalid
+records fail closed with bounded segment-and-line diagnostics; partial final
+lines retain the existing uncommitted-tail quarantine rule. Metadata quota
+usage is read from file sizes only, warns at 90 percent, and fails at 100
+percent without automatic deletion or repair.
+
 ### Phase 5: Direct Conversation
 
 - create canonical Node-pair Conversations;

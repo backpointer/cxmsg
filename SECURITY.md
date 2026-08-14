@@ -65,6 +65,22 @@ another append. There is no automatic retention, purge, retry, or repair.
 Delivery Ledger files and their quarantine are runtime state and must never be
 committed, published, or copied into a web snapshot.
 
+A complete malformed Ledger line fails the whole Ledger closed. Doctor may
+identify only its segment number and line number; it never emits the record.
+An incomplete final line is not committed evidence and is ignored until the
+next writer moves the whole partial segment to Ledger quarantine. Doctor never
+performs either operation. If corruption is reported, first back up the entire
+Ledger; never edit or partially delete evidence in place.
+
+Ledger quota usage is the actual active-plus-quarantine segment size. At 90
+percent Doctor warns; at or above 100 percent it fails because new sends are
+blocked, while existing evidence remains. Reserved attempt and terminal
+evidence reduce effective headroom. There is no supported manual quota reset:
+stop new sends, retain a complete backup, and wait for an audited retention or
+purge operation rather than deleting or moving segments. Message Body Store
+usage is a separate quota on the same filesystem and should be monitored with
+the Ledger.
+
 Migration compatibility is explicitly fail-open only for a target with no
 Route Admission binding: it accepts legacy unscoped Peer Messages as untrusted
 context. Removing a binding restores that compatibility behavior, so a Hermes

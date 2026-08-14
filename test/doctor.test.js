@@ -42,6 +42,51 @@ async function writeJson(target, value) {
   await fs.writeFile(target, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
 }
 
+function ledgerBatch({
+  messageId,
+  deliveryId,
+  batchId,
+  targetThreadId = THREAD_ID,
+  createdAt = "2026-08-14T00:00:00.000Z",
+}) {
+  const body = "private body stays absent";
+  const route = null;
+  return {
+    schemaVersion: 1,
+    recordType: "ledger-batch",
+    batchId,
+    committedAt: createdAt,
+    logicalMessage: {
+      messageId,
+      from: "coordinator",
+      body: {
+        messageId,
+        bytes: Buffer.byteLength(body, "utf8"),
+        sha256: createHash("sha256").update(body).digest("hex"),
+        contentRef: null,
+      },
+      route,
+      routeFingerprint: createHash("sha256")
+        .update(JSON.stringify(route))
+        .digest("hex"),
+      createdAt,
+    },
+    deliveries: [
+      {
+        deliveryId,
+        target: "worker",
+        targetThreadId,
+        admissionState: "admitted",
+        admissionReason: "legacy-unbound",
+        wakePolicy: "immediate",
+        state: "created",
+        createdAt,
+        updatedAt: createdAt,
+      },
+    ],
+  };
+}
+
 async function stateSnapshot(root) {
   const snapshot = [];
   async function walk(directory, relative = "") {
@@ -301,50 +346,31 @@ test("Route Inspector rebuilds Delivery Ledger evidence without exposing bodies"
     await fs.mkdir(quarantine, { mode: 0o700 });
     const messageId = "8ddaa4e0-fa31-454e-a37e-a37f8807f0e7";
     const deliveryId = "9ddaa4e0-fa31-454e-a37e-a37f8807f0e7";
-    const route = null;
-    const batch = {
-      schemaVersion: 1,
-      recordType: "ledger-batch",
+    const batch = ledgerBatch({
+      messageId,
+      deliveryId,
       batchId: "addaa4e0-fa31-454e-a37e-a37f8807f0e7",
-      committedAt: "2026-08-14T00:00:00.000Z",
-      logicalMessage: {
-        messageId,
-        from: "coordinator",
-        body: {
-          messageId,
-          bytes: 23,
-          sha256: createHash("sha256").update("private body stays absent").digest("hex"),
-          contentRef: null,
-        },
-        route,
-        routeFingerprint: createHash("sha256")
-          .update(JSON.stringify(route))
-          .digest("hex"),
-        createdAt: "2026-08-14T00:00:00.000Z",
-      },
-      deliveries: [
-        {
-          deliveryId,
-          target: "worker",
-          targetThreadId: THREAD_ID,
-          admissionState: "admitted",
-          admissionReason: "legacy-unbound",
-          wakePolicy: "immediate",
-          state: "created",
-          createdAt: "2026-08-14T00:00:00.000Z",
-          updatedAt: "2026-08-14T00:00:00.000Z",
-        },
-      ],
+    });
+    const attempt = {
+      schemaVersion: 1,
+      recordType: "delivery-attempt",
+      messageId,
+      deliveryId,
+      attemptId: "bddaa4e0-fa31-454e-a37e-a37f8807f0e7",
+      transport: "codex-app-server",
+      startedAt: "2026-08-14T00:00:01.000Z",
     };
+    const segment = path.join(segments, "segment-00000001.jsonl");
     await fs.writeFile(
-      path.join(segments, "segment-00000001.jsonl"),
-      `${JSON.stringify(batch)}\n`,
+      segment,
+      `${JSON.stringify(batch)}\n${JSON.stringify(attempt)}\n`,
       { mode: 0o600 },
     );
 
     const checks = inspectRouteState({
       stateDir: root,
       sessions: [{ name: "worker", threadId: THREAD_ID }],
+      now: Date.parse("2026-08-14T00:00:10.000Z"),
     });
     assert.equal(
       checks.find((check) => check.id === "delivery-ledger.records.schema").status,
@@ -354,6 +380,119 @@ test("Route Inspector rebuilds Delivery Ledger evidence without exposing bodies"
       checks.find((check) => check.id === `delivery-ledger.target.${messageId.slice(0, 8)}`).status,
       "pass",
     );
+    assert.equal(
+      checks.some((check) => check.errorCode === "ELEDGERATTEMPTSTALE"),
+      false,
+    );
+    assert.doesNotMatch(JSON.stringify(checks), /private body stays absent/);
+
+    const stale = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+      now: Date.parse("2026-08-14T00:00:31.000Z"),
+    });
+    assert.equal(
+      stale.find((check) => check.errorCode === "ELEDGERATTEMPTSTALE").status,
+      "warn",
+    );
+
+    const segmentBytes = (await fs.stat(segment)).size;
+    const exhausted = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+      ledgerQuotaBytes: segmentBytes,
+    });
+    assert.equal(
+      exhausted.find((check) => check.errorCode === "ELEDGERQUOTA").status,
+      "fail",
+    );
+
+    await fs.appendFile(
+      segment,
+      `${JSON.stringify({
+        schemaVersion: 1,
+        recordType: "delivery-evidence",
+        messageId,
+        deliveryId,
+        attemptId: attempt.attemptId,
+        state: "unknown",
+        evidenceKind: "reconciliation",
+        turnId: null,
+        transportResult: null,
+        errorCode: "EACCEPTANCEUNVERIFIED",
+        observedAt: "2026-08-14T00:00:31.000Z",
+      })}\n`,
+    );
+    const reconciled = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+      now: Date.parse("2026-08-14T00:01:00.000Z"),
+    });
+    assert.equal(
+      reconciled.some((check) => check.errorCode === "ELEDGERATTEMPTSTALE"),
+      false,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Route Inspector fails on duplicate storage identity and complete quarantined corruption", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-ledger-conflict-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const segments = path.join(root, "delivery-ledger", "segments");
+    const ledgerQuarantine = path.join(root, "delivery-ledger", "quarantine");
+    const legacy = path.join(root, "route-deliveries");
+    await fs.mkdir(segments, { recursive: true, mode: 0o700 });
+    await fs.mkdir(ledgerQuarantine, { mode: 0o700 });
+    await fs.mkdir(legacy, { mode: 0o700 });
+    const messageId = "cddaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const batch = ledgerBatch({
+      messageId,
+      deliveryId: "dddaa4e0-fa31-454e-a37e-a37f8807f0e7",
+      batchId: "eddaa4e0-fa31-454e-a37e-a37f8807f0e7",
+    });
+    await fs.writeFile(
+      path.join(segments, "segment-00000001.jsonl"),
+      `${JSON.stringify(batch)}\n`,
+      { mode: 0o600 },
+    );
+    await writeJson(path.join(legacy, `${messageId}.json`), {
+      version: 1,
+      logicalMessageId: messageId,
+      from: "coordinator",
+      target: "worker",
+      targetThreadId: THREAD_ID,
+      messageSha256: batch.logicalMessage.body.sha256,
+      routeFingerprint: batch.logicalMessage.routeFingerprint,
+      route: null,
+      admissionState: "admitted",
+      status: "turn_started",
+    });
+    await fs.writeFile(
+      path.join(
+        ledgerQuarantine,
+        "segment-00000002.partial-fddaa4e0-fa31-454e-a37e-a37f8807f0e7.jsonl",
+      ),
+      "{}\n",
+      { mode: 0o600 },
+    );
+
+    const checks = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+    });
+    assert.equal(
+      checks.find((check) => check.errorCode === "ELEDGERDUPLICATEIDENTITY")
+        .status,
+      "fail",
+    );
+    const corrupted = checks.find(
+      (check) => check.errorCode === "ELEDGERSCHEMA",
+    );
+    assert.equal(corrupted.status, "fail");
+    assert.match(corrupted.summary, /segment-00000002.*line 1/);
     assert.doesNotMatch(JSON.stringify(checks), /private body stays absent/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });

@@ -114,6 +114,23 @@ segments, a 64 MiB fail-closed quota with bounded terminal-evidence reserve,
 and a 256 MiB hard scan ceiling. Automatic retention and purge remain disabled
 until their policy is explicitly selected.
 
+Doctor derives stale dispatch observation from the same 30-second grace used
+by `route reconcile`. An attempt with no evidence remains `created` in the
+Ledger; after the grace Doctor reports `ELEDGERATTEMPTSTALE` without changing
+state. A successful or negative reconciliation appends evidence and removes
+that derived stale condition. A Logical Message ID found in both the Ledger
+and legacy storage is an unhealthy `ELEDGERDUPLICATEIDENTITY`; runtime lookup
+still uses the Ledger first and starts no duplicate turn.
+
+Doctor measures active and quarantined Ledger segment bytes without reading
+record bodies. Usage at 90 percent is a warning and usage at or above the
+quota is a required failure because new sends are rejected. Evidence reserves
+can make writes fail before raw bytes reach 100 percent. At exhaustion, stop
+new sends and make a complete backup. Do not edit, partially delete, or move
+segments; this release has no supported quota recovery until retention and
+purge tooling ships. Monitor the Message Body Store on the same volume as a
+separate quota consumer.
+
 Legacy compatibility applies only when the binding file is genuinely absent.
 If a binding path exists but its file type, owner, mode, link count, JSON, or
 identity schema is invalid, cxmsg quarantines the message as

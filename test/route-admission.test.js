@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import {
+  appendFileSync,
   mkdtempSync,
+  readdirSync,
   rmSync,
   statSync,
   symlinkSync,
@@ -51,6 +54,8 @@ const ids = {
   reconcileUnknown: "a7345678-2234-4234-8234-123456789abc",
   reconcileGrace: "b8345678-2234-4234-8234-123456789abc",
   retainedBody: "d0345678-2234-4234-8234-123456789abc",
+  duplicateStore: "e2345678-2234-4234-8234-123456789abc",
+  corruptBlocked: "f3345678-2234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -498,6 +503,121 @@ test("Route Delivery reconciliation strengthens only positive App Server accepta
     /active dispatch grace period/,
   );
   assert.equal(inspections, 0);
+  const aged = await routes.reconcileRouteDelivery(
+    ids.reconcileGrace,
+    async () => {
+      inspections += 1;
+      return { state: "not-observed", complete: true, pagesInspected: 1 };
+    },
+    {
+      log: async () => {},
+      now: Date.now() + routes.ROUTE_RECONCILE_GRACE_MS + 1,
+    },
+  );
+  assert.equal(aged.status, "unknown");
+  assert.equal(aged.reconciled, false);
+  assert.equal(inspections, 1);
   releaseDispatch();
-  await activeDispatch;
+  const completedDispatch = await activeDispatch;
+  assert.equal(completedDispatch.status, "turn_started");
+});
+
+test("a Logical Message present in Ledger and legacy storage never dispatches twice", async () => {
+  const message = "duplicate storage evidence";
+  await routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "legacy-worker",
+      message,
+      logicalMessageId: ids.duplicateStore,
+    },
+    async () => ({
+      delivery: "started",
+      turnId: "d4345678-2234-4234-8234-123456789abc",
+    }),
+    { log: async () => {} },
+  );
+  const now = new Date().toISOString();
+  writeFileSync(
+    path.join(routes.ROUTE_DELIVERIES_DIR, `${ids.duplicateStore}.json`),
+    `${JSON.stringify({
+      version: 1,
+      logicalMessageId: ids.duplicateStore,
+      from: "coordinator",
+      target: "legacy-worker",
+      messageBytes: Buffer.byteLength(message, "utf8"),
+      messageSha256: createHash("sha256").update(message).digest("hex"),
+      routeFingerprint: createHash("sha256").update(JSON.stringify(null)).digest("hex"),
+      route: null,
+      admissionState: "admitted",
+      admissionReason: "legacy-unbound",
+      status: "turn_started",
+      wakeAttemptedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      turnId: "d4345678-2234-4234-8234-123456789abc",
+      delivery: "started",
+      errorCode: null,
+    }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+
+  let dispatches = 0;
+  const duplicate = await routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "legacy-worker",
+      message,
+      logicalMessageId: ids.duplicateStore,
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+    { log: async () => {} },
+  );
+  assert.equal(duplicate.deduplicated, true);
+  assert.equal(duplicate.version, undefined);
+  assert.equal(dispatches, 0);
+  await assert.rejects(
+    routes.routePeerMessage(
+      {
+        from: "coordinator",
+        target: "legacy-worker",
+        message: "conflicting body",
+        logicalMessageId: ids.duplicateStore,
+      },
+      async () => {
+        dispatches += 1;
+        return { delivery: "started", turnId: "forbidden" };
+      },
+      { log: async () => {} },
+    ),
+    /idempotency conflict/,
+  );
+  assert.equal(dispatches, 0);
+});
+
+test("a complete invalid Ledger record fails closed before dispatch", async () => {
+  const segments = path.join(stateDir, "delivery-ledger", "segments");
+  const active = path.join(segments, readdirSync(segments).sort().at(-1));
+  appendFileSync(active, '{"schemaVersion":1,"recordType":"invalid"}\n', "utf8");
+  let dispatches = 0;
+  await assert.rejects(
+    routes.routePeerMessage(
+      {
+        from: "coordinator",
+        target: "legacy-worker",
+        message: "must not dispatch through a damaged Ledger",
+        logicalMessageId: ids.corruptBlocked,
+      },
+      async () => {
+        dispatches += 1;
+        return { delivery: "started", turnId: "forbidden" };
+      },
+      { log: async () => {} },
+    ),
+    /Route Delivery failed validation/,
+  );
+  assert.equal(dispatches, 0);
 });

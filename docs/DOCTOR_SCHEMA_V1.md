@@ -137,6 +137,16 @@ without the pinned thread reports `EROUTELEGACYIDENTITY`; a replacement target
 reports `EROUTETARGETIDENTITY`. Doctor reads no message body and does not call
 the App Server reconciliation path itself.
 
+Delivery Ledger findings use the same 30-second reconciliation grace as the
+route command. An older `created` Delivery with an attempt and no evidence is
+reported as optional `ELEDGERATTEMPTSTALE`; this is a derived observation, not
+a new Delivery state. `ELEDGERDUPLICATEIDENTITY` is a required failure when one
+Logical Message ID exists in both the Ledger and legacy Route Delivery
+storage. `ELEDGERSCHEMA` identifies a complete invalid record by safe segment
+number and line number without record contents. `ELEDGERQUOTAWARN` starts at
+90 percent of actual segment bytes and required `ELEDGERQUOTA` starts at 100
+percent. Doctor performs no reconciliation, retry, archive, purge, or repair.
+
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.
 

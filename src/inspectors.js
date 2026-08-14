@@ -13,10 +13,12 @@ import {
   probeClaudeBridge,
 } from "./claude-bridge.js";
 import {
+  DELIVERY_LEDGER_QUOTA_BYTES,
   DELIVERY_LEDGER_MAX_RECORD_BYTES,
   rebuildDeliveryLedgerRecords,
   validDeliveryLedgerRecord,
 } from "./delivery-ledger.js";
+import { ROUTE_RECONCILE_GRACE_MS } from "./delivery-policy.js";
 import { hostRelayRequest } from "./host-relay.js";
 import {
   MESSAGE_BODY_SEGMENT_BYTES,
@@ -304,7 +306,10 @@ function scanJsonDirectory({
   return { checks, records };
 }
 
-function inspectDeliveryLedger(stateDir) {
+function inspectDeliveryLedger(
+  stateDir,
+  { quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES } = {},
+) {
   const scope = "delivery-ledger";
   const root = path.join(stateDir, "delivery-ledger");
   const checks = [];
@@ -322,6 +327,8 @@ function inspectDeliveryLedger(stateDir) {
 
   const events = [];
   let parsedBytes = 0;
+  let usageBytes = 0;
+  let parseLimitReported = false;
   for (const directoryName of ["segments", "quarantine"]) {
     const directory = path.join(root, directoryName);
     const directoryEvidence = secureMetadata(directory, "directory");
@@ -354,7 +361,8 @@ function inspectDeliveryLedger(stateDir) {
     }
     for (const name of names) {
       const file = path.join(directory, name);
-      const label = safeLabel(name);
+      const segmentNumber = name.match(/^segment-(\d{8})/i)?.[1] || "unknown";
+      const label = `segment-${segmentNumber}`;
       const evidence = secureMetadata(file, "file");
       if (evidence.status !== "secure") {
         checks.push(
@@ -367,65 +375,114 @@ function inspectDeliveryLedger(stateDir) {
         );
         continue;
       }
+      usageBytes += evidence.metadata.size;
       if (parsedBytes + evidence.metadata.size > MAX_DIRECTORY_BYTES) {
-        checks.push(
-          diagnosticCheck({
-            id: `${scope}.records.bytes`,
-            scope,
-            status: "warn",
-            summary: "Delivery Ledger exceeds the bounded Doctor parse limit",
-            verification: "bounded",
-            errorCode: "ERECORDBYTES",
-            remediation: "Inspect the Ledger from an allowed host context",
-          }),
-        );
-        break;
-      }
-      parsedBytes += evidence.metadata.size;
-      try {
-        const raw = readFileSync(file, "utf8");
-        const complete = raw.endsWith("\n");
-        if (!complete) {
+        if (!parseLimitReported) {
           checks.push(
             diagnosticCheck({
-              id: `${scope}.${directoryName}.${label}.partial`,
+              id: `${scope}.records.bytes`,
               scope,
-              status: directoryName === "segments" ? "fail" : "warn",
-              summary: `Delivery Ledger ${directoryName} segment has an incomplete final record`,
-              verification: "records",
-              errorCode: "ELEDGERPARTIAL",
-              remediation:
-                directoryName === "segments"
-                  ? "Do not dispatch from this Ledger until the writer quarantines the partial segment"
-                  : null,
+              status: "warn",
+              summary: "Delivery Ledger exceeds the bounded Doctor parse limit",
+              verification: "bounded",
+              errorCode: "ERECORDBYTES",
+              remediation: "Inspect the Ledger from an allowed host context",
             }),
           );
+          parseLimitReported = true;
         }
-        const lines = raw.split("\n");
-        if (!complete) lines.pop();
-        else if (lines.at(-1) === "") lines.pop();
-        for (const line of lines) {
+        continue;
+      }
+      parsedBytes += evidence.metadata.size;
+      let raw;
+      try {
+        raw = readFileSync(file, "utf8");
+      } catch (error) {
+        checks.push(
+          diagnosticCheck({
+            id: `${scope}.${directoryName}.${label}.read`,
+            scope,
+            status: "unknown",
+            summary: `Delivery Ledger segment ${label} could not be read`,
+            verification: "unavailable",
+            errorCode: errorCode(error),
+          }),
+        );
+        continue;
+      }
+      const complete = raw.endsWith("\n");
+      if (!complete) {
+        checks.push(
+          diagnosticCheck({
+            id: `${scope}.${directoryName}.${label}.partial`,
+            scope,
+            status: directoryName === "segments" ? "fail" : "warn",
+            summary: `Delivery Ledger ${directoryName} segment has an incomplete final record`,
+            verification: "records",
+            errorCode: "ELEDGERPARTIAL",
+            remediation:
+              directoryName === "segments"
+                ? "Do not dispatch from this Ledger until the writer quarantines the partial segment"
+                : null,
+          }),
+        );
+      }
+      const lines = raw.split("\n");
+      if (!complete) lines.pop();
+      else if (lines.at(-1) === "") lines.pop();
+      for (const [index, line] of lines.entries()) {
+        try {
           if (Buffer.byteLength(line, "utf8") > DELIVERY_LEDGER_MAX_RECORD_BYTES) {
             throw new Error("record-size");
           }
           const record = JSON.parse(line);
           if (!validDeliveryLedgerRecord(record)) throw new Error("record-schema");
           events.push(record);
+        } catch {
+          checks.push(
+            diagnosticCheck({
+              id: `${scope}.${directoryName}.${label}.line.${index + 1}`,
+              scope,
+              status: "fail",
+              summary: `Delivery Ledger segment ${label} line ${index + 1} has invalid bounded evidence`,
+              verification: "schema",
+              errorCode: "ELEDGERSCHEMA",
+              remediation:
+                "Back up the complete Ledger, then move the whole affected segment to an archive; do not edit or partially delete evidence in place",
+            }),
+          );
+          break;
         }
-      } catch {
-        checks.push(
-          diagnosticCheck({
-            id: `${scope}.${directoryName}.${label}.schema`,
-            scope,
-            status: "fail",
-            summary: `Delivery Ledger segment ${label} has invalid bounded JSONL evidence`,
-            verification: "schema",
-            errorCode: "ELEDGERSCHEMA",
-          }),
-        );
       }
     }
   }
+
+  const quotaStatus = usageBytes >= quotaBytes ? "fail" : usageBytes >= quotaBytes * 0.9 ? "warn" : "pass";
+  checks.push(
+    diagnosticCheck({
+      id: `${scope}.quota.usage`,
+      scope,
+      status: quotaStatus,
+      summary:
+        quotaStatus === "fail"
+          ? "Delivery Ledger reached its metadata quota; new sends fail closed while retained evidence remains"
+          : quotaStatus === "warn"
+            ? "Delivery Ledger exceeds 90 percent of its metadata quota; reserved terminal evidence further reduces headroom"
+            : "Delivery Ledger is below 90 percent of its metadata quota; reserved terminal evidence also consumes headroom",
+      verification: "metadata",
+      errorCode:
+        quotaStatus === "fail"
+          ? "ELEDGERQUOTA"
+          : quotaStatus === "warn"
+            ? "ELEDGERQUOTAWARN"
+            : null,
+      remediation:
+        quotaStatus === "pass"
+          ? null
+          : "Stop new sends and back up the complete Ledger; do not edit, move, or delete segments before a supported retention or purge operation exists",
+      required: quotaStatus === "fail",
+    }),
+  );
 
   let records = [];
   try {
@@ -437,7 +494,10 @@ function inspectDeliveryLedger(stateDir) {
         version: 2,
         logicalMessageId: message.messageId,
         target: delivery.target,
+        admissionState: delivery.admissionState,
         ...(delivery.targetThreadId ? { targetThreadId: delivery.targetThreadId } : {}),
+        attemptStartedAt: activeAttempt?.startedAt || null,
+        updatedAt: delivery.updatedAt,
         status:
           delivery.admissionState === "quarantined"
             ? "quarantined"
@@ -1518,7 +1578,13 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
   return checks;
 }
 
-export function inspectRouteState({ stateDir, sessions = [] } = {}) {
+export function inspectRouteState({
+  stateDir,
+  sessions = [],
+  now = Date.now(),
+  reconcileGraceMs = ROUTE_RECONCILE_GRACE_MS,
+  ledgerQuotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+} = {}) {
   const bindings = scanJsonDirectory({
     stateDir,
     directoryName: "route-bindings",
@@ -1531,7 +1597,7 @@ export function inspectRouteState({ stateDir, sessions = [] } = {}) {
     scope: "route-deliveries",
     validate: validRouteDelivery,
   });
-  const ledger = inspectDeliveryLedger(stateDir);
+  const ledger = inspectDeliveryLedger(stateDir, { quotaBytes: ledgerQuotaBytes });
   const quarantine = scanJsonDirectory({
     stateDir,
     directoryName: "quarantine",
@@ -1546,6 +1612,24 @@ export function inspectRouteState({ stateDir, sessions = [] } = {}) {
     ...quarantine.checks,
   ];
   const sessionsByName = new Map(sessions.map((record) => [record.name, record]));
+  const legacyMessageIds = new Set(
+    deliveries.records.map((record) => record.logicalMessageId),
+  );
+  for (const delivery of ledger.records) {
+    if (!legacyMessageIds.has(delivery.logicalMessageId)) continue;
+    checks.push(
+      diagnosticCheck({
+        id: `delivery-ledger.duplicate.${safeLabel(delivery.logicalMessageId)}`,
+        scope: "delivery-ledger",
+        status: "fail",
+        summary: "A Logical Message ID exists in both the Ledger and legacy Route Delivery storage",
+        verification: "records",
+        errorCode: "ELEDGERDUPLICATEIDENTITY",
+        remediation:
+          "Back up all cxmsg runtime state, then move the legacy record to an operator archive; reconciliation updates only the Ledger",
+      }),
+    );
+  }
   for (const binding of bindings.records) {
     const current = sessionsByName.get(binding.sessionName);
     const matches = current?.threadId === binding.threadId;
@@ -1585,6 +1669,26 @@ export function inspectRouteState({ stateDir, sessions = [] } = {}) {
             : "Do not replay this Delivery; reconciliation is bound to the original target thread",
         }),
       );
+    }
+    if (delivery.version === 2 && delivery.status === "dispatching") {
+      if (
+        Number.isFinite(Date.parse(delivery.attemptStartedAt || "")) &&
+        now - Date.parse(delivery.attemptStartedAt) >= reconcileGraceMs
+      ) {
+        checks.push(
+          diagnosticCheck({
+            id: `delivery-ledger.stale-attempt.${safeLabel(delivery.logicalMessageId)}`,
+            scope: "delivery-ledger",
+            status: "warn",
+            summary: "A Delivery attempt exceeded the shared reconciliation grace without evidence",
+            verification: "records",
+            errorCode: "ELEDGERATTEMPTSTALE",
+            remediation: `Run cxmsg route reconcile ${delivery.logicalMessageId}; absence is not retry permission`,
+            required: false,
+          }),
+        );
+      }
+      continue;
     }
     if (["dispatching", "unknown"].includes(delivery.status)) {
       const legacyIdentity = !delivery.targetThreadId;

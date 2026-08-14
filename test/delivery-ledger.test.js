@@ -2,11 +2,15 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   appendFileSync,
+  chmodSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
   statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
 } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -150,4 +154,43 @@ test("an incomplete active tail is quarantined before a new batch is appended", 
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_QUARANTINE_DIR).length, 1);
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_SEGMENTS_DIR).length, 1);
   assert.equal(ledger.listDeliveryLedger().length, 2);
+});
+
+test("Ledger scans reject broad modes and symlink segments", () => {
+  const active = path.join(
+    ledger.DELIVERY_LEDGER_SEGMENTS_DIR,
+    readdirSync(ledger.DELIVERY_LEDGER_SEGMENTS_DIR)[0],
+  );
+  chmodSync(active, 0o644);
+  assert.throws(
+    () => ledger.readDeliveryLedger(ids.message),
+    /permissions are too broad/,
+  );
+  chmodSync(active, 0o600);
+
+  const linked = path.join(
+    ledger.DELIVERY_LEDGER_SEGMENTS_DIR,
+    "segment-99999999.jsonl",
+  );
+  symlinkSync(active, linked);
+  assert.throws(
+    () => ledger.readDeliveryLedger(ids.message),
+    /not a regular file/,
+  );
+  unlinkSync(linked);
+});
+
+test("a complete invalid record in Ledger quarantine fails the whole scan closed", () => {
+  writeFileSync(
+    path.join(
+      ledger.DELIVERY_LEDGER_QUARANTINE_DIR,
+      "segment-00000003.partial-51345678-1234-4234-8234-123456789abc.jsonl",
+    ),
+    "{}\n",
+    { mode: 0o600 },
+  );
+  assert.throws(
+    () => ledger.readDeliveryLedger(ids.message),
+    /invalid Delivery Ledger record/,
+  );
 });

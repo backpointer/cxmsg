@@ -16,6 +16,7 @@ import {
   commitSingleRecipientDelivery,
   readDeliveryLedger,
 } from "./delivery-ledger.js";
+import { ROUTE_RECONCILE_GRACE_MS } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
 import {
   MAX_STORED_MESSAGE_BYTES,
@@ -36,7 +37,7 @@ import { CXMSG_STATE_DIR } from "./runtime.js";
 export const ROUTE_BINDINGS_DIR = path.join(CXMSG_STATE_DIR, "route-bindings");
 export const ROUTE_DELIVERIES_DIR = path.join(CXMSG_STATE_DIR, "route-deliveries");
 export const QUARANTINE_DIR = path.join(CXMSG_STATE_DIR, "quarantine");
-export const ROUTE_RECONCILE_GRACE_MS = 30_000;
+export { ROUTE_RECONCILE_GRACE_MS };
 
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -639,7 +640,7 @@ export async function reconcileRouteDelivery(
     }
     if (
       record.status === "dispatching" &&
-      now - Date.parse(record.updatedAt) < dispatchingGraceMs
+      now - Date.parse(record.wakeAttemptedAt || record.updatedAt) < dispatchingGraceMs
     ) {
       throw new Error("Route Delivery is still within its active dispatch grace period");
     }
