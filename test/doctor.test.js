@@ -14,9 +14,11 @@ import {
 import {
   diagnosticCheck,
   inspectAppServer,
+  inspectBridges,
   inspectJobs,
   inspectState,
 } from "../src/inspectors.js";
+import { CLAUDE_BRIDGE_IMPLEMENTATION_REVISION } from "../src/claude-bridge.js";
 import { failedProbe } from "../src/socket-probe.js";
 
 const THREAD_ID = "019ff02a-ee3b-7072-8a79-e5ffd491529d";
@@ -160,6 +162,45 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   ], { processStateFn: () => "unverified" });
   assert.equal(unverified[0].status, "unknown");
   assert.equal(unverified[0].errorCode, "EPERM");
+});
+
+test("Bridge Inspector distinguishes current, unknown, and stale implementations", async () => {
+  const base = {
+    version: 1,
+    targetThreadId: THREAD_ID,
+    pid: 42,
+    socketPath: "/missing/bridge.sock",
+    startedAt: 1,
+  };
+  const bridges = [
+    { ...base, target: "legacy" },
+    {
+      ...base,
+      target: "stale",
+      implementationRevision: CLAUDE_BRIDGE_IMPLEMENTATION_REVISION + 1,
+    },
+    {
+      ...base,
+      target: "current",
+      implementationRevision: CLAUDE_BRIDGE_IMPLEMENTATION_REVISION,
+    },
+  ];
+  const sessions = bridges.map((bridge) => ({
+    name: bridge.target,
+    threadId: bridge.targetThreadId,
+  }));
+  const checks = await inspectBridges(bridges, sessions, {
+    processStateFn: () => "alive",
+    processIdentityFn: () => ({ state: "matched", command: "bridge" }),
+  });
+
+  const implementation = (target) =>
+    checks.find((check) => check.id === `bridges.${target}.implementation`);
+  assert.equal(implementation("legacy").status, "warn");
+  assert.equal(implementation("legacy").errorCode, "EBRIDGEVERSIONUNKNOWN");
+  assert.equal(implementation("stale").status, "warn");
+  assert.equal(implementation("stale").errorCode, "EBRIDGESTALECODE");
+  assert.equal(implementation("current").status, "pass");
 });
 
 test("State Inspector rejects symlink records without reading their target", async () => {

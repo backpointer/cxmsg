@@ -5,9 +5,11 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 import {
+  CLAUDE_BRIDGE_IMPLEMENTATION_REVISION,
   evaluateClaudeBridgeRecord,
   probeClaudeBridge,
 } from "../src/claude-bridge.js";
+import { CXMSG_VERSION } from "../src/version.js";
 import { claudeSocketsDir } from "../src/claude-messaging.js";
 
 const TEST_CLAUDE_SOCKETS_DIR = await fs.mkdtemp(
@@ -29,6 +31,8 @@ test("bridge identity handshake supports EPERM status and rejects mismatches", a
     pid,
     socketPath,
     startedAt: 1234,
+    cxmsgVersion: CXMSG_VERSION,
+    implementationRevision: CLAUDE_BRIDGE_IMPLEMENTATION_REVISION,
   };
   const server = net.createServer((socket) => {
     const chunks = [];
@@ -43,6 +47,8 @@ test("bridge identity handshake supports EPERM status and rejects mismatches", a
           targetThreadId: record.targetThreadId,
           pid: record.pid,
           startedAt: record.startedAt,
+          cxmsgVersion: record.cxmsgVersion,
+          implementationRevision: record.implementationRevision,
         })}\n`,
       );
     });
@@ -64,6 +70,15 @@ test("bridge identity handshake supports EPERM status and rejects mismatches", a
     assert.equal(state.safeToRemove, false);
     assert.equal(
       (await probeClaudeBridge({ ...record, targetThreadId: "wrong-thread" })).state,
+      "invalid",
+    );
+    assert.equal(
+      (
+        await probeClaudeBridge({
+          ...record,
+          implementationRevision: record.implementationRevision + 1,
+        })
+      ).state,
       "invalid",
     );
   } finally {

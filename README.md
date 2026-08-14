@@ -60,6 +60,20 @@ different shell, specify it explicitly:
 cxmsg send --from coordinator worker "ping"
 ```
 
+Codex Peer Messages accept up to 256 KiB. Bodies through 16 KiB are delivered
+inline. Larger bodies are stored locally before transport and the receiver gets
+only a bounded preview plus an opaque Content Reference. Read only the range
+needed for the current task:
+
+```bash
+cxmsg message info cxmsg-message:<message-id> --json
+cxmsg message show <message-id> --offset 0 --limit 16384 --json
+```
+
+The default read is 16 KiB and a single read is capped at 64 KiB. Repeat with
+the returned `nextOffset`; do not infer that fetching a range means the model
+read, understood, or completed the message.
+
 Grant a coordinator permission to delegate user-authorized jobs to a worker:
 
 ```bash
@@ -473,9 +487,16 @@ turns a successful message operation into a delivery failure.
 
 Status and ordinary delivery use an owner-only UDS health check. The cxmsg
 bridge health response binds its target, thread, PID, start time, and a fresh
-nonce to the registry record. A sandbox may deny `kill(pid, 0)` or `ps` with
-`EPERM`; that makes process identity unverified rather than stopped when the
-socket check succeeds. Destructive lifecycle operations remain stricter:
+nonce to the registry record. New bridge records and health responses also
+bind the cxmsg package version and a separately incremented bridge
+implementation revision. `cxmsg doctor` warns when a running bridge predates
+that stamp or reports another revision. Updating files does not replace code
+already loaded by a long-running bridge; restart that bridge explicitly from
+an allowed host context and rerun Doctor. Doctor never restarts it.
+
+A sandbox may deny `kill(pid, 0)` or `ps` with `EPERM`; that makes process
+identity unverified rather than stopped when the socket check succeeds.
+Destructive lifecycle operations remain stricter:
 `server stop`, `claude bridge stop`, and stale cleanup refuse to signal or
 remove an identity they cannot verify.
 
@@ -604,6 +625,15 @@ signal.
 - If the target has an active turn, the message is appended with `turn/steer`.
 - If the target is idle, a new turn is started with `approvalPolicy: "never"`.
 - The message body is supplied as `additionalContext` with kind `untrusted`.
+- Inline Message Bodies larger than 2 KiB are split on UTF-8 boundaries into ordered
+  `additionalContext` fragments. Every fragment carries the same message ID,
+  total byte count, and SHA-256 digest, so a receiver can detect a missing or
+  reordered fragment instead of silently accepting a TUI-truncated message.
+- Message Bodies over 16 KiB and through 256 KiB are written first to the
+  owner-only Message Body Store. The injected envelope contains a 2 KiB preview,
+  opaque Content Reference, total byte count, and SHA-256 digest. It never
+  contains the storage path. Storage uses 8 MiB append-only segments, a 64 MiB
+  fail-closed quota, and no automatic deletion.
 - Peer-triggered turns cannot open an approval path. Operations outside the
   target's existing sandbox and permissions fail normally.
 - Offline stored threads are resumed before delivery.
@@ -706,8 +736,10 @@ is present, `cxmsg` validates the named profile through
 `:read-only`, `:workspace`, and `:danger-full-access`, but availability can be
 restricted by managed requirements.
 
-Messages are limited to 16 KiB. Session names are limited to 64 characters and
-may contain letters, numbers, `.`, `_`, and `-`.
+Codex Peer Messages are limited to 256 KiB. Bodies through 16 KiB use inline
+delivery; larger bodies use a 2 KiB preview and Content Reference. Delegation
+tasks and outbound Claude messages remain limited to 16 KiB. Session names are
+limited to 64 characters and may contain letters, numbers, `.`, `_`, and `-`.
 
 ## Why App Server
 

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import {
   delegatedTaskInput,
@@ -9,9 +10,11 @@ import {
   peerThreads,
   finalTurnResult,
   resolveTarget,
+  splitUtf8,
   storedSessionName,
   truncateUtf8,
   validateMessage,
+  validateStoredMessage,
   validateSessionName,
 } from "../src/messaging.js";
 
@@ -28,9 +31,15 @@ test("session names are validated and stored in a private namespace", () => {
 test("message byte limits and UTF-8 truncation preserve character boundaries", () => {
   assert.equal(validateMessage("a".repeat(16 * 1024)).length, 16 * 1024);
   assert.throws(() => validateMessage("a".repeat(16 * 1024 + 1)));
+  assert.equal(validateStoredMessage("a".repeat(256 * 1024)).length, 256 * 1024);
+  assert.throws(() => validateStoredMessage("a".repeat(256 * 1024 + 1)));
   const truncated = truncateUtf8("가".repeat(10), 10);
   assert.equal(Buffer.byteLength(truncated, "utf8"), 9);
   assert.doesNotMatch(truncated, /\uFFFD/);
+  const parts = splitUtf8("가".repeat(10), 10);
+  assert.deepEqual(parts.map((part) => Buffer.byteLength(part, "utf8")), [9, 9, 9, 3]);
+  assert.equal(parts.join(""), "가".repeat(10));
+  assert.throws(() => splitUtf8("가", 2), /too small/);
 });
 
 test("only cxmsg threads are discoverable as peers", () => {
@@ -54,6 +63,105 @@ test("peer input is explicitly untrusted", () => {
   assert.equal(result.additionalContext["cxmsg:message-1"].kind, "untrusted");
   assert.match(result.additionalContext["cxmsg:message-1"].value, /tests passed/);
   assert.match(result.input[0].text, /not user consent/);
+});
+
+test("large peer input is split into ordered verifiable context fragments", () => {
+  const message = `heading\n${"가나다라마바사".repeat(500)}\ntrailer`;
+  const result = peerMessageInput({
+    from: "alpha",
+    message,
+    messageId: "message-large",
+  });
+  const values = Object.values(result.additionalContext).map(({ value }) =>
+    JSON.parse(value),
+  );
+
+  assert.ok(values.length > 1);
+  assert.deepEqual(
+    values.map((value) => value.fragment.index),
+    values.map((_, index) => index + 1),
+  );
+  assert.ok(values.every((value) => value.fragment.total === values.length));
+  assert.ok(
+    values.every(
+      (value) => Buffer.byteLength(value.message, "utf8") <= 2 * 1024,
+    ),
+  );
+  assert.equal(values.map((value) => value.message).join(""), message);
+  assert.ok(values.every((value) => value.fragment.messageBytes === Buffer.byteLength(message, "utf8")));
+  assert.ok(values.every((value) => value.fragment.messageSha256 === values[0].fragment.messageSha256));
+  assert.match(result.input[0].text, new RegExp(`${values.length} ordered cxmsg fragments`));
+});
+
+test("stored peer input carries a bounded preview and verifiable opaque reference", () => {
+  const messageId = "62345678-1234-4234-8234-123456789abc";
+  const message = "a".repeat(20 * 1024);
+  const bodySha256 = createHash("sha256").update(message).digest("hex");
+  const result = peerMessageInput({
+    from: "alpha",
+    message,
+    messageId,
+    bodyReference: {
+      messageId,
+      contentRef: `cxmsg-message:${messageId}`,
+      bodyBytes: Buffer.byteLength(message, "utf8"),
+      bodySha256,
+    },
+  });
+  const [context] = Object.values(result.additionalContext).map(({ value }) =>
+    JSON.parse(value),
+  );
+
+  assert.equal(Object.keys(result.additionalContext).length, 1);
+  assert.equal(context.body.contentRef, `cxmsg-message:${messageId}`);
+  assert.equal(context.body.bytes, 20 * 1024);
+  assert.equal(context.body.sha256, bodySha256);
+  assert.equal(Buffer.byteLength(context.message, "utf8"), 2 * 1024);
+  assert.doesNotMatch(JSON.stringify(context), new RegExp(`a{${16 * 1024}}`));
+  assert.match(result.input[0].text, /cxmsg message show/);
+  assert.throws(
+    () => peerMessageInput({ from: "alpha", message, messageId }),
+    /matching stored body reference/,
+  );
+});
+
+test("large delivery persists the body before starting a turn", async () => {
+  const calls = [];
+  const stored = [];
+  const messageId = "72345678-1234-4234-8234-123456789abc";
+  const message = "body ".repeat(4_000);
+  const bodySha256 = createHash("sha256").update(message).digest("hex");
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      return { turn: { id: "turn-large" } };
+    },
+  };
+  const result = await deliverPeerMessage(
+    client,
+    { id: "thread-beta", name: "cxmsg:beta", status: { type: "idle" }, turns: [] },
+    { from: "alpha", message, messageId },
+    {
+      async storeBody(value) {
+        stored.push(value);
+        return {
+          messageId,
+          contentRef: `cxmsg-message:${messageId}`,
+          bodyBytes: Buffer.byteLength(message, "utf8"),
+          bodySha256,
+        };
+      },
+    },
+  );
+
+  assert.deepEqual(stored, [{ messageId, body: message }]);
+  assert.equal(calls[0].method, "turn/start");
+  assert.equal(result.messageId, messageId);
+  const context = JSON.parse(
+    calls[0].params.additionalContext[`cxmsg:${messageId}`].value,
+  );
+  assert.equal(context.body.contentRef, `cxmsg-message:${messageId}`);
+  assert.ok(Buffer.byteLength(context.message, "utf8") < Buffer.byteLength(message, "utf8"));
 });
 
 test("idle delivery starts a non-escalating turn", async () => {

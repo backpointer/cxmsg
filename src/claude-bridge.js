@@ -47,6 +47,7 @@ import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import { processState, serviceEvidence } from "./process-state.js";
 import { readThreadMetadata } from "./thread-activity.js";
+import { CXMSG_VERSION } from "./version.js";
 import {
   failedProbe,
   healthyProbe,
@@ -54,6 +55,7 @@ import {
 } from "./socket-probe.js";
 
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
+export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 1;
 
 function bridgeRecordPath(target) {
   return path.join(CLAUDE_BRIDGES_DIR, `${validateSessionName(target)}.json`);
@@ -78,7 +80,12 @@ export function readClaudeBridgeRecord(target) {
       typeof record.targetThreadId !== "string" ||
       !Number.isSafeInteger(record.pid) ||
       typeof record.socketPath !== "string" ||
-      !Number.isSafeInteger(record.startedAt)
+      !Number.isSafeInteger(record.startedAt) ||
+      (record.cxmsgVersion !== undefined &&
+        typeof record.cxmsgVersion !== "string") ||
+      (record.implementationRevision !== undefined &&
+        (!Number.isSafeInteger(record.implementationRevision) ||
+          record.implementationRevision < 1))
     ) {
       return null;
     }
@@ -125,7 +132,9 @@ export async function probeClaudeBridge(record, timeoutMs = 500) {
             response.target === record.target &&
             response.targetThreadId === record.targetThreadId &&
             response.pid === record.pid &&
-            response.startedAt === record.startedAt;
+            response.startedAt === record.startedAt &&
+            response.cxmsgVersion === record.cxmsgVersion &&
+            response.implementationRevision === record.implementationRevision;
         finish(
           matched
             ? healthyProbe()
@@ -402,6 +411,8 @@ export async function runClaudeBridge(target) {
   if (existsSync(socketPath)) unlinkSync(socketPath);
   const record = {
     version: 1,
+    cxmsgVersion: CXMSG_VERSION,
+    implementationRevision: CLAUDE_BRIDGE_IMPLEMENTATION_REVISION,
     target,
     targetThreadId: targetRecord.threadId,
     pid: process.pid,
@@ -493,6 +504,8 @@ export async function runClaudeBridge(target) {
               targetThreadId: record.targetThreadId,
               pid: record.pid,
               startedAt: record.startedAt,
+              cxmsgVersion: record.cxmsgVersion,
+              implementationRevision: record.implementationRevision,
             })}\n`,
           );
           return;

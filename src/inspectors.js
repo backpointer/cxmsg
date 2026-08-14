@@ -8,7 +8,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { probeAppServerSocket, withAppServer } from "./app-server-client.js";
-import { probeClaudeBridge } from "./claude-bridge.js";
+import {
+  CLAUDE_BRIDGE_IMPLEMENTATION_REVISION,
+  probeClaudeBridge,
+} from "./claude-bridge.js";
 import { hostRelayRequest } from "./host-relay.js";
 import { processIdentity, processState, serviceEvidence } from "./process-state.js";
 import { EVENT_LOG_ARCHIVES, EVENT_LOG_MAX_BYTES } from "./runtime.js";
@@ -307,7 +310,12 @@ function validBridge(record, stem) {
         Number.isSafeInteger(record.pid) &&
         record.pid > 1 &&
         typeof record.socketPath === "string" &&
-        Number.isSafeInteger(record.startedAt),
+        Number.isSafeInteger(record.startedAt) &&
+        (record.cxmsgVersion === undefined ||
+          typeof record.cxmsgVersion === "string") &&
+        (record.implementationRevision === undefined ||
+          (Number.isSafeInteger(record.implementationRevision) &&
+            record.implementationRevision > 0)),
     ),
     errorCode: "EBRIDGESCHEMA",
   };
@@ -777,6 +785,7 @@ export async function inspectBridges(
     processIdentityFn = processIdentity,
     probe = probeClaudeBridge,
     workerFragment = "claude-bridge-worker.js",
+    currentRevision = CLAUDE_BRIDGE_IMPLEMENTATION_REVISION,
   } = {},
 ) {
   if (bridges.length === 0) {
@@ -793,6 +802,36 @@ export async function inspectBridges(
   const checks = [];
   for (const record of bridges) {
     const label = safeLabel(record.target);
+    const recordedRevision = record.implementationRevision;
+    checks.push(diagnosticCheck({
+      id: `bridges.${label}.implementation`,
+      scope: "bridges",
+      status:
+        recordedRevision === currentRevision
+          ? "pass"
+          : "warn",
+      summary:
+        recordedRevision === undefined
+          ? `Claude bridge ${record.target} does not identify its running implementation revision`
+          : recordedRevision === currentRevision
+            ? `Claude bridge ${record.target} runs the current implementation revision`
+            : `Claude bridge ${record.target} runs a different implementation revision`,
+      verification:
+        recordedRevision === undefined
+          ? "record-missing"
+          : "record",
+      errorCode:
+        recordedRevision === currentRevision
+          ? null
+          : recordedRevision === undefined
+            ? "EBRIDGEVERSIONUNKNOWN"
+            : "EBRIDGESTALECODE",
+      remediation:
+        recordedRevision === currentRevision
+          ? null
+          : "Restart this bridge from an allowed host context, then rerun doctor; Doctor will not restart it",
+      required: false,
+    }));
     const session = sessionsByName.get(record.target);
     if (!session || session.threadId !== record.targetThreadId) {
       checks.push(diagnosticCheck({

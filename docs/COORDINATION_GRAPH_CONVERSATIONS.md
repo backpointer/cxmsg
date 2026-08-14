@@ -497,6 +497,29 @@ remain assigned to their later canonical phases.
 - implement shared append, batch, claim, lease, expiry, and idempotency rules;
 - verify crash recovery before adding ordinary message history.
 
+The initial Message Body Store primitive is implemented as a bounded Phase 2
+slice. It provides owner-only append segments, idempotency by Message ID and
+digest, partial-segment quarantine, a fail-closed quota, and bounded UTF-8 range
+reads. Codex Peer Messages over the inline limit use this primitive before
+transport, but this does not claim that the Phase 4 Delivery Ledger, retention,
+purge, index, claim, lease, or reconciliation work is complete.
+
+### Phase 2.5: Route Admission, Quarantine, and minimum deduplication
+
+- parse the versioned routing envelope before model-context injection;
+- compare `project_id` and `target_role` with an externally owned binding;
+- keep `admissionState=pending|admitted|quarantined(reason)` separate from
+  Delivery evidence;
+- store rejected messages in owner-only Quarantine with no automatic wake,
+  retry, reroute, or release;
+- persist `logical_message_id` deduplication and permit at most one automatic
+  wake before the full Delivery Ledger exists;
+- evaluate immediate and scheduled Triggers only for admitted Deliveries.
+
+This is a required deployment gate before the Hermes pilot and before Phases 3
+and 4. It is not implemented by the Message Body Store slice. A Content
+Reference proves body integrity only; it does not admit a route.
+
 ### Phase 3: Node Directory and Project identity
 
 - strengthen bridge registry ownership and identity-checked Endpoint selection
@@ -535,6 +558,13 @@ remain assigned to their later canonical phases.
 - add Directory, Ledger, Conversation, and projection consistency checks.
 
 ## Decisions required before implementation
+
+The initial Message Body Store fixes these provisional Phase 2 values in code
+and tests: 256 KiB maximum Message Body, 16 KiB inline threshold, 16 KiB
+default read, 64 KiB maximum range read, 8 MiB append segment, and 64 MiB total
+quota. Quota exhaustion rejects the new body and deletes nothing. Automatic
+retention and purge remain disabled until the Phase 4 policy and audit behavior
+are explicitly decided.
 
 - private Project ID creation and explicit declaration format;
 - worktree discovery, Project move, merge, split, and Tombstone rules;

@@ -89,8 +89,13 @@ import {
   deliverPeerMessage,
   storedSessionName,
   validateMessage,
+  validateStoredMessage,
   validateSessionName,
 } from "../src/messaging.js";
+import {
+  messageBodyInfo,
+  readMessageBody,
+} from "../src/message-bodies.js";
 import { readThreadMetadata } from "../src/thread-activity.js";
 import {
   listSessionRecords,
@@ -126,6 +131,8 @@ function usage(exitCode = 0) {
   cxmsg remove <name>
   cxmsg peers [--json]
   cxmsg send [--from <name>] <target> <message...>
+  cxmsg message info <message-id|content-ref> [--json]
+  cxmsg message show <message-id|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
   cxmsg revoke <sender> <target>
   cxmsg permissions <target> [--json]
@@ -1608,7 +1615,7 @@ async function commandSend(args) {
   validateSessionName(from);
 
   const target = validateSessionName(args[0]);
-  const message = validateMessage(args.slice(1).join(" "));
+  const message = validateStoredMessage(args.slice(1).join(" "));
   if (from === target) throw new Error("cannot send a peer message to the same session");
 
   await ensureServer();
@@ -1622,6 +1629,62 @@ async function commandSend(args) {
   process.stdout.write(
     `delivered ${delivery.messageId} to ${target} (${delivery.delivery}, turn ${delivery.turnId})\n`,
   );
+}
+
+function parseBodyReadInteger(option, value, { allowZero = false } = {}) {
+  if (!/^\d+$/.test(value || "")) {
+    throw new Error(`${option} must be an integer`);
+  }
+  const parsed = Number.parseInt(value, 10);
+  if (!Number.isSafeInteger(parsed) || (allowZero ? parsed < 0 : parsed < 1)) {
+    throw new Error(`${option} is out of range`);
+  }
+  return parsed;
+}
+
+async function commandMessage(args) {
+  const operation = args.shift();
+  const reference = args.shift();
+  if (!reference || !["info", "show"].includes(operation)) usage(2);
+  let jsonOutput = false;
+  let offset = 0;
+  let limit;
+  while (args.length) {
+    const option = args.shift();
+    if (option === "--json") jsonOutput = true;
+    else if (option === "--offset") {
+      offset = parseBodyReadInteger(option, args.shift(), { allowZero: true });
+    } else if (option === "--limit") {
+      limit = parseBodyReadInteger(option, args.shift());
+    } else {
+      throw new Error(`unknown message option: ${option}`);
+    }
+  }
+
+  if (operation === "info") {
+    if (offset !== 0 || limit !== undefined) {
+      throw new Error("message info does not accept offset or limit");
+    }
+    const info = messageBodyInfo(reference);
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(info, null, 2)}\n`
+        : `${info.messageId}\t${info.bodyBytes}\t${info.bodySha256}\n`,
+    );
+    return;
+  }
+
+  const result = readMessageBody(reference, { offset, ...(limit ? { limit } : {}) });
+  if (jsonOutput) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(result.text);
+  if (!result.complete) {
+    process.stderr.write(
+      `\ncxmsg: partial message body; next offset ${result.nextOffset} of ${result.bodyBytes} bytes\n`,
+    );
+  }
 }
 
 async function commandDoctor(args) {
@@ -1693,6 +1756,9 @@ async function main() {
       break;
     case "send":
       await commandSend(args);
+      break;
+    case "message":
+      await commandMessage(args);
       break;
     case "grant":
       await commandGrant(args[0], args[1]);

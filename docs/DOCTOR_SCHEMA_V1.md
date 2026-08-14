@@ -60,6 +60,13 @@ Every check contains:
 - `required` controls the `overall` policy. Optional failures still make a
   report degraded; only required failures make it unhealthy.
 
+Bridge implementation findings use `EBRIDGEVERSIONUNKNOWN` when a legacy
+running bridge has no implementation revision and `EBRIDGESTALECODE` when its
+recorded revision differs from the current executable. Both are warnings:
+Doctor reports the need for an explicit bridge restart but never performs it.
+The implementation revision is independent of the package version so local or
+unreleased code changes cannot be hidden behind an unchanged semantic version.
+
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.
 

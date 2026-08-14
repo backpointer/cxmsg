@@ -21,6 +21,18 @@ they carry different authority and delivery semantics.
 - **Logical Message**: one user-visible message in a Conversation. A Logical
   Message can produce one Delivery for a direct recipient or multiple
   recipient-specific Deliveries for a group.
+- **Message Body**: optional retained Peer Message content associated with one
+  Logical Message. Its retention is independent from routing and Delivery
+  evidence.
+- **Content Reference**: an opaque local identifier plus byte count and digest
+  used to retrieve and verify a retained Message Body. It is neither a path nor
+  authority to execute work.
+- **Route Admission**: the pre-injection decision that compares a typed Peer
+  Message route with the target Node's externally owned Project and role
+  binding. It is separate from Delivery evidence.
+- **Quarantine**: owner-private durable storage for a Peer Message rejected by
+  Route Admission. Quarantine creates no context injection, retry, reroute,
+  wake, grant, approval, or task authority.
 - **Delivery Ledger**: the durable evidence history for Logical Messages and
   their recipient-specific Deliveries. It records only states that cxmsg can
   prove.
@@ -67,6 +79,9 @@ they carry different authority and delivery semantics.
   reconciles missed events, and exposes a stable Busy/Idle view.
 - **Scheduler Module**: the Module that durably stores Triggered work, claims it
   once, and dispatches it under per-target ordering rules.
+- **Message Body Store Module**: the owner-private Module that appends bounded
+  Message Bodies, verifies their digest, quarantines partial segments, and
+  exposes bounded range reads through opaque Content References.
 - **Node Directory Module**: the Module that owns Node, Endpoint, Project,
   Cluster, alias, successor, and Tombstone identity rules.
 - **Conversation Module**: the Module that owns Direct and Group Conversation

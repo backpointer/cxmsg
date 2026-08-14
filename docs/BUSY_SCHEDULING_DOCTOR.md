@@ -524,6 +524,7 @@ that roadmap as follows:
 | Phase 0 | Bounded activity reads, delivery/ACK evidence, stale Job reconciliation |
 | Phase 1 | Read-only Doctor Interfaces, findings, renderers, and stable exit codes |
 | Phase 2 | Turn Lifecycle notifications, reconnect, reconciliation, and shared durable primitives |
+| Phase 2.5 | Route Admission, owner-only Quarantine, and minimum durable logical-message deduplication |
 | Phase 3 | Identity-checked Endpoint ownership needed by scheduler target lanes |
 | Phase 4 | Immediate and Triggered Delivery Ledger, Scheduler, scheduled Delegation, and Claude completion lifecycle |
 | Phase 5 | No additional scope in this document |
@@ -569,6 +570,9 @@ The initial immutable inspection and Doctor foundation is implemented:
 - `EPERM`, missing workers, identity mismatch, malformed or symlink records,
   legacy Jobs, overdue ACKs, and unreconciled reply wakes retain distinct
   findings;
+- bridge records and health handshakes bind a package version and independent
+  implementation revision; legacy or stale running code produces a warning
+  without an automatic restart;
 - deep thread checks use metadata-only `thread/read(includeTurns:false)` and
   start zero model turns;
 - text and JSON renderers consume the same redacted finding model, and the
