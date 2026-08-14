@@ -36,6 +36,7 @@ const ids = {
   boundedMessage: "a1345678-1234-4234-8234-123456789abc",
   rejectedMessage: "b1345678-1234-4234-8234-123456789abc",
   boundedThread: "c1345678-1234-4234-8234-123456789abc",
+  cancelledMessage: "d1345678-1234-4234-8234-123456789abc",
 };
 
 function logicalMessage(
@@ -272,6 +273,66 @@ test("the per-target queue bound rejects before committing another batch", async
   assert.equal(ledger.readDeliveryLedger(ids.rejectedMessage), null);
 });
 
+test("scheduled cancellation is terminal and the rebuildable index self-recovers", async () => {
+  const scheduled = logicalMessage(ids.cancelledMessage, "cancel body", "when-idle");
+  scheduled.body.contentRef = `cxmsg-message:${ids.cancelledMessage}`;
+  await ledger.commitSingleRecipientDelivery({
+    logicalMessage: scheduled,
+    target: "cancel-auditor",
+    targetThreadId: ids.boundedThread,
+    admissionState: "admitted",
+    admissionReason: "binding_match",
+    wakePolicy: "when-idle",
+    now: "2026-08-14T02:00:00.000Z",
+  });
+  const cancelled = await ledger.cancelScheduledDelivery(ids.cancelledMessage, {
+    now: "2026-08-14T02:00:01.000Z",
+  });
+  assert.equal(cancelled.cancelled, true);
+  assert.equal(cancelled.record.delivery.state, "cancelled");
+  assert.equal(
+    (await ledger.cancelScheduledDelivery(ids.cancelledMessage, {
+      now: "2026-08-14T02:00:02.000Z",
+    })).cancelled,
+    false,
+  );
+
+  assert.equal(statSync(ledger.DELIVERY_LEDGER_INDEX_DIR).mode & 0o777, 0o700);
+  assert.equal(
+    statSync(ledger.DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH).mode & 0o777,
+    0o600,
+  );
+  unlinkSync(path.join(ledger.DELIVERY_LEDGER_INDEX_DIR, `${ids.cancelledMessage}.json`));
+  const indexed = await ledger.listDeliveryLedgerIndexed();
+  assert.equal(
+    indexed.find((record) => record.logicalMessage.messageId === ids.cancelledMessage)
+      .delivery.state,
+    "cancelled",
+  );
+  assert.equal(
+    statSync(
+      path.join(ledger.DELIVERY_LEDGER_INDEX_DIR, `${ids.cancelledMessage}.json`),
+    ).mode & 0o777,
+    0o600,
+  );
+  const shard = path.join(
+    ledger.DELIVERY_LEDGER_INDEX_DIR,
+    `${ids.cancelledMessage}.json`,
+  );
+  const wrapper = JSON.parse(readFileSync(shard, "utf8"));
+  const malformed = structuredClone(wrapper);
+  malformed.projection.delivery.state = "scheduled";
+  malformed.projectionSha256 = createHash("sha256")
+    .update(JSON.stringify(malformed.projection))
+    .digest("hex");
+  writeFileSync(shard, `${JSON.stringify(malformed)}\n`, { mode: 0o600 });
+  await assert.rejects(
+    () => ledger.listDeliveryLedgerIndexed(),
+    /index entry failed validation/,
+  );
+  writeFileSync(shard, `${JSON.stringify(wrapper)}\n`, { mode: 0o600 });
+});
+
 test("an incomplete active tail is quarantined before a new batch is appended", async () => {
   const active = path.join(
     ledger.DELIVERY_LEDGER_SEGMENTS_DIR,
@@ -290,7 +351,7 @@ test("an incomplete active tail is quarantined before a new batch is appended", 
   });
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_QUARANTINE_DIR).length, 1);
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_SEGMENTS_DIR).length, 1);
-  assert.equal(ledger.listDeliveryLedger().length, 5);
+  assert.equal(ledger.listDeliveryLedger().length, 6);
 });
 
 test("Ledger scans reject broad modes and symlink segments", () => {

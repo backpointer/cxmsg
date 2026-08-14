@@ -14,6 +14,8 @@ import {
   readdirSync,
   renameSync,
   statSync,
+  unlinkSync,
+  writeFileSync,
   writeSync,
 } from "node:fs";
 import path from "node:path";
@@ -40,12 +42,22 @@ export const DELIVERY_LEDGER_QUARANTINE_DIR = path.join(
   DELIVERY_LEDGER_DIR,
   "quarantine",
 );
+export const DELIVERY_LEDGER_INDEX_DIR = path.join(
+  DELIVERY_LEDGER_DIR,
+  "index",
+);
+export const DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH = path.join(
+  DELIVERY_LEDGER_INDEX_DIR,
+  "checkpoint.json",
+);
 const DELIVERY_LEDGER_LOCK_PATH = path.join(DELIVERY_LEDGER_DIR, "append.lock");
 const SEGMENT_PATTERN = /^segment-(\d{8})(?:\.partial-[0-9a-f-]+)?\.jsonl$/i;
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const CLAIM_RELEASE_REASONS = new Set(["target_busy", "worker_stopping", "dispatch_unavailable"]);
+const INDEX_SHARD_PATTERN = /^([0-9a-f-]{36})\.json$/i;
+const DELIVERY_LEDGER_MAX_INDEX_RECORDS = 4096;
 
 function validateUuid(label, value) {
   if (!UUID_PATTERN.test(value || "")) throw new Error(`${label} must be a UUID`);
@@ -69,6 +81,7 @@ function ensureStore() {
   ensurePrivateDirectory(DELIVERY_LEDGER_DIR);
   ensurePrivateDirectory(DELIVERY_LEDGER_SEGMENTS_DIR);
   ensurePrivateDirectory(DELIVERY_LEDGER_QUARANTINE_DIR);
+  ensurePrivateDirectory(DELIVERY_LEDGER_INDEX_DIR);
 }
 
 function assertPrivateRegularFile(filename) {
@@ -199,7 +212,7 @@ function validEvidence(record) {
       UUID_PATTERN.test(record.messageId || "") &&
       UUID_PATTERN.test(record.deliveryId || "") &&
       (record.attemptId === null || UUID_PATTERN.test(record.attemptId || "")) &&
-      ["turn_started", "unknown", "expired"].includes(record.state) &&
+      ["turn_started", "unknown", "expired", "cancelled"].includes(record.state) &&
       ["dispatch-result", "reconciliation", "scheduler"].includes(record.evidenceKind) &&
       (record.turnId === null || UUID_PATTERN.test(record.turnId || "")) &&
       (record.transportResult === null || typeof record.transportResult === "string") &&
@@ -209,7 +222,7 @@ function validEvidence(record) {
   if (!common) return false;
   if (record.evidenceKind === "scheduler") {
     return Boolean(
-      ["unknown", "expired"].includes(record.state) &&
+      ["unknown", "expired", "cancelled"].includes(record.state) &&
         record.attemptId === null &&
         record.turnId === null &&
         record.transportResult === null &&
@@ -272,6 +285,243 @@ function readRecords(maxScanBytes = DELIVERY_LEDGER_MAX_SCAN_BYTES) {
     }
   }
   throw new Error("Delivery Ledger could not be scanned");
+}
+
+function ledgerManifest() {
+  return allSegmentPaths().map((filename) => {
+    const metadata = assertPrivateRegularFile(filename);
+    return {
+      directory:
+        path.dirname(filename) === DELIVERY_LEDGER_SEGMENTS_DIR
+          ? "segments"
+          : "quarantine",
+      name: path.basename(filename),
+      size: metadata.size,
+      mtimeMs: metadata.mtimeMs,
+    };
+  });
+}
+
+function manifestDigest(manifest) {
+  return createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
+}
+
+function assertPrivateIndexFile(filename) {
+  const metadata = lstatSync(filename);
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+    throw new Error(`Delivery Ledger index entry is not a private regular file: ${path.basename(filename)}`);
+  }
+  if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
+    throw new Error(`Delivery Ledger index entry is owned by another user: ${path.basename(filename)}`);
+  }
+  if ((metadata.mode & 0o077) !== 0) {
+    throw new Error(`Delivery Ledger index permissions are too broad: ${path.basename(filename)}`);
+  }
+  if (metadata.size > DELIVERY_LEDGER_MAX_RECORD_BYTES) {
+    throw new Error(`Delivery Ledger index entry is too large: ${path.basename(filename)}`);
+  }
+  return metadata;
+}
+
+function atomicWriteIndex(filename, value) {
+  const temporary = `${filename}.${randomUUID()}.tmp`;
+  writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  renameSync(temporary, filename);
+}
+
+function indexShardPath(messageId) {
+  return path.join(DELIVERY_LEDGER_INDEX_DIR, `${validateUuid("logical message id", messageId)}.json`);
+}
+
+function indexProjectionDigest(projection) {
+  return createHash("sha256").update(JSON.stringify(projection)).digest("hex");
+}
+
+function validIndexProjection(projection, messageId) {
+  const delivery = projection?.delivery;
+  if (!delivery || projection.logicalMessage?.messageId !== messageId) return false;
+  const initialState = delivery.wakePolicy === "immediate" ? "created" : "scheduled";
+  const baseDelivery = {
+    ...structuredClone(delivery),
+    state: initialState,
+    updatedAt: delivery.createdAt,
+  };
+  const baseBatch = {
+    schemaVersion: 1,
+    recordType: "ledger-batch",
+    batchId: projection.batchId,
+    committedAt: projection.committedAt,
+    logicalMessage: structuredClone(projection.logicalMessage),
+    deliveries: [baseDelivery],
+  };
+  if (
+    !validBatch(baseBatch) ||
+    !["created", "scheduled", "turn_started", "unknown", "expired", "cancelled"].includes(
+      delivery.state,
+    ) ||
+    !validTimestamp(delivery.updatedAt) ||
+    !Number.isSafeInteger(delivery.claimCount) ||
+    delivery.claimCount < 0 ||
+    !Array.isArray(delivery.attempts) ||
+    delivery.attempts.length > 1 ||
+    !Array.isArray(delivery.evidence)
+  ) {
+    return false;
+  }
+  const attempts = new Set();
+  for (const attempt of delivery.attempts) {
+    if (
+      !validAttempt(attempt) ||
+      attempt.messageId !== messageId ||
+      attempt.deliveryId !== delivery.deliveryId ||
+      attempts.has(attempt.attemptId)
+    ) {
+      return false;
+    }
+    attempts.add(attempt.attemptId);
+  }
+  if (
+    delivery.claim !== null &&
+    (!validClaim(delivery.claim) ||
+      delivery.claim.action !== "acquired" ||
+      delivery.claim.messageId !== messageId ||
+      delivery.claim.deliveryId !== delivery.deliveryId)
+  ) {
+    return false;
+  }
+  if (delivery.claim && delivery.claimCount < 1) return false;
+  for (const evidence of delivery.evidence) {
+    if (
+      !validEvidence(evidence) ||
+      evidence.messageId !== messageId ||
+      evidence.deliveryId !== delivery.deliveryId ||
+      (evidence.attemptId !== null && !attempts.has(evidence.attemptId))
+    ) {
+      return false;
+    }
+  }
+  const lastEvidence = delivery.evidence.at(-1) || null;
+  if (!lastEvidence) return delivery.state === initialState;
+  return Boolean(
+    delivery.state === lastEvidence.state &&
+      (delivery.turnId ?? null) === lastEvidence.turnId &&
+      (delivery.transportResult ?? null) === lastEvidence.transportResult &&
+      (delivery.errorCode ?? null) === lastEvidence.errorCode,
+  );
+}
+
+export function validDeliveryLedgerIndexRecord(wrapper, messageId) {
+  const projection = wrapper?.projection;
+  return Boolean(
+    wrapper?.version === 1 &&
+      wrapper.messageId === messageId &&
+      projection?.logicalMessage?.messageId === messageId &&
+      UUID_PATTERN.test(projection.batchId || "") &&
+      UUID_PATTERN.test(projection.delivery?.deliveryId || "") &&
+      validIndexProjection(projection, messageId) &&
+      SHA256_PATTERN.test(wrapper.projectionSha256 || "") &&
+      wrapper.projectionSha256 === indexProjectionDigest(projection),
+  );
+}
+
+function indexShardNames() {
+  if (!existsSync(DELIVERY_LEDGER_INDEX_DIR)) return [];
+  return readdirSync(DELIVERY_LEDGER_INDEX_DIR)
+    .filter((name) => INDEX_SHARD_PATTERN.test(name))
+    .sort();
+}
+
+function writeIndexShard(projection) {
+  const messageId = projection.logicalMessage.messageId;
+  atomicWriteIndex(indexShardPath(messageId), {
+    version: 1,
+    messageId,
+    projection: structuredClone(projection),
+    projectionSha256: indexProjectionDigest(projection),
+  });
+}
+
+function writeIndexCheckpoint(messages) {
+  const manifest = ledgerManifest();
+  atomicWriteIndex(DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH, {
+    version: 1,
+    manifest,
+    manifestSha256: manifestDigest(manifest),
+    messageCount: messages.size,
+    rebuiltAt: new Date().toISOString(),
+  });
+}
+
+function rebuildDeliveryIndexLocked() {
+  const messages = rebuildDeliveryLedgerRecords(readRecords());
+  if (messages.size > DELIVERY_LEDGER_MAX_INDEX_RECORDS) {
+    throw new Error("Delivery Ledger index exceeds its bounded message count");
+  }
+  const expected = new Set([...messages.keys()].map((messageId) => `${messageId}.json`));
+  for (const name of indexShardNames()) {
+    const filename = path.join(DELIVERY_LEDGER_INDEX_DIR, name);
+    assertPrivateIndexFile(filename);
+    if (!expected.has(name)) unlinkSync(filename);
+  }
+  for (const projection of messages.values()) writeIndexShard(projection);
+  writeIndexCheckpoint(messages);
+  return messages;
+}
+
+function readDeliveryIndexLocked() {
+  if (!existsSync(DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH)) {
+    return rebuildDeliveryIndexLocked();
+  }
+  assertPrivateIndexFile(DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH);
+  let checkpoint;
+  try {
+    checkpoint = JSON.parse(readFileSync(DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH, "utf8"));
+  } catch {
+    throw new Error("Delivery Ledger index checkpoint is malformed");
+  }
+  const manifest = ledgerManifest();
+  if (
+    checkpoint?.version !== 1 ||
+    !Array.isArray(checkpoint.manifest) ||
+    checkpoint.manifestSha256 !== manifestDigest(checkpoint.manifest) ||
+    checkpoint.manifestSha256 !== manifestDigest(manifest) ||
+    !Number.isSafeInteger(checkpoint.messageCount) ||
+    checkpoint.messageCount < 0 ||
+    checkpoint.messageCount > DELIVERY_LEDGER_MAX_INDEX_RECORDS
+  ) {
+    return rebuildDeliveryIndexLocked();
+  }
+  const names = indexShardNames();
+  if (names.length !== checkpoint.messageCount) return rebuildDeliveryIndexLocked();
+  const messages = new Map();
+  for (const name of names) {
+    const match = name.match(INDEX_SHARD_PATTERN);
+    const messageId = match?.[1];
+    if (!UUID_PATTERN.test(messageId || "")) {
+      throw new Error(`Delivery Ledger index filename is invalid: ${name}`);
+    }
+    const filename = path.join(DELIVERY_LEDGER_INDEX_DIR, name);
+    assertPrivateIndexFile(filename);
+    let wrapper;
+    try {
+      wrapper = JSON.parse(readFileSync(filename, "utf8"));
+    } catch {
+      throw new Error(`Delivery Ledger index entry is malformed: ${name}`);
+    }
+    if (!validDeliveryLedgerIndexRecord(wrapper, messageId)) {
+      throw new Error(`Delivery Ledger index entry failed validation: ${name}`);
+    }
+    if (messages.has(messageId)) throw new Error(`duplicate Delivery Ledger index identity: ${messageId}`);
+    messages.set(messageId, structuredClone(wrapper.projection));
+  }
+  return messages;
+}
+
+function updateDeliveryIndexLocked(messages, messageId) {
+  const projection = messages.get(messageId);
+  if (!projection) throw new Error(`Delivery Ledger index update is missing: ${messageId}`);
+  writeIndexShard(projection);
+  writeIndexCheckpoint(messages);
 }
 
 function nextSegmentPath() {
@@ -355,7 +605,7 @@ function reservedEvidenceBytes(messages) {
   for (const message of messages.values()) {
     const delivery = message.delivery;
     if (delivery.admissionState !== "admitted") continue;
-    if (delivery.state === "turn_started") continue;
+    if (["turn_started", "expired", "cancelled"].includes(delivery.state)) continue;
     if (delivery.state === "unknown") {
       records += 1;
       continue;
@@ -381,6 +631,87 @@ function cloneBatch(record) {
   };
 }
 
+function applyDeliveryEvent(projected, record) {
+  if (!projected || projected.delivery.deliveryId !== record.deliveryId) {
+    throw new Error(`orphaned Delivery Ledger record: ${record.messageId}`);
+  }
+  if (projected.delivery.admissionState !== "admitted") {
+    throw new Error(`quarantined Delivery has transport evidence: ${record.messageId}`);
+  }
+  if (record.recordType === "delivery-claim") {
+    if (projected.delivery.wakePolicy !== "when-idle" || projected.delivery.state !== "scheduled") {
+      throw new Error(`Delivery claim is not scheduled: ${record.messageId}`);
+    }
+    if (projected.delivery.attempts.length > 0) {
+      throw new Error(`Delivery claim follows a dispatch attempt: ${record.messageId}`);
+    }
+    if (record.action === "acquired") {
+      if (
+        projected.delivery.claim &&
+        Date.parse(record.claimedAt) < Date.parse(projected.delivery.claim.leaseUntil)
+      ) {
+        throw new Error(`overlapping Delivery claim: ${record.messageId}`);
+      }
+      projected.delivery.claim = structuredClone(record);
+      projected.delivery.claimCount += 1;
+      projected.delivery.updatedAt = record.claimedAt;
+      return projected;
+    }
+    if (
+      !projected.delivery.claim ||
+      projected.delivery.claim.claimId !== record.claimId ||
+      projected.delivery.claim.workerId !== record.workerId ||
+      Date.parse(record.releasedAt) < Date.parse(projected.delivery.claim.claimedAt)
+    ) {
+      throw new Error(`Delivery claim release has no owner: ${record.messageId}`);
+    }
+    projected.delivery.claim = null;
+    projected.delivery.updatedAt = record.releasedAt;
+    return projected;
+  }
+  if (record.recordType === "delivery-attempt") {
+    const immediate =
+      projected.delivery.wakePolicy === "immediate" &&
+      projected.delivery.state === "created" &&
+      (record.claimId === undefined || record.claimId === null);
+    const scheduled =
+      projected.delivery.wakePolicy === "when-idle" &&
+      projected.delivery.state === "scheduled" &&
+      projected.delivery.claim?.claimId === record.claimId;
+    if ((!immediate && !scheduled) || projected.delivery.attempts.length > 0) {
+      throw new Error(`duplicate Delivery attempt: ${record.messageId}`);
+    }
+    projected.delivery.attempts.push(structuredClone(record));
+    projected.delivery.updatedAt = record.startedAt;
+    return projected;
+  }
+  if (record.attemptId !== null) {
+    const attempt = projected.delivery.attempts.find(
+      (candidate) => candidate.attemptId === record.attemptId,
+    );
+    if (!attempt) throw new Error(`Delivery evidence has no attempt: ${record.messageId}`);
+  }
+  const current = projected.delivery.state;
+  if (
+    !(
+      (["created", "scheduled"].includes(current) && ["turn_started", "unknown"].includes(record.state)) ||
+      (current === "scheduled" && ["expired", "cancelled"].includes(record.state)) ||
+      (current === "unknown" && ["turn_started", "unknown"].includes(record.state)) ||
+      (current === "turn_started" && record.state === "turn_started") ||
+      (["expired", "cancelled"].includes(current) && record.state === current)
+    )
+  ) {
+    throw new Error(`invalid Delivery evidence transition: ${current}->${record.state}`);
+  }
+  projected.delivery.state = record.state;
+  projected.delivery.turnId = record.turnId;
+  projected.delivery.transportResult = record.transportResult;
+  projected.delivery.errorCode = record.errorCode;
+  projected.delivery.updatedAt = record.observedAt;
+  projected.delivery.evidence.push(structuredClone(record));
+  return projected;
+}
+
 export function rebuildDeliveryLedgerRecords(records) {
   const messages = new Map();
   const deliveryIds = new Map();
@@ -401,84 +732,7 @@ export function rebuildDeliveryLedgerRecords(records) {
       batchIds.add(record.batchId);
       continue;
     }
-    const projected = messages.get(record.messageId);
-    if (!projected || projected.delivery.deliveryId !== record.deliveryId) {
-      throw new Error(`orphaned Delivery Ledger record: ${record.messageId}`);
-    }
-    if (projected.delivery.admissionState !== "admitted") {
-      throw new Error(`quarantined Delivery has transport evidence: ${record.messageId}`);
-    }
-    if (record.recordType === "delivery-claim") {
-      if (projected.delivery.wakePolicy !== "when-idle" || projected.delivery.state !== "scheduled") {
-        throw new Error(`Delivery claim is not scheduled: ${record.messageId}`);
-      }
-      if (projected.delivery.attempts.length > 0) {
-        throw new Error(`Delivery claim follows a dispatch attempt: ${record.messageId}`);
-      }
-      if (record.action === "acquired") {
-        if (
-          projected.delivery.claim &&
-          Date.parse(record.claimedAt) < Date.parse(projected.delivery.claim.leaseUntil)
-        ) {
-          throw new Error(`overlapping Delivery claim: ${record.messageId}`);
-        }
-        projected.delivery.claim = structuredClone(record);
-        projected.delivery.claimCount += 1;
-        projected.delivery.updatedAt = record.claimedAt;
-        continue;
-      }
-      if (
-        !projected.delivery.claim ||
-        projected.delivery.claim.claimId !== record.claimId ||
-        projected.delivery.claim.workerId !== record.workerId ||
-        Date.parse(record.releasedAt) < Date.parse(projected.delivery.claim.claimedAt)
-      ) {
-        throw new Error(`Delivery claim release has no owner: ${record.messageId}`);
-      }
-      projected.delivery.claim = null;
-      projected.delivery.updatedAt = record.releasedAt;
-      continue;
-    }
-    if (record.recordType === "delivery-attempt") {
-      const immediate =
-        projected.delivery.wakePolicy === "immediate" &&
-        projected.delivery.state === "created" &&
-        (record.claimId === undefined || record.claimId === null);
-      const scheduled =
-        projected.delivery.wakePolicy === "when-idle" &&
-        projected.delivery.state === "scheduled" &&
-        projected.delivery.claim?.claimId === record.claimId;
-      if ((!immediate && !scheduled) || projected.delivery.attempts.length > 0) {
-        throw new Error(`duplicate Delivery attempt: ${record.messageId}`);
-      }
-      projected.delivery.attempts.push(structuredClone(record));
-      projected.delivery.updatedAt = record.startedAt;
-      continue;
-    }
-    if (record.attemptId !== null) {
-      const attempt = projected.delivery.attempts.find(
-        (candidate) => candidate.attemptId === record.attemptId,
-      );
-      if (!attempt) throw new Error(`Delivery evidence has no attempt: ${record.messageId}`);
-    }
-    const current = projected.delivery.state;
-    if (
-      !(
-        (["created", "scheduled"].includes(current) && ["turn_started", "unknown"].includes(record.state)) ||
-        (current === "scheduled" && record.state === "expired") ||
-        (current === "unknown" && ["turn_started", "unknown"].includes(record.state)) ||
-        (current === "turn_started" && record.state === "turn_started") ||
-        (current === "expired" && record.state === "expired")
-      )
-    ) {
-      throw new Error(`invalid Delivery evidence transition: ${current}->${record.state}`);
-    }
-    projected.delivery.state = record.state;
-    projected.delivery.turnId = record.turnId;
-    projected.delivery.transportResult = record.transportResult;
-    projected.delivery.errorCode = record.errorCode;
-    projected.delivery.updatedAt = record.observedAt;
-    projected.delivery.evidence.push(structuredClone(record));
+    applyDeliveryEvent(messages.get(record.messageId), record);
   }
   return messages;
 }
@@ -505,6 +759,32 @@ export function listDeliveryLedger() {
   return [...rebuildDeliveryLedgerRecords(readRecords()).values()].sort((left, right) =>
     left.committedAt.localeCompare(right.committedAt),
   );
+}
+
+export async function listDeliveryLedgerIndexed() {
+  ensureStore();
+  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () =>
+    [...readDeliveryIndexLocked().values()]
+      .map((record) => structuredClone(record))
+      .sort((left, right) => left.committedAt.localeCompare(right.committedAt)),
+  );
+}
+
+export async function readDeliveryLedgerIndexed(messageId) {
+  validateUuid("logical message id", messageId);
+  ensureStore();
+  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+    const record = readDeliveryIndexLocked().get(messageId);
+    return record ? structuredClone(record) : null;
+  });
+}
+
+export async function rebuildDeliveryLedgerIndex() {
+  ensureStore();
+  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+    const messages = rebuildDeliveryIndexLocked();
+    return { messageCount: messages.size, manifestSha256: manifestDigest(ledgerManifest()) };
+  });
 }
 
 export async function commitSingleRecipientDelivery(
@@ -545,7 +825,7 @@ export async function commitSingleRecipientDelivery(
 
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
-    const messages = rebuildDeliveryLedgerRecords(readRecords());
+    const messages = readDeliveryIndexLocked();
     const existing = messages.get(logicalMessage.messageId);
     if (existing) {
       if (
@@ -604,6 +884,7 @@ export async function commitSingleRecipientDelivery(
       segmentBytes,
       reserveBytes: reservedEvidenceBytes(after),
     });
+    updateDeliveryIndexLocked(after, logicalMessage.messageId);
     return { record: projected, created: true };
   });
 }
@@ -614,7 +895,8 @@ export async function beginImmediateDelivery(messageId, options = {}) {
   validateStorageOptions(quotaBytes, segmentBytes);
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
-    const record = ledgerState(messageId);
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
     if (record.delivery.admissionState !== "admitted") {
       throw new Error("quarantined Delivery cannot be dispatched");
@@ -637,12 +919,16 @@ export async function beginImmediateDelivery(messageId, options = {}) {
       startedAt: options.now || new Date().toISOString(),
     };
     if (!validAttempt(event)) throw new Error("invalid Delivery attempt");
-    const after = rebuildDeliveryLedgerRecords([...readRecords(), event]);
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
     appendLedgerRecord(event, {
       quotaBytes,
       segmentBytes,
       reserveBytes: reservedEvidenceBytes(after),
     });
+    updateDeliveryIndexLocked(after, messageId);
     return structuredClone(event);
   });
 }
@@ -665,7 +951,8 @@ export async function claimScheduledDelivery(
   validateStorageOptions(quotaBytes, segmentBytes);
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
-    const record = ledgerState(messageId);
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
     if (
       record.delivery.admissionState !== "admitted" ||
@@ -691,12 +978,16 @@ export async function claimScheduledDelivery(
       leaseUntil: new Date(claimedAt + leaseMs).toISOString(),
     };
     if (!validClaim(event)) throw new Error("invalid Delivery claim");
-    const after = rebuildDeliveryLedgerRecords([...readRecords(), event]);
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
     appendLedgerRecord(event, {
       quotaBytes,
       segmentBytes,
       reserveBytes: reservedEvidenceBytes(after),
     });
+    updateDeliveryIndexLocked(after, messageId);
     return { claim: structuredClone(event), acquired: true };
   });
 }
@@ -719,7 +1010,8 @@ export async function releaseScheduledDeliveryClaim(
   validateStorageOptions(quotaBytes, segmentBytes);
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
-    const record = ledgerState(messageId);
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
     if (!record.delivery.claim) return { released: false, record };
     if (
@@ -739,12 +1031,16 @@ export async function releaseScheduledDeliveryClaim(
       reason,
       releasedAt: now,
     };
-    const after = rebuildDeliveryLedgerRecords([...readRecords(), event]);
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
     appendLedgerRecord(event, {
       quotaBytes,
       segmentBytes,
       reserveBytes: reservedEvidenceBytes(after),
     });
+    updateDeliveryIndexLocked(after, messageId);
     return { released: true, record: after.get(messageId) };
   });
 }
@@ -765,7 +1061,8 @@ export async function beginScheduledDelivery(
   validateStorageOptions(quotaBytes, segmentBytes);
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
-    const record = ledgerState(messageId);
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
     if (
       record.delivery.admissionState !== "admitted" ||
@@ -788,13 +1085,78 @@ export async function beginScheduledDelivery(
       transport: "codex-app-server",
       startedAt: now,
     };
-    const after = rebuildDeliveryLedgerRecords([...readRecords(), event]);
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
     appendLedgerRecord(event, {
       quotaBytes,
       segmentBytes,
       reserveBytes: reservedEvidenceBytes(after),
     });
+    updateDeliveryIndexLocked(after, messageId);
     return structuredClone(event);
+  });
+}
+
+export async function cancelScheduledDelivery(
+  messageId,
+  {
+    now = new Date().toISOString(),
+    quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+    segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
+  } = {},
+) {
+  validateUuid("logical message id", messageId);
+  if (!validTimestamp(now)) throw new Error("invalid scheduled Delivery cancellation timestamp");
+  validateStorageOptions(quotaBytes, segmentBytes);
+  ensureStore();
+  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
+    if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
+    if (record.delivery.state === "cancelled") {
+      return { record: structuredClone(record), cancelled: false };
+    }
+    if (
+      record.delivery.admissionState !== "admitted" ||
+      record.delivery.wakePolicy !== "when-idle" ||
+      record.delivery.state !== "scheduled" ||
+      record.delivery.attempts.length > 0
+    ) {
+      throw new Error("only an unattempted scheduled Delivery can be cancelled");
+    }
+    if (
+      record.delivery.claim &&
+      Date.parse(record.delivery.claim.leaseUntil) > Date.parse(now)
+    ) {
+      throw new Error("scheduled Delivery has an active claim; retry cancellation after its lease");
+    }
+    const event = {
+      schemaVersion: 1,
+      recordType: "delivery-evidence",
+      messageId,
+      deliveryId: record.delivery.deliveryId,
+      attemptId: null,
+      state: "cancelled",
+      evidenceKind: "scheduler",
+      turnId: null,
+      transportResult: null,
+      errorCode: "EDELIVERYCANCELLED",
+      observedAt: now,
+    };
+    if (!validEvidence(event)) throw new Error("invalid Delivery cancellation evidence");
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
+    appendLedgerRecord(event, {
+      quotaBytes,
+      segmentBytes,
+      reserveBytes: reservedEvidenceBytes(after),
+    });
+    updateDeliveryIndexLocked(after, messageId);
+    return { record: projected, cancelled: true };
   });
 }
 
@@ -816,7 +1178,8 @@ export async function appendDeliveryEvidence(
   validateStorageOptions(quotaBytes, segmentBytes);
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
-    const record = ledgerState(messageId);
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
     const event = {
       schemaVersion: 1,
@@ -841,13 +1204,16 @@ export async function appendDeliveryEvidence(
     ) {
       return record;
     }
-    const after = rebuildDeliveryLedgerRecords([...readRecords(), event]);
-    const projected = after.get(messageId);
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
     appendLedgerRecord(event, {
       quotaBytes,
       segmentBytes,
       reserveBytes: reservedEvidenceBytes(after),
     });
+    updateDeliveryIndexLocked(after, messageId);
     return projected;
   });
 }

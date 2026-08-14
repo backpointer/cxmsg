@@ -634,9 +634,11 @@ The initial slice supported immediate delivery only. The current Phase 4 slice
 adds `when-idle` for one recipient while retaining one dispatch attempt and no
 automatic retry, retention, or purge. A fail-closed 64 MiB metadata quota
 reserves bounded space for the attempt and terminal evidence of every admitted
-batch. The current rebuild is bounded by a 256 MiB hard scan ceiling; a
-persistent rebuildable index, broader Trigger policies, retention policy, and
-Job migration remain Phase 4 work.
+batch. Full rebuild remains bounded by a 256 MiB hard scan ceiling. A persistent
+per-message index and digest-protected segment-manifest checkpoint now avoid a
+full scan in each Scheduler poll; the Ledger remains truth and the cache
+self-rebuilds when stale. Broader Trigger policies, retention policy, and Job
+migration remain Phase 4 work.
 
 The P0 diagnostic follow-up shares one 30-second grace between reconciliation
 and Doctor. Doctor reports an aged attempt without evidence as a derived warn,
@@ -659,8 +661,16 @@ releases an unused claim on a Busy race, records an attempt immediately before
 worker or server restart. `cxmsg server start` owns Scheduler startup;
 `cxmsg scheduler start|status|stop` exposes the lifecycle explicitly.
 
+The operational-hardening slice adds a five-second worker heartbeat, a
+15-second `stalled` threshold, redacted lifecycle audit events, explicit
+`deliveries list|show|cancel|rebuild-index` commands, and read-only Doctor
+checks for heartbeat and index consistency. Cancellation is terminal only
+before an attempt and refuses an active lease. A live stalled worker is never
+silently replaced, and the cache is capped at 4,096 Logical Messages until a
+retention policy is selected.
+
 This slice still has no `after-turn`, `after-job`, scheduled Delegation,
-automatic retry, persistent index, retention, purge, or Conversation fan-out.
+automatic retry, retention, purge, or Conversation fan-out.
 Those remain separate Phase 4/6 gates rather than inferred capabilities.
 
 ### Phase 5: Direct Conversation
@@ -700,12 +710,12 @@ than silently raising that ceiling.
 - Claude successor linking and Direct Conversation migration behavior;
 - Ledger metadata retention, body retention, and terminal Delivery retention;
 - default and maximum total storage quota;
-- segment size, append durability, index checkpoint, and rebuild limits;
+- index-shard migration and reshard policy beyond the current 4,096-message cap;
 - hash-shard count, shard-key version, and reshard migration behavior;
 - partial-segment quarantine and operator recovery behavior;
 - Route Admission Quarantine body retention, discard, expiry, and audit rules;
 - purge selection, dry-run, backup, and audit behavior;
-- Scheduler ownership, claim lease, renewal, and shutdown behavior;
+- Scheduler claim renewal and shutdown behavior beyond the fixed first slice;
 - per-Node and per-Conversation queue depth;
 - Group membership version retention;
 - store-only expiry, digest count, digest byte limit, and cursor semantics;

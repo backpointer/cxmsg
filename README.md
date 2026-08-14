@@ -130,8 +130,30 @@ claims are recoverable after restart. Each target lane is FIFO and accepts at
 most 256 pending scheduled Deliveries. A transport result whose mutation is
 uncertain becomes `unknown` and is never replayed automatically.
 
+The Scheduler reads a rebuildable per-message index instead of rescanning the
+whole Ledger on every poll. The append-only Ledger remains the source of truth;
+owner-only index shards and their checkpoint are cache evidence and rebuild
+automatically when their bounded segment manifest is stale. Operators can
+inspect or cancel an unclaimed scheduled Delivery without exposing its body:
+
+```bash
+cxmsg deliveries list --status scheduled --json
+cxmsg deliveries show <logical-message-id> --json
+cxmsg deliveries cancel <logical-message-id> --json
+cxmsg deliveries rebuild-index --json
+```
+
+Cancellation is terminal and refuses an active, unexpired claim. Scheduler
+status includes a heartbeat and reports a live identity with a stale heartbeat
+as `stalled`, rather than as stopped. Claim, release, expiry, cancellation,
+dispatch, and bounded failure outcomes are written to the existing redacted
+coordination event log; retained bodies and endpoint paths are never included.
+`cxmsg doctor` validates the index/checkpoint and heartbeat without rebuilding,
+restarting, claiming, cancelling, or dispatching anything.
+
 This slice does not yet implement `after-turn`, `after-job`, automatic retry,
-retention, purge, group fan-out, or task-completion inference. An ambiguous
+retention, purge, group fan-out, or task-completion inference. The index is
+bounded to 4,096 Logical Messages and is not a retention mechanism. An ambiguous
 dispatch remains `unknown`, and only positive App Server acceptance evidence
 may strengthen it to `turn_started`. Storage uses private 8 MiB JSONL
 segments, a 64 MiB fail-closed quota with bounded terminal-evidence reserve,

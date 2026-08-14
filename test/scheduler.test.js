@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -64,10 +64,28 @@ async function scheduledRecord(messageId, body) {
   ).record;
 }
 
+test("worker lifecycle writes a versioned heartbeat record and removes it on exit", async () => {
+  let observed = null;
+  class Client {
+    async connect() {
+      observed = scheduler.readSchedulerRecord();
+    }
+
+    async close() {}
+  }
+  const record = await scheduler.runSchedulerWorker({ Client, once: true });
+  assert.equal(observed.version, 2);
+  assert.equal(observed.pid, process.pid);
+  assert.equal(observed.workerId, record.workerId);
+  assert.ok(Number.isFinite(Date.parse(observed.heartbeatAt)));
+  assert.equal(existsSync(scheduler.SCHEDULER_RECORD_PATH), false);
+});
+
 test("when-idle stays queued while busy and starts exactly once after idle", async () => {
   const record = await scheduledRecord(ids.message, "scheduled coordination");
   let active = true;
   let starts = 0;
+  const events = [];
   const dependencies = {
     now: () => Date.parse("2026-08-15T00:00:01.000Z"),
     session: () => ({ name: "auditor", threadId: ids.targetThread }),
@@ -81,6 +99,7 @@ test("when-idle stays queued while busy and starts exactly once after idle", asy
       await options.beforeStart();
       return { delivery: "started", turnId: ids.turn };
     },
+    log: async (event) => events.push(event),
   };
 
   const busy = await scheduler.dispatchScheduledDelivery(
@@ -102,6 +121,14 @@ test("when-idle stays queued while busy and starts exactly once after idle", asy
   assert.equal(started.state, "turn_started");
   assert.equal(starts, 1);
   assert.equal(ledger.readDeliveryLedger(ids.message).delivery.state, "turn_started");
+  assert.deepEqual(
+    events.map(({ phase, outcome }) => ({ phase, outcome })),
+    [
+      { phase: "claim", outcome: "acquired" },
+      { phase: "dispatch", outcome: "turn_started" },
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(events), /scheduled coordination/);
 });
 
 test("a target becoming busy after claim releases it without a dispatch attempt", async () => {
@@ -130,6 +157,7 @@ test("a target becoming busy after claim releases it without a dispatch attempt"
 test("an expired when-idle Delivery becomes terminal without target access", async () => {
   const record = await scheduledRecord(ids.expired, "expired coordination");
   let targetReads = 0;
+  const events = [];
   const outcome = await scheduler.dispatchScheduledDelivery(
     record,
     {},
@@ -140,9 +168,12 @@ test("an expired when-idle Delivery becomes terminal without target access", asy
         targetReads += 1;
         return null;
       },
+      log: async (event) => events.push(event),
     },
   );
   assert.equal(outcome.state, "expired");
   assert.equal(targetReads, 0);
   assert.equal(ledger.readDeliveryLedger(ids.expired).delivery.state, "expired");
+  assert.equal(events[0].phase, "expiry");
+  assert.doesNotMatch(JSON.stringify(events), /expired coordination/);
 });

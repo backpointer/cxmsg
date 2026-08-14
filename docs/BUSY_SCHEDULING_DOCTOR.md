@@ -592,6 +592,17 @@ them. The first `when-idle` Phase 4 slice is implemented; `after-turn`,
 `after-job`, scheduled Delegation, automatic retry, and Phases 5–7 remain
 proposals and must not be inferred as implemented from this status.
 
+The Phase 4 operational-hardening follow-up is also implemented. Scheduler
+polling uses a bounded per-message Ledger index with a digest-protected segment
+checkpoint, while the append-only Ledger remains truth. A versioned worker
+heartbeat distinguishes `running`, `stalled`, and unavailable lifecycle
+evidence. Redacted audit events cover claim, release, expiry, cancellation,
+dispatch, and bounded failures. Operators may list, inspect, cancel an
+unclaimed schedule, or explicitly rebuild the cache; Doctor only reports index
+and heartbeat inconsistencies and performs none of those mutations. A real UDS
+scheduled wake test is opt-in through `CXMSG_SCHEDULER_INTEGRATION=1` because it
+starts a model turn and consumes tokens.
+
 ## Acceptance tests
 
 ### Busy and scheduling

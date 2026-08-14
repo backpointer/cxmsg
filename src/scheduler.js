@@ -15,10 +15,11 @@ import {
   appendDeliveryEvidence,
   beginScheduledDelivery,
   claimScheduledDelivery,
-  listDeliveryLedger,
+  listDeliveryLedgerIndexed,
   releaseScheduledDeliveryClaim,
 } from "./delivery-ledger.js";
 import {
+  SCHEDULER_HEARTBEAT_MS,
   SCHEDULER_CLAIM_LEASE_MS,
   SCHEDULER_POLL_MS,
 } from "./delivery-policy.js";
@@ -33,6 +34,7 @@ import {
 import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import { readThreadMetadata } from "./thread-activity.js";
+import { writeCoordinationEvent } from "./observability.js";
 
 export const SCHEDULER_RECORD_PATH = path.join(CXMSG_STATE_DIR, "scheduler.json");
 export const SCHEDULER_LOG_PATH = path.join(CXMSG_STATE_DIR, "scheduler.log");
@@ -40,7 +42,11 @@ export const SCHEDULER_LIFECYCLE_LOCK_PATH = path.join(
   CXMSG_STATE_DIR,
   "scheduler.lifecycle.lock",
 );
-export { SCHEDULER_CLAIM_LEASE_MS, SCHEDULER_POLL_MS };
+export {
+  SCHEDULER_CLAIM_LEASE_MS,
+  SCHEDULER_HEARTBEAT_MS,
+  SCHEDULER_POLL_MS,
+};
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
@@ -56,11 +62,12 @@ export function readSchedulerRecord() {
   try {
     const record = JSON.parse(readFileSync(SCHEDULER_RECORD_PATH, "utf8"));
     if (
-      record?.version !== 1 ||
+      ![1, 2].includes(record?.version) ||
       !Number.isSafeInteger(record.pid) ||
       record.pid < 2 ||
       !UUID_PATTERN.test(record.workerId || "") ||
-      !Number.isFinite(Date.parse(record.startedAt || ""))
+      !Number.isFinite(Date.parse(record.startedAt || "")) ||
+      (record.version === 2 && !Number.isFinite(Date.parse(record.heartbeatAt || "")))
     ) {
       return null;
     }
@@ -68,6 +75,23 @@ export function readSchedulerRecord() {
   } catch {
     return null;
   }
+}
+
+function updateSchedulerHeartbeat(identity, patch = {}) {
+  const current = readSchedulerRecord();
+  if (
+    current?.pid !== identity.pid ||
+    current.workerId !== identity.workerId ||
+    current.version !== 2
+  ) {
+    return false;
+  }
+  atomicWrite(SCHEDULER_RECORD_PATH, {
+    ...current,
+    ...patch,
+    heartbeatAt: new Date().toISOString(),
+  });
+  return true;
 }
 
 function boundedErrorCode(error) {
@@ -89,9 +113,9 @@ function wholeStoredBody(contentRef) {
   return parts.join("");
 }
 
-function eligibleScheduledDeliveries(now) {
+async function eligibleScheduledDeliveries(now) {
   const firstByTarget = new Map();
-  for (const record of listDeliveryLedger()) {
+  for (const record of await listDeliveryLedgerIndexed()) {
     const delivery = record.delivery;
     if (
       delivery.admissionState !== "admitted" ||
@@ -129,6 +153,7 @@ export async function dispatchScheduledDelivery(
     session = readSessionRecord,
     readThread = readThreadMetadata,
     deliver = deliverPeerMessageWhenIdle,
+    log = writeCoordinationEvent,
   } = {},
 ) {
   const messageId = record.logicalMessage.messageId;
@@ -144,6 +169,14 @@ export async function dispatchScheduledDelivery(
       errorCode: "EDELIVERYEXPIRED",
       observedAt: new Date(now()).toISOString(),
     });
+    await log({
+      kind: "scheduled-delivery",
+      phase: "expiry",
+      correlationId: messageId,
+      target: delivery.target,
+      outcome: "expired",
+      errorCode: "EDELIVERYEXPIRED",
+    });
     return { state: "expired", messageId };
   }
 
@@ -152,6 +185,14 @@ export async function dispatchScheduledDelivery(
     const error = new Error("scheduled Delivery target identity is unavailable");
     error.code = "ETARGETIDENTITY";
     await markUnknown(messageId, error, now());
+    await log({
+      kind: "scheduled-delivery",
+      phase: "target",
+      correlationId: messageId,
+      target: delivery.target,
+      outcome: "unknown",
+      errorCode: error.code,
+    });
     return { state: "unknown", messageId, errorCode: error.code };
   }
   const observed = await readThread(client, target.threadId);
@@ -163,6 +204,14 @@ export async function dispatchScheduledDelivery(
     now: new Date(now()).toISOString(),
   });
   if (!claimResult.acquired) return { state: "claimed", messageId };
+  await log({
+    kind: "scheduled-delivery",
+    phase: "claim",
+    correlationId: messageId,
+    target: delivery.target,
+    outcome: "acquired",
+    errorCode: null,
+  });
 
   let attempt = null;
   try {
@@ -211,6 +260,14 @@ export async function dispatchScheduledDelivery(
       turnId: result.turnId,
       observedAt: new Date(now()).toISOString(),
     });
+    await log({
+      kind: "scheduled-delivery",
+      phase: "dispatch",
+      correlationId: messageId,
+      target: delivery.target,
+      outcome: "turn_started",
+      errorCode: null,
+    });
     return { state: "turn_started", messageId, turnId: result.turnId };
   } catch (error) {
     if ((error instanceof TargetBusyError || error?.code === "ETARGETBUSY") && !attempt) {
@@ -220,6 +277,14 @@ export async function dispatchScheduledDelivery(
         reason: "target_busy",
         now: new Date(now()).toISOString(),
       });
+      await log({
+        kind: "scheduled-delivery",
+        phase: "claim-release",
+        correlationId: messageId,
+        target: delivery.target,
+        outcome: "target_busy",
+        errorCode: "ETARGETBUSY",
+      });
       return { state: "busy", messageId };
     }
     await appendDeliveryEvidence(messageId, {
@@ -228,6 +293,14 @@ export async function dispatchScheduledDelivery(
       evidenceKind: attempt ? "dispatch-result" : "scheduler",
       errorCode: boundedErrorCode(error),
       observedAt: new Date(now()).toISOString(),
+    });
+    await log({
+      kind: "scheduled-delivery",
+      phase: "dispatch",
+      correlationId: messageId,
+      target: delivery.target,
+      outcome: "unknown",
+      errorCode: boundedErrorCode(error),
     });
     return { state: "unknown", messageId, errorCode: boundedErrorCode(error) };
   }
@@ -239,7 +312,7 @@ export async function runSchedulerPass(
   { now = () => Date.now(), dispatch = dispatchScheduledDelivery } = {},
 ) {
   const outcomes = [];
-  for (const record of eligibleScheduledDeliveries(now())) {
+  for (const record of await eligibleScheduledDeliveries(now())) {
     outcomes.push(await dispatch(record, client, workerId, { now }));
   }
   return outcomes;
@@ -252,12 +325,17 @@ export async function runSchedulerWorker({
 } = {}) {
   const workerId = randomUUID();
   const record = {
-    version: 1,
+    version: 2,
     pid: process.pid,
     workerId,
     startedAt: new Date().toISOString(),
+    heartbeatAt: new Date().toISOString(),
+    lastPassAt: null,
+    lastErrorCode: null,
+    lastOutcomeCount: 0,
   };
   atomicWrite(SCHEDULER_RECORD_PATH, record);
+  let lastHeartbeatAt = Date.now();
   let stopping = false;
   const stop = () => {
     stopping = true;
@@ -270,10 +348,25 @@ export async function runSchedulerWorker({
       try {
         await client.connect();
         do {
-          await runSchedulerPass(client, workerId);
+          const outcomes = await runSchedulerPass(client, workerId);
+          const heartbeatDue = Date.now() - lastHeartbeatAt >= SCHEDULER_HEARTBEAT_MS;
+          if (heartbeatDue || outcomes.length > 0) {
+            updateSchedulerHeartbeat(record, {
+              lastPassAt: new Date().toISOString(),
+              lastErrorCode: null,
+              lastOutcomeCount: outcomes.length,
+            });
+            lastHeartbeatAt = Date.now();
+          }
           if (!once && !stopping) await delay(pollMs);
         } while (!once && !stopping);
       } catch (error) {
+        updateSchedulerHeartbeat(record, {
+          lastPassAt: new Date().toISOString(),
+          lastErrorCode: boundedErrorCode(error),
+          lastOutcomeCount: 0,
+        });
+        lastHeartbeatAt = Date.now();
         if (once) throw error;
       } finally {
         await client.close();

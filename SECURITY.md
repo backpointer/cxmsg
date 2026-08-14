@@ -65,6 +65,14 @@ another append. There is no automatic retention, purge, retry, or repair.
 Delivery Ledger files and their quarantine are runtime state and must never be
 committed, published, or copied into a web snapshot.
 
+The Delivery Ledger index is an owner-only, rebuildable cache, not delivery or
+authorization evidence. One digest-protected shard projects each Logical
+Message, while a digest-protected checkpoint pins the bounded active and
+quarantine segment manifest. Missing, stale, or incomplete cache evidence
+causes a full bounded rebuild from the Ledger; malformed metadata, unsafe file
+identity, symlinks, or more than 4,096 projected messages fail closed. Doctor
+only compares the cache with Ledger truth and never repairs it implicitly.
+
 `when-idle` scheduling retains the full Message Body in the separate owner-only
 Body Store before the Delivery becomes claimable. The typed route requires an
 explicit expiry no more than seven days away. Claims use random worker and
@@ -74,6 +82,14 @@ after claim acquisition and records the attempt before `turn/start`. A Busy
 race releases the unused claim. An uncertain result becomes `unknown` and is
 not retried automatically. Scheduler stop and stale worker replacement remain
 fail-closed when process identity cannot be verified.
+
+The worker heartbeat proves recent loop progress only; it does not prove
+process identity, delivery, completion, or authority. A stale heartbeat on an
+identity-matched live worker is `stalled` and is never replaced automatically.
+Cancellation is allowed only before an attempt and refuses an active unexpired
+claim. Scheduler audit events contain bounded IDs, phases, outcomes, and error
+codes only—never message bodies, credentials, full paths, worker IDs, or claim
+nonces.
 
 A complete malformed Ledger line fails the whole Ledger closed. Doctor may
 identify only its segment number and line number; it never emits the record.

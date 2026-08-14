@@ -14,11 +14,17 @@ import {
 } from "./claude-bridge.js";
 import {
   DELIVERY_LEDGER_QUOTA_BYTES,
+  DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH,
+  DELIVERY_LEDGER_INDEX_DIR,
   DELIVERY_LEDGER_MAX_RECORD_BYTES,
   rebuildDeliveryLedgerRecords,
+  validDeliveryLedgerIndexRecord,
   validDeliveryLedgerRecord,
 } from "./delivery-ledger.js";
-import { ROUTE_RECONCILE_GRACE_MS } from "./delivery-policy.js";
+import {
+  ROUTE_RECONCILE_GRACE_MS,
+  SCHEDULER_HEARTBEAT_STALE_MS,
+} from "./delivery-policy.js";
 import { hostRelayRequest } from "./host-relay.js";
 import {
   MESSAGE_BODY_SEGMENT_BYTES,
@@ -485,8 +491,16 @@ function inspectDeliveryLedger(
   );
 
   let records = [];
+  let ledgerProjectionDigests = new Map();
   try {
-    records = [...rebuildDeliveryLedgerRecords(events).values()].map((record) => {
+    const rebuilt = rebuildDeliveryLedgerRecords(events);
+    ledgerProjectionDigests = new Map(
+      [...rebuilt.entries()].map(([messageId, record]) => [
+        messageId,
+        createHash("sha256").update(JSON.stringify(record)).digest("hex"),
+      ]),
+    );
+    records = [...rebuilt.values()].map((record) => {
       const message = record.logicalMessage;
       const delivery = record.delivery;
       const activeAttempt = delivery.attempts.at(-1) || null;
@@ -519,6 +533,139 @@ function inspectDeliveryLedger(
         errorCode: "ELEDGERREBUILD",
       }),
     );
+  }
+  const indexRoot = path.join(root, path.basename(DELIVERY_LEDGER_INDEX_DIR));
+  const checkpointPath = path.join(
+    indexRoot,
+    path.basename(DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH),
+  );
+  const indexMetadata = secureMetadata(indexRoot, "directory");
+  if (indexMetadata.status === "missing") {
+    checks.push(
+      diagnosticCheck({
+        id: `${scope}.index.directory`,
+        scope,
+        status: records.length > 0 ? "warn" : "pass",
+        summary:
+          records.length > 0
+            ? "Delivery Ledger has no rebuildable index"
+            : "Delivery Ledger index is not needed for an empty Ledger",
+        verification: "metadata",
+        errorCode: records.length > 0 ? "ELEDGERINDEXMISSING" : null,
+        remediation: records.length > 0 ? "Run cxmsg deliveries rebuild-index" : null,
+        required: false,
+      }),
+    );
+  } else if (indexMetadata.status !== "secure") {
+    checks.push(
+      metadataFinding(
+        `${scope}.index.directory`,
+        scope,
+        "Delivery Ledger index directory",
+        indexMetadata,
+      ),
+    );
+  } else {
+    const checkpointMetadata = secureMetadata(checkpointPath, "file");
+    if (checkpointMetadata.status !== "secure") {
+      checks.push(
+        metadataFinding(
+          `${scope}.index.checkpoint`,
+          scope,
+          "Delivery Ledger index checkpoint",
+          checkpointMetadata,
+        ),
+      );
+    } else {
+      let checkpoint = null;
+      try {
+        checkpoint = JSON.parse(readFileSync(checkpointPath, "utf8"));
+      } catch {}
+      const checkpointValid = Boolean(
+        checkpoint?.version === 1 &&
+          Array.isArray(checkpoint.manifest) &&
+          /^[0-9a-f]{64}$/.test(checkpoint.manifestSha256 || "") &&
+          checkpoint.manifestSha256 ===
+            createHash("sha256")
+              .update(JSON.stringify(checkpoint.manifest))
+              .digest("hex") &&
+          Number.isSafeInteger(checkpoint.messageCount) &&
+          checkpoint.messageCount >= 0,
+      );
+      const currentManifest = ["segments", "quarantine"].flatMap((directory) => {
+        const absolute = path.join(root, directory);
+        try {
+          return readdirSync(absolute)
+            .filter((name) => /^segment-\d{8}(?:\.partial-[0-9a-f-]+)?\.jsonl$/i.test(name))
+            .sort()
+            .map((name) => {
+              const metadata = lstatSync(path.join(absolute, name));
+              return {
+                directory,
+                name,
+                size: metadata.size,
+                mtimeMs: metadata.mtimeMs,
+              };
+            });
+        } catch {
+          return [];
+        }
+      });
+      const manifestMatches =
+        checkpointValid &&
+        JSON.stringify(checkpoint.manifest) === JSON.stringify(currentManifest);
+      const shardNames = readdirSync(indexRoot)
+        .filter((name) => /^[0-9a-f-]{36}\.json$/i.test(name))
+        .sort();
+      const indexedIds = [];
+      const indexedProjectionDigests = new Map();
+      let shardsValid = checkpointValid;
+      for (const name of shardNames) {
+        const messageId = name.slice(0, -5);
+        const evidence = secureMetadata(path.join(indexRoot, name), "file");
+        if (evidence.status !== "secure" || evidence.metadata.size > DELIVERY_LEDGER_MAX_RECORD_BYTES) {
+          shardsValid = false;
+          continue;
+        }
+        try {
+          const wrapper = JSON.parse(readFileSync(path.join(indexRoot, name), "utf8"));
+          if (!validDeliveryLedgerIndexRecord(wrapper, messageId)) {
+            shardsValid = false;
+            continue;
+          }
+          indexedIds.push(messageId);
+          indexedProjectionDigests.set(messageId, wrapper.projectionSha256);
+        } catch {
+          shardsValid = false;
+        }
+      }
+      const ledgerIds = records.map((record) => record.logicalMessageId).sort();
+      const identityMatches =
+        checkpointValid &&
+        manifestMatches &&
+        shardsValid &&
+        checkpoint.messageCount === indexedIds.length &&
+        JSON.stringify(indexedIds.sort()) === JSON.stringify(ledgerIds) &&
+        ledgerIds.every(
+          (messageId) =>
+            indexedProjectionDigests.get(messageId) ===
+            ledgerProjectionDigests.get(messageId),
+        );
+      checks.push(
+        diagnosticCheck({
+          id: `${scope}.index.consistency`,
+          scope,
+          status: identityMatches ? "pass" : "warn",
+          summary: identityMatches
+            ? "Delivery Ledger rebuildable index matches retained message identities"
+            : "Delivery Ledger rebuildable index is missing, stale, or invalid",
+          verification: "records",
+          errorCode: identityMatches ? null : "ELEDGERINDEXSTALE",
+          remediation: identityMatches ? null : "Run cxmsg deliveries rebuild-index",
+          required: false,
+        }),
+      );
+    }
   }
   if (!checks.some((check) => check.status === "fail" || check.status === "unknown")) {
     checks.push(
@@ -1786,11 +1933,13 @@ export function inspectRouteState({
       scheduler = JSON.parse(readFileSync(schedulerPath, "utf8"));
     } catch {}
     const valid = Boolean(
-      scheduler?.version === 1 &&
+      [1, 2].includes(scheduler?.version) &&
         Number.isSafeInteger(scheduler.pid) &&
         scheduler.pid > 1 &&
         UUID_PATTERN.test(scheduler.workerId || "") &&
-        Number.isFinite(Date.parse(scheduler.startedAt || "")),
+        Number.isFinite(Date.parse(scheduler.startedAt || "")) &&
+        (scheduler.version === 1 ||
+          Number.isFinite(Date.parse(scheduler.heartbeatAt || ""))),
     );
     if (!valid) {
       checks.push(
@@ -1805,13 +1954,38 @@ export function inspectRouteState({
       );
     } else {
       const workerState = processStateFn(scheduler.pid);
+      const heartbeatStale =
+        scheduler.version === 2 &&
+        now - Date.parse(scheduler.heartbeatAt) > SCHEDULER_HEARTBEAT_STALE_MS;
+      const passError =
+        scheduler.version === 2 && /^[A-Z0-9_]{1,32}$/.test(scheduler.lastErrorCode || "")
+          ? scheduler.lastErrorCode
+          : null;
+      const liveStatus =
+        scheduler.version === 1 || heartbeatStale || passError ? "warn" : "pass";
+      const liveSummary =
+        scheduler.version === 1
+          ? "Scheduler worker predates heartbeat health evidence"
+          : heartbeatStale
+            ? "Scheduler worker heartbeat is stale"
+            : passError
+              ? "Scheduler worker recorded a bounded pass failure"
+              : "Scheduler worker process and heartbeat are live";
+      const liveError =
+        scheduler.version === 1
+          ? "ESCHEDULERLEGACY"
+          : heartbeatStale
+            ? "ESCHEDULERSTALLED"
+            : passError
+              ? "ESCHEDULERPASS"
+              : null;
       checks.push(
         diagnosticCheck({
           id: "schedules.worker.process",
           scope: "schedules",
           status:
             workerState === "alive"
-              ? "pass"
+              ? liveStatus
               : workerState === "unverified"
                 ? "unknown"
                 : scheduled.length > 0
@@ -1819,19 +1993,21 @@ export function inspectRouteState({
                   : "pass",
           summary:
             workerState === "alive"
-              ? "Scheduler worker process is live"
+              ? liveSummary
               : workerState === "unverified"
                 ? "Scheduler worker process cannot be verified by this caller"
                 : "Scheduler worker process is missing",
           verification: "process",
           errorCode:
             workerState === "alive"
-              ? null
+              ? liveError
               : workerState === "unverified"
                 ? "ESCHEDULERUNVERIFIED"
                 : "ESCHEDULEREXITED",
           remediation:
-            workerState === "missing" && scheduled.length > 0
+            workerState === "alive" && liveStatus === "warn"
+              ? "Restart the scheduler from an allowed host context after inspecting its bounded log and Delivery state"
+              : workerState === "missing" && scheduled.length > 0
               ? "Run cxmsg scheduler start"
               : null,
           required: false,

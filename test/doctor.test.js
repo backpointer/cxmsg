@@ -24,6 +24,7 @@ import {
 } from "../src/inspectors.js";
 import { CLAUDE_BRIDGE_IMPLEMENTATION_REVISION } from "../src/claude-bridge.js";
 import { failedProbe } from "../src/socket-probe.js";
+import { rebuildDeliveryLedgerRecords } from "../src/delivery-ledger.js";
 
 const THREAD_ID = "019ff02a-ee3b-7072-8a79-e5ffd491529d";
 const JOB_ID = "6ddaa4e0-fa31-454e-a37e-a37f8807f0e7";
@@ -398,6 +399,74 @@ test("Route Inspector rebuilds Delivery Ledger evidence without exposing bodies"
     );
     assert.doesNotMatch(JSON.stringify(checks), /private body stays absent/);
 
+    const index = path.join(root, "delivery-ledger", "index");
+    await fs.mkdir(index, { mode: 0o700 });
+    const projection = rebuildDeliveryLedgerRecords([batch, attempt]).get(messageId);
+    await writeJson(path.join(index, `${messageId}.json`), {
+      version: 1,
+      messageId,
+      projection,
+      projectionSha256: createHash("sha256")
+        .update(JSON.stringify(projection))
+        .digest("hex"),
+    });
+    const segmentMetadata = await fs.stat(segment);
+    const manifest = [
+      {
+        directory: "segments",
+        name: "segment-00000001.jsonl",
+        size: segmentMetadata.size,
+        mtimeMs: segmentMetadata.mtimeMs,
+      },
+    ];
+    await writeJson(path.join(index, "checkpoint.json"), {
+      version: 1,
+      manifest,
+      manifestSha256: createHash("sha256")
+        .update(JSON.stringify(manifest))
+        .digest("hex"),
+      messageCount: 1,
+      rebuiltAt: "2026-08-14T00:00:10.000Z",
+    });
+    const indexed = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+      now: Date.parse("2026-08-14T00:00:10.000Z"),
+    });
+    assert.equal(
+      indexed.find((check) => check.id === "delivery-ledger.index.consistency").status,
+      "pass",
+    );
+
+    const staleProjection = structuredClone(projection);
+    staleProjection.delivery.state = "unknown";
+    await writeJson(path.join(index, `${messageId}.json`), {
+      version: 1,
+      messageId,
+      projection: staleProjection,
+      projectionSha256: createHash("sha256")
+        .update(JSON.stringify(staleProjection))
+        .digest("hex"),
+    });
+    const inconsistentIndex = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+      now: Date.parse("2026-08-14T00:00:10.000Z"),
+    });
+    assert.equal(
+      inconsistentIndex.find((check) => check.id === "delivery-ledger.index.consistency")
+        .errorCode,
+      "ELEDGERINDEXSTALE",
+    );
+    await writeJson(path.join(index, `${messageId}.json`), {
+      version: 1,
+      messageId,
+      projection,
+      projectionSha256: createHash("sha256")
+        .update(JSON.stringify(projection))
+        .digest("hex"),
+    });
+
     const stale = inspectRouteState({
       stateDir: root,
       sessions: [{ name: "worker", threadId: THREAD_ID }],
@@ -495,6 +564,48 @@ test("Route Inspector reports queued work with a missing scheduler and expired c
       checks.find((check) => check.errorCode === "ESCHEDULERDOWN").status,
       "warn",
     );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Route Inspector distinguishes healthy, stalled, and legacy scheduler records", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-heartbeat-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const schedulerPath = path.join(root, "scheduler.json");
+    const workerId = "6edaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const base = {
+      version: 2,
+      pid: process.pid,
+      workerId,
+      startedAt: "2026-08-14T00:00:00.000Z",
+      heartbeatAt: "2026-08-14T00:00:19.000Z",
+      lastPassAt: "2026-08-14T00:00:19.000Z",
+      lastErrorCode: null,
+      lastOutcomeCount: 0,
+    };
+    await writeJson(schedulerPath, base);
+    const inspect = () =>
+      inspectRouteState({
+        stateDir: root,
+        now: Date.parse("2026-08-14T00:00:20.000Z"),
+        processStateFn: () => "alive",
+      }).find((check) => check.id === "schedules.worker.process");
+
+    assert.equal(inspect().status, "pass");
+    await writeJson(schedulerPath, {
+      ...base,
+      heartbeatAt: "2026-08-14T00:00:00.000Z",
+    });
+    assert.equal(inspect().errorCode, "ESCHEDULERSTALLED");
+    await writeJson(schedulerPath, {
+      version: 1,
+      pid: process.pid,
+      workerId,
+      startedAt: base.startedAt,
+    });
+    assert.equal(inspect().errorCode, "ESCHEDULERLEGACY");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

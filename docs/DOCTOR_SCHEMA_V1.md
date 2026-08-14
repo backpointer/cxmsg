@@ -147,12 +147,24 @@ number and line number without record contents. `ELEDGERQUOTAWARN` starts at
 90 percent of actual segment bytes and required `ELEDGERQUOTA` starts at 100
 percent. Doctor performs no reconciliation, retry, archive, purge, or repair.
 
+The rebuildable Delivery Ledger index has separate optional findings.
+`ELEDGERINDEXMISSING` means Ledger messages exist without cache evidence;
+`ELEDGERINDEXSTALE` covers an invalid checkpoint, a segment-manifest mismatch,
+an invalid or missing digest-protected shard, or a message-set mismatch. Doctor
+does not rebuild the cache. The explicit remediation is
+`cxmsg deliveries rebuild-index` after the underlying Ledger finding has been
+reviewed.
+
 Scheduled Delivery findings remain read-only. `ESCHEDULERDOWN` reports queued
 Deliveries without a registered worker, `ESCHEDULERUNVERIFIED` preserves an
 `EPERM` process result, and `ESCHEDULECLAIMEXPIRED` identifies a reclaimable
 lease without claiming or dispatching it. Invalid scheduler metadata is
-`ESCHEDULERSCHEMA`. Doctor never starts the Scheduler, acquires a claim,
-extends a lease, reads the retained body, or starts a model turn.
+`ESCHEDULERSCHEMA`. A live legacy record without heartbeat evidence reports
+`ESCHEDULERLEGACY`; a live worker whose heartbeat is older than 15 seconds
+reports `ESCHEDULERSTALLED`; a bounded pass failure reports `ESCHEDULERPASS`.
+Doctor never starts or restarts the Scheduler, acquires or releases a claim,
+cancels a Delivery, rebuilds the index, reads the retained body, or starts a
+model turn.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.

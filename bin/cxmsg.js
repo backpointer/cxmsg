@@ -60,6 +60,12 @@ import {
   runDoctor,
 } from "../src/doctor.js";
 import {
+  cancelScheduledDelivery,
+  listDeliveryLedgerIndexed,
+  readDeliveryLedgerIndexed,
+  rebuildDeliveryLedgerIndex,
+} from "../src/delivery-ledger.js";
+import {
   APPROVAL_MODES,
   EXECUTION_MODES,
   MIRROR_MODES,
@@ -165,7 +171,9 @@ import {
   SCHEDULER_LOG_PATH,
   SCHEDULER_RECORD_PATH,
 } from "../src/scheduler.js";
+import { SCHEDULER_HEARTBEAT_STALE_MS } from "../src/delivery-policy.js";
 import { withFileLock } from "../src/file-lock.js";
+import { writeCoordinationEvent } from "../src/observability.js";
 
 const codexBin = process.env.CODEX_BIN || "codex";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -178,6 +186,10 @@ function usage(exitCode = 0) {
   const output = `Usage:
   cxmsg server start|status|stop
   cxmsg scheduler start|status|stop
+  cxmsg deliveries list [--status <state>] [--json]
+  cxmsg deliveries show <logical-message-id> [--json]
+  cxmsg deliveries cancel <logical-message-id> [--json]
+  cxmsg deliveries rebuild-index [--json]
   cxmsg open <name> [-- <codex resume options>]
   cxmsg attach <name> [-- <codex resume options>]
   cxmsg detach <name>
@@ -410,13 +422,21 @@ function schedulerState() {
     process === "missing"
       ? "unavailable"
       : processIdentity(record.pid, [schedulerWorker]).state;
+  const heartbeatAgeMs = record.heartbeatAt
+    ? Math.max(0, Date.now() - Date.parse(record.heartbeatAt))
+    : null;
   const status =
-    process === "alive" && identity === "matched"
-      ? "running"
+    process === "alive" &&
+    identity === "matched" &&
+    record.version === 2 &&
+    heartbeatAgeMs > SCHEDULER_HEARTBEAT_STALE_MS
+      ? "stalled"
+      : process === "alive" && identity === "matched"
+        ? "running"
       : process === "missing"
         ? "stopped"
         : "unreachable";
-  return { status, record, process, identity };
+  return { status, record, process, identity, heartbeatAgeMs };
 }
 
 async function startScheduler() {
@@ -467,7 +487,7 @@ async function stopScheduler() {
       if (existsSync(SCHEDULER_RECORD_PATH)) unlinkSync(SCHEDULER_RECORD_PATH);
       return false;
     }
-    if (state.status !== "running" || state.identity !== "matched") {
+    if (state.process !== "alive" || state.identity !== "matched") {
       throw new Error(
         `scheduler pid ${state.record.pid} identity is unverified; refusing to signal it`,
       );
@@ -501,8 +521,142 @@ async function commandScheduler(action) {
   }
   const state = schedulerState();
   process.stdout.write(
-    `${state.status}\tpid=${state.record?.pid || "-"}\tverification=${state.identity}\n`,
+    `${state.status}\tpid=${state.record?.pid || "-"}\tverification=${state.identity}` +
+      `${state.record?.heartbeatAt ? `\theartbeat=${state.record.heartbeatAt}` : ""}` +
+      `${state.record?.lastErrorCode ? `\terror=${state.record.lastErrorCode}` : ""}\n`,
   );
+}
+
+function deliveryProjection(record) {
+  const delivery = record.delivery;
+  const activeAttempt = delivery.attempts.at(-1) || null;
+  const status =
+    delivery.admissionState === "quarantined"
+      ? "quarantined"
+      : ["created", "scheduled"].includes(delivery.state) && activeAttempt
+        ? "dispatching"
+        : delivery.state;
+  return {
+    logicalMessageId: record.logicalMessage.messageId,
+    deliveryId: delivery.deliveryId,
+    from: record.logicalMessage.from,
+    target: delivery.target,
+    admissionState: delivery.admissionState,
+    admissionReason: delivery.admissionReason,
+    wakePolicy: delivery.wakePolicy,
+    status,
+    createdAt: record.logicalMessage.createdAt,
+    updatedAt: delivery.updatedAt,
+    expiry: record.logicalMessage.route?.expiry || null,
+    body: {
+      bytes: record.logicalMessage.body.bytes,
+      sha256: record.logicalMessage.body.sha256,
+      contentRef: record.logicalMessage.body.contentRef,
+    },
+    attemptCount: delivery.attempts.length,
+    evidenceCount: delivery.evidence.length,
+    claim: delivery.claim
+      ? {
+          claimedAt: delivery.claim.claimedAt,
+          leaseUntil: delivery.claim.leaseUntil,
+        }
+      : null,
+    turnId: delivery.turnId || null,
+    errorCode: delivery.errorCode || null,
+  };
+}
+
+function printDelivery(record, jsonOutput) {
+  const projected = deliveryProjection(record);
+  process.stdout.write(
+    jsonOutput
+      ? `${JSON.stringify(projected, null, 2)}\n`
+      : `${projected.logicalMessageId}\t${projected.target}\t${projected.status}\t${projected.wakePolicy}\n`,
+  );
+}
+
+async function commandDeliveries(args) {
+  const operation = args.shift();
+  if (operation === "list") {
+    let status = null;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--status") {
+        status = args.shift();
+        if (!status || status.startsWith("--")) {
+          throw new Error("deliveries list --status requires a state");
+        }
+      }
+      else throw new Error(`unknown deliveries list option: ${option}`);
+    }
+    const records = (await listDeliveryLedgerIndexed())
+      .map(deliveryProjection)
+      .filter((record) => !status || record.status === status);
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(records, null, 2)}\n`
+        : records
+            .map(
+              (record) =>
+                `${record.logicalMessageId}\t${record.target}\t${record.status}\t${record.wakePolicy}`,
+            )
+            .join("\n") + (records.length ? "\n" : ""),
+    );
+    return;
+  }
+  if (operation === "show") {
+    const messageId = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (!messageId || args.some((value) => value !== "--json")) {
+      throw new Error("deliveries show requires one logical message id and optional --json");
+    }
+    const record = await readDeliveryLedgerIndexed(messageId);
+    if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
+    printDelivery(record, jsonOutput);
+    return;
+  }
+  if (operation === "cancel") {
+    const messageId = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (!messageId || args.some((value) => value !== "--json")) {
+      throw new Error("deliveries cancel requires one logical message id and optional --json");
+    }
+    const result = await cancelScheduledDelivery(messageId);
+    await writeCoordinationEvent({
+      kind: "scheduled-delivery",
+      phase: "cancellation",
+      correlationId: messageId,
+      target: result.record.delivery.target,
+      outcome: result.cancelled ? "cancelled" : "already-cancelled",
+      errorCode: result.cancelled ? "EDELIVERYCANCELLED" : null,
+    });
+    if (jsonOutput) {
+      process.stdout.write(
+        `${JSON.stringify({ ...deliveryProjection(result.record), cancelled: result.cancelled }, null, 2)}\n`,
+      );
+    } else {
+      process.stdout.write(
+        `${result.cancelled ? "cancelled" : "already-cancelled"} ${messageId}\n`,
+      );
+    }
+    return;
+  }
+  if (operation === "rebuild-index") {
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) {
+      throw new Error("deliveries rebuild-index accepts only --json");
+    }
+    const result = await rebuildDeliveryLedgerIndex();
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : `rebuilt Delivery Ledger index for ${result.messageCount} message(s)\n`,
+    );
+    return;
+  }
+  usage(2);
 }
 
 async function createOrFindSession(client, name, cwd = process.cwd()) {
@@ -2583,6 +2737,9 @@ async function main() {
       break;
     case "scheduler":
       await commandScheduler(args[0]);
+      break;
+    case "deliveries":
+      await commandDeliveries(args);
       break;
     case "create":
       await commandCreate(args[0]);
