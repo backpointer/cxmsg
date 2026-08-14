@@ -43,7 +43,7 @@ test("Claude bridge quarantines untyped ingress and admits an exact typed route"
       return {
         delivery: "started",
         messageId: payload.messageId,
-        turnId: "turn-claude-route",
+        turnId: "11345678-2234-4234-8234-123456789abc",
         payload,
       };
     },

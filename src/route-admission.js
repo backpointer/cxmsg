@@ -10,8 +10,18 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import {
+  appendDeliveryEvidence,
+  beginImmediateDelivery,
+  commitSingleRecipientDelivery,
+  readDeliveryLedger,
+} from "./delivery-ledger.js";
 import { withFileLock } from "./file-lock.js";
-import { MAX_STORED_MESSAGE_BYTES } from "./message-bodies.js";
+import {
+  MAX_STORED_MESSAGE_BYTES,
+  storeMessageBody,
+} from "./message-bodies.js";
+import { MAX_MESSAGE_BYTES } from "./messaging.js";
 import {
   findProjectByRoutingId,
   nodeKey as directoryNodeKey,
@@ -309,7 +319,7 @@ function deliveryLockPath(messageId) {
   return path.join(ROUTE_DELIVERIES_DIR, `${validateUuid("logical message id", messageId)}.lock`);
 }
 
-function validRouteDeliveryRecord(record, messageId) {
+function validLegacyRouteDeliveryRecord(record, messageId) {
   return Boolean(
     record?.version === 1 &&
       record.logicalMessageId === messageId &&
@@ -331,7 +341,58 @@ function validRouteDeliveryRecord(record, messageId) {
   );
 }
 
+function ledgerRouteDelivery(record) {
+  if (!record) return null;
+  const message = record.logicalMessage;
+  const delivery = record.delivery;
+  const activeAttempt = delivery.attempts.at(-1) || null;
+  const status =
+    delivery.admissionState === "quarantined"
+      ? "quarantined"
+      : delivery.state === "created" && activeAttempt
+        ? "dispatching"
+        : delivery.state;
+  return {
+    version: 2,
+    logicalMessageId: message.messageId,
+    deliveryId: delivery.deliveryId,
+    from: message.from,
+    target: delivery.target,
+    ...(delivery.targetThreadId
+      ? { targetThreadId: delivery.targetThreadId }
+      : {}),
+    messageBytes: message.body.bytes,
+    messageSha256: message.body.sha256,
+    contentRef: message.body.contentRef,
+    routeFingerprint: message.routeFingerprint,
+    route: message.route,
+    admissionState: delivery.admissionState,
+    admissionReason: delivery.admissionReason,
+    status,
+    wakeAttemptedAt: delivery.attempts[0]?.startedAt || null,
+    createdAt: message.createdAt,
+    updatedAt: delivery.updatedAt,
+    turnId: delivery.turnId || null,
+    delivery: delivery.transportResult || null,
+    errorCode: delivery.errorCode || null,
+    attemptId: activeAttempt?.attemptId || null,
+    attemptCount: delivery.attempts.length,
+  };
+}
+
 export function routeDeliveryState(messageId) {
+  try {
+    const ledgerRecord = readDeliveryLedger(messageId);
+    if (ledgerRecord) {
+      return { state: "valid", record: ledgerRouteDelivery(ledgerRecord) };
+    }
+  } catch (error) {
+    return {
+      state: "invalid",
+      record: null,
+      errorCode: error?.code || "ELEDGERVALIDATION",
+    };
+  }
   const filename = deliveryPath(messageId);
   let metadata;
   try {
@@ -356,7 +417,7 @@ export function routeDeliveryState(messageId) {
   }
   try {
     const record = JSON.parse(readFileSync(filename, "utf8"));
-    if (!validRouteDeliveryRecord(record, messageId)) {
+    if (!validLegacyRouteDeliveryRecord(record, messageId)) {
       return { state: "invalid", record: null, errorCode: "EDELIVERYSCHEMA" };
     }
     return { state: "valid", record };
@@ -367,14 +428,6 @@ export function routeDeliveryState(messageId) {
 
 export function readRouteDelivery(messageId) {
   return routeDeliveryState(messageId).record;
-}
-
-function requireRouteDelivery(messageId) {
-  const state = routeDeliveryState(messageId);
-  if (state.state !== "valid") {
-    throw new Error(`Route Delivery changed or failed validation: ${messageId}`);
-  }
-  return state.record;
 }
 
 function boundedErrorCode(error) {
@@ -455,28 +508,11 @@ export async function routePeerMessage(
       readSessionRecord(from),
     );
     const now = new Date().toISOString();
-    const record = {
-      version: 1,
-      logicalMessageId,
-      from,
-      target,
-      ...(targetRecord?.threadId
-        ? { targetThreadId: targetRecord.threadId }
-        : {}),
-      messageBytes: Buffer.byteLength(message, "utf8"),
-      messageSha256,
-      routeFingerprint: fingerprint,
-      route: normalizedRoute,
-      admissionState: decision.state,
-      admissionReason: decision.reason,
-      status: decision.state === "admitted" ? "dispatching" : "quarantined",
-      wakeAttemptedAt: decision.state === "admitted" ? now : null,
-      createdAt: now,
-      updatedAt: now,
-      turnId: null,
-      delivery: null,
-      errorCode: null,
-    };
+    const messageBytes = Buffer.byteLength(message, "utf8");
+    const bodyReference =
+      decision.state === "admitted" && messageBytes > MAX_MESSAGE_BYTES
+        ? await storeMessageBody({ messageId: logicalMessageId, body: message })
+        : null;
     if (decision.state === "quarantined") {
       atomicWrite(QUARANTINE_DIR, messageFilename(logicalMessageId), {
         version: 1,
@@ -486,12 +522,33 @@ export async function routePeerMessage(
         route: normalizedRoute,
         reason: decision.reason,
         message,
-        messageBytes: record.messageBytes,
+        messageBytes,
         messageSha256,
         quarantinedAt: now,
       });
     }
-    atomicWrite(ROUTE_DELIVERIES_DIR, messageFilename(logicalMessageId), record);
+    const committed = await commitSingleRecipientDelivery({
+      logicalMessage: {
+        messageId: logicalMessageId,
+        from,
+        body: {
+          messageId: logicalMessageId,
+          bytes: messageBytes,
+          sha256: messageSha256,
+          contentRef: bodyReference?.contentRef || null,
+        },
+        route: normalizedRoute,
+        routeFingerprint: fingerprint,
+        createdAt: now,
+      },
+      target,
+      targetThreadId: targetRecord?.threadId || null,
+      admissionState: decision.state,
+      admissionReason: decision.reason,
+      wakePolicy: normalizedRoute?.wake_policy || "immediate",
+      now,
+    });
+    const record = ledgerRouteDelivery(committed.record);
     prepared = { record };
   });
 
@@ -518,31 +575,28 @@ export async function routePeerMessage(
     return publicOutcome(prepared.record);
   }
 
+  const attempt = await beginImmediateDelivery(logicalMessageId);
   try {
     const result = await dispatch({
       logicalMessageId,
       route: normalizedRoute,
     });
-    const completed = await withFileLock(deliveryLockPath(logicalMessageId), async () => {
-      const current = requireRouteDelivery(logicalMessageId);
-      return atomicWrite(ROUTE_DELIVERIES_DIR, messageFilename(logicalMessageId), {
-        ...current,
-        status: "turn_started",
-        delivery: result.delivery,
+    const completed = ledgerRouteDelivery(
+      await appendDeliveryEvidence(logicalMessageId, {
+        attemptId: attempt.attemptId,
+        state: "turn_started",
+        evidenceKind: "dispatch-result",
+        transportResult: result.delivery,
         turnId: result.turnId,
-        updatedAt: new Date().toISOString(),
-      });
-    });
+      }),
+    );
     return publicOutcome(completed, { result });
   } catch (error) {
-    await withFileLock(deliveryLockPath(logicalMessageId), async () => {
-      const current = requireRouteDelivery(logicalMessageId);
-      atomicWrite(ROUTE_DELIVERIES_DIR, messageFilename(logicalMessageId), {
-        ...current,
-        status: "unknown",
-        errorCode: boundedErrorCode(error),
-        updatedAt: new Date().toISOString(),
-      });
+    await appendDeliveryEvidence(logicalMessageId, {
+      attemptId: attempt.attemptId,
+      state: "unknown",
+      evidenceKind: "dispatch-result",
+      errorCode: boundedErrorCode(error),
     });
     throw error;
   }
@@ -622,6 +676,19 @@ export async function reconcileRouteDelivery(
     if (current.status === "turn_started") return current;
     if (!["dispatching", "unknown"].includes(current.status)) {
       throw new Error("Route Delivery state changed during reconciliation");
+    }
+    if (current.version === 2) {
+      return ledgerRouteDelivery(
+        await appendDeliveryEvidence(logicalMessageId, {
+          attemptId: current.attemptId,
+          state: accepted ? "turn_started" : "unknown",
+          evidenceKind: "reconciliation",
+          turnId: accepted ? evidence.turnId : null,
+          transportResult: accepted ? "reconciled" : null,
+          errorCode: accepted ? null : "EACCEPTANCEUNVERIFIED",
+          observedAt: reconciledAt,
+        }),
+      );
     }
     return atomicWrite(ROUTE_DELIVERIES_DIR, messageFilename(logicalMessageId), {
       ...current,

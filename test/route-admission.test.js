@@ -49,6 +49,8 @@ const ids = {
   invalidTargetBinding: "e5345678-1234-4234-8234-123456789abc",
   reconcileAccepted: "f6345678-1234-4234-8234-123456789abc",
   reconcileUnknown: "a7345678-2234-4234-8234-123456789abc",
+  reconcileGrace: "b8345678-2234-4234-8234-123456789abc",
+  retainedBody: "d0345678-2234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -74,7 +76,10 @@ test("unbound targets remain compatible and logical messages wake at most once",
     },
     async () => {
       dispatches += 1;
-      return { delivery: "started", turnId: "turn-1" };
+      return {
+        delivery: "started",
+        turnId: "01345678-1234-4234-8234-123456789abc",
+      };
     },
   );
   const duplicate = await routes.routePeerMessage(
@@ -124,12 +129,37 @@ test("bound targets admit only an exact project and role route", async () => {
     async ({ logicalMessageId }) => {
       dispatches += 1;
       assert.equal(logicalMessageId, ids.admitted);
-      return { delivery: "started", turnId: "turn-admitted" };
+      return {
+        delivery: "started",
+        turnId: "02345678-1234-4234-8234-123456789abc",
+      };
     },
   );
   assert.equal(admitted.admissionState, "admitted");
   assert.equal(admitted.reason, "binding_match");
   assert.equal(dispatches, 1);
+});
+
+test("large admitted bodies are retained by digest reference before dispatch", async () => {
+  const message = "ledger body ".repeat(2_000);
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "worker",
+      message,
+      route: route(ids.retainedBody),
+      logicalMessageId: ids.retainedBody,
+    },
+    async () => ({
+      delivery: "started",
+      turnId: "e1345678-2234-4234-8234-123456789abc",
+    }),
+  );
+  assert.equal(outcome.status, "turn_started");
+  const retained = routes.readRouteDelivery(ids.retainedBody);
+  assert.equal(retained.contentRef, `cxmsg-message:${ids.retainedBody}`);
+  assert.equal(retained.messageBytes, Buffer.byteLength(message, "utf8"));
+  assert.equal(retained.version, 2);
 });
 
 test("missing, mismatched, and expired routes quarantine with zero dispatch", async () => {
@@ -432,20 +462,33 @@ test("Route Delivery reconciliation strengthens only positive App Server accepta
     "EACCEPTANCEUNVERIFIED",
   );
 
-  const fresh = routes.readRouteDelivery(ids.reconcileUnknown);
-  writeFileSync(
-    path.join(routes.ROUTE_DELIVERIES_DIR, `${ids.reconcileUnknown}.json`),
-    `${JSON.stringify(
-      { ...fresh, status: "dispatching", updatedAt: new Date().toISOString() },
-      null,
-      2,
-    )}\n`,
-    { mode: 0o600 },
+  let releaseDispatch;
+  const dispatchGate = new Promise((resolve) => {
+    releaseDispatch = resolve;
+  });
+  const activeDispatch = routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "reconcile-worker",
+      message: "active dispatch",
+      logicalMessageId: ids.reconcileGrace,
+    },
+    async () => {
+      await dispatchGate;
+      return {
+        delivery: "started",
+        turnId: "c9345678-1234-4234-8234-123456789abc",
+      };
+    },
+    { log: async () => {} },
   );
+  while (routes.readRouteDelivery(ids.reconcileGrace)?.status !== "dispatching") {
+    await new Promise((resolve) => setTimeout(resolve, 1));
+  }
   let inspections = 0;
   await assert.rejects(
     routes.reconcileRouteDelivery(
-      ids.reconcileUnknown,
+      ids.reconcileGrace,
       async () => {
         inspections += 1;
         return { state: "accepted" };
@@ -455,4 +498,6 @@ test("Route Delivery reconciliation strengthens only positive App Server accepta
     /active dispatch grace period/,
   );
   assert.equal(inspections, 0);
+  releaseDispatch();
+  await activeDispatch;
 });

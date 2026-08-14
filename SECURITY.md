@@ -54,6 +54,17 @@ authority path. Logical-message deduplication prevents a second automatic wake
 after an attempt is durably marked, including when the first outcome is
 uncertain.
 
+New ordinary Codex deliveries use an owner-only append-only Delivery Ledger.
+The atomic batch contains redacted Logical Message metadata and one recipient
+Delivery before transport; it does not contain the raw Message Body. Attempt
+and evidence records are separate, and an uncertain transport result is never
+permission to replay. Private segment metadata, bounded record validation,
+`O_NOFOLLOW`, fsync, a fail-closed quota, and reserved terminal-evidence space
+protect the initial file Adapter. Partial active tails are quarantined before
+another append. There is no automatic retention, purge, retry, or repair.
+Delivery Ledger files and their quarantine are runtime state and must never be
+committed, published, or copied into a web snapshot.
+
 Migration compatibility is explicitly fail-open only for a target with no
 Route Admission binding: it accepts legacy unscoped Peer Messages as untrusted
 context. Removing a binding restores that compatibility behavior, so a Hermes

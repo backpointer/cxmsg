@@ -605,12 +605,14 @@ CAS result. Identical observations coalesce and bounded compaction preserves
 the latest successful evidence for each selected transport. Default CLI and
 Doctor output never render Endpoint addresses from history.
 
-Phase 3 still has no automatic Project merge or move, successor inference,
-Cluster, or web projection. Execution Thread classification remains separate
-from addressable Node synchronization. An older Endpoint generation is rejected
-and an equal generation with conflicting identity fails closed. Those omitted
-lifecycle transitions require explicit records and tests in the remaining
-Phase 3 work.
+Phase 3 still has no automatic Project merge or move, successor inference, or
+web projection. Cluster identity, immutable membership snapshots, Tombstones,
+bounded recovery, and Doctor checks are implemented; Cluster membership still
+creates no Conversation, fan-out, reachability, or authority. Execution Thread
+classification remains separate from addressable Node synchronization. An
+older Endpoint generation is rejected and an equal generation with conflicting
+identity fails closed. The omitted lifecycle transitions require explicit
+records and tests in the remaining Phase 3 work.
 
 ### Phase 4: Delivery Ledger and scheduling
 
@@ -618,6 +620,23 @@ Phase 3 work.
 - unify immediate and Triggered Delivery evidence;
 - add segmented storage, rebuildable index, retention, quota, and purge;
 - migrate retained Jobs without inventing ordinary message history.
+
+Initial implementation status: new ordinary Codex Peer Messages now commit one
+Logical Message and one recipient Delivery atomically in an owner-only,
+append-only segmented Ledger before transport. A separate immutable attempt
+record precedes App Server access, and evidence records distinguish
+`turn_started` from `unknown`; positive reconciliation may strengthen the
+latter without replay. Long admitted bodies reference the Phase 2 Message Body
+Store by digest and opaque Content Reference. Legacy `route-deliveries` remain
+readable but are not written for new sends.
+
+This is intentionally not the Scheduler. It supports immediate delivery only,
+one recipient, one dispatch attempt, no automatic retry, and no retention or
+purge. A fail-closed 64 MiB metadata quota reserves bounded space for the
+attempt and terminal evidence of every admitted batch. The current rebuild is
+bounded by a 256 MiB hard scan ceiling; a persistent rebuildable index,
+retention policy, claims, leases, scheduled wake policies, and Job migration
+remain Phase 4 work.
 
 ### Phase 5: Direct Conversation
 

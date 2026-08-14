@@ -291,6 +291,75 @@ test("Route Inspector checks binding identity and redacts quarantined bodies", a
   }
 });
 
+test("Route Inspector rebuilds Delivery Ledger evidence without exposing bodies", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-ledger-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const segments = path.join(root, "delivery-ledger", "segments");
+    const quarantine = path.join(root, "delivery-ledger", "quarantine");
+    await fs.mkdir(segments, { recursive: true, mode: 0o700 });
+    await fs.mkdir(quarantine, { mode: 0o700 });
+    const messageId = "8ddaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const deliveryId = "9ddaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const route = null;
+    const batch = {
+      schemaVersion: 1,
+      recordType: "ledger-batch",
+      batchId: "addaa4e0-fa31-454e-a37e-a37f8807f0e7",
+      committedAt: "2026-08-14T00:00:00.000Z",
+      logicalMessage: {
+        messageId,
+        from: "coordinator",
+        body: {
+          messageId,
+          bytes: 23,
+          sha256: createHash("sha256").update("private body stays absent").digest("hex"),
+          contentRef: null,
+        },
+        route,
+        routeFingerprint: createHash("sha256")
+          .update(JSON.stringify(route))
+          .digest("hex"),
+        createdAt: "2026-08-14T00:00:00.000Z",
+      },
+      deliveries: [
+        {
+          deliveryId,
+          target: "worker",
+          targetThreadId: THREAD_ID,
+          admissionState: "admitted",
+          admissionReason: "legacy-unbound",
+          wakePolicy: "immediate",
+          state: "created",
+          createdAt: "2026-08-14T00:00:00.000Z",
+          updatedAt: "2026-08-14T00:00:00.000Z",
+        },
+      ],
+    };
+    await fs.writeFile(
+      path.join(segments, "segment-00000001.jsonl"),
+      `${JSON.stringify(batch)}\n`,
+      { mode: 0o600 },
+    );
+
+    const checks = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+    });
+    assert.equal(
+      checks.find((check) => check.id === "delivery-ledger.records.schema").status,
+      "pass",
+    );
+    assert.equal(
+      checks.find((check) => check.id === `delivery-ledger.target.${messageId.slice(0, 8)}`).status,
+      "pass",
+    );
+    assert.doesNotMatch(JSON.stringify(checks), /private body stays absent/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Node Directory Inspector validates private identity references without paths", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-directory-"));
   try {

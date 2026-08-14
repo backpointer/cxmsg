@@ -67,7 +67,10 @@ test("Route binding pins the stable Directory Project and Node identities", asyn
     },
     async () => {
       dispatches += 1;
-      return { delivery: "started", turnId: "turn-directory" };
+      return {
+        delivery: "started",
+        turnId: "a2345678-1234-4234-8234-123456789abc",
+      };
     },
   );
   assert.equal(admitted.reason, "binding_match");

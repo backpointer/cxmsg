@@ -47,7 +47,8 @@ Every check contains:
 - `id` is a stable machine-oriented check identifier.
 - `scope` groups checks such as `runtime`, `state`, `sessions`, `jobs`,
   `permissions`, `app-server`, `attachments`, `bridges`, `relay`,
-  `message-bodies`, `route-bindings`, `route-deliveries`, `quarantine`,
+  `message-bodies`, `route-bindings`, `route-deliveries`, `delivery-ledger`,
+  `quarantine`,
   `directory-projects`, `directory-nodes`, `directory-node-tombstones`,
   `directory-successors`, `directory-execution-threads`, `directory-clusters`,
   `directory-cluster-memberships`, `directory-cluster-tombstones`, or

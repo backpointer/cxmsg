@@ -12,6 +12,11 @@ import {
   CLAUDE_BRIDGE_IMPLEMENTATION_REVISION,
   probeClaudeBridge,
 } from "./claude-bridge.js";
+import {
+  DELIVERY_LEDGER_MAX_RECORD_BYTES,
+  rebuildDeliveryLedgerRecords,
+  validDeliveryLedgerRecord,
+} from "./delivery-ledger.js";
 import { hostRelayRequest } from "./host-relay.js";
 import {
   MESSAGE_BODY_SEGMENT_BYTES,
@@ -295,6 +300,174 @@ function scanJsonDirectory({
       summary: `${records.length} ${scope} record(s) passed bounded schema inspection`,
       verification: "schema",
     }));
+  }
+  return { checks, records };
+}
+
+function inspectDeliveryLedger(stateDir) {
+  const scope = "delivery-ledger";
+  const root = path.join(stateDir, "delivery-ledger");
+  const checks = [];
+  const rootEvidence = secureMetadata(root, "directory");
+  if (rootEvidence.status === "missing") {
+    checks.push(
+      metadataFinding(`${scope}.directory`, scope, "Delivery Ledger directory", rootEvidence, {
+        required: false,
+      }),
+    );
+    return { checks, records: [] };
+  }
+  checks.push(metadataFinding(`${scope}.directory`, scope, "Delivery Ledger directory", rootEvidence));
+  if (rootEvidence.status !== "secure") return { checks, records: [] };
+
+  const events = [];
+  let parsedBytes = 0;
+  for (const directoryName of ["segments", "quarantine"]) {
+    const directory = path.join(root, directoryName);
+    const directoryEvidence = secureMetadata(directory, "directory");
+    checks.push(
+      metadataFinding(
+        `${scope}.${directoryName}.directory`,
+        scope,
+        `Delivery Ledger ${directoryName} directory`,
+        directoryEvidence,
+      ),
+    );
+    if (directoryEvidence.status !== "secure") continue;
+    let names;
+    try {
+      names = readdirSync(directory)
+        .filter((name) => /^segment-\d{8}(?:\.partial-[0-9a-f-]+)?\.jsonl$/i.test(name))
+        .sort();
+    } catch (error) {
+      checks.push(
+        diagnosticCheck({
+          id: `${scope}.${directoryName}.read`,
+          scope,
+          status: "unknown",
+          summary: `Delivery Ledger ${directoryName} could not be enumerated`,
+          verification: "unavailable",
+          errorCode: errorCode(error),
+        }),
+      );
+      continue;
+    }
+    for (const name of names) {
+      const file = path.join(directory, name);
+      const label = safeLabel(name);
+      const evidence = secureMetadata(file, "file");
+      if (evidence.status !== "secure") {
+        checks.push(
+          metadataFinding(
+            `${scope}.${directoryName}.${label}.metadata`,
+            scope,
+            `Delivery Ledger segment ${label}`,
+            evidence,
+          ),
+        );
+        continue;
+      }
+      if (parsedBytes + evidence.metadata.size > MAX_DIRECTORY_BYTES) {
+        checks.push(
+          diagnosticCheck({
+            id: `${scope}.records.bytes`,
+            scope,
+            status: "warn",
+            summary: "Delivery Ledger exceeds the bounded Doctor parse limit",
+            verification: "bounded",
+            errorCode: "ERECORDBYTES",
+            remediation: "Inspect the Ledger from an allowed host context",
+          }),
+        );
+        break;
+      }
+      parsedBytes += evidence.metadata.size;
+      try {
+        const raw = readFileSync(file, "utf8");
+        const complete = raw.endsWith("\n");
+        if (!complete) {
+          checks.push(
+            diagnosticCheck({
+              id: `${scope}.${directoryName}.${label}.partial`,
+              scope,
+              status: directoryName === "segments" ? "fail" : "warn",
+              summary: `Delivery Ledger ${directoryName} segment has an incomplete final record`,
+              verification: "records",
+              errorCode: "ELEDGERPARTIAL",
+              remediation:
+                directoryName === "segments"
+                  ? "Do not dispatch from this Ledger until the writer quarantines the partial segment"
+                  : null,
+            }),
+          );
+        }
+        const lines = raw.split("\n");
+        if (!complete) lines.pop();
+        else if (lines.at(-1) === "") lines.pop();
+        for (const line of lines) {
+          if (Buffer.byteLength(line, "utf8") > DELIVERY_LEDGER_MAX_RECORD_BYTES) {
+            throw new Error("record-size");
+          }
+          const record = JSON.parse(line);
+          if (!validDeliveryLedgerRecord(record)) throw new Error("record-schema");
+          events.push(record);
+        }
+      } catch {
+        checks.push(
+          diagnosticCheck({
+            id: `${scope}.${directoryName}.${label}.schema`,
+            scope,
+            status: "fail",
+            summary: `Delivery Ledger segment ${label} has invalid bounded JSONL evidence`,
+            verification: "schema",
+            errorCode: "ELEDGERSCHEMA",
+          }),
+        );
+      }
+    }
+  }
+
+  let records = [];
+  try {
+    records = [...rebuildDeliveryLedgerRecords(events).values()].map((record) => {
+      const message = record.logicalMessage;
+      const delivery = record.delivery;
+      const activeAttempt = delivery.attempts.at(-1) || null;
+      return {
+        version: 2,
+        logicalMessageId: message.messageId,
+        target: delivery.target,
+        ...(delivery.targetThreadId ? { targetThreadId: delivery.targetThreadId } : {}),
+        status:
+          delivery.admissionState === "quarantined"
+            ? "quarantined"
+            : delivery.state === "created" && activeAttempt
+              ? "dispatching"
+              : delivery.state,
+      };
+    });
+  } catch {
+    checks.push(
+      diagnosticCheck({
+        id: `${scope}.records.rebuild`,
+        scope,
+        status: "fail",
+        summary: "Delivery Ledger evidence cannot be deterministically rebuilt",
+        verification: "records",
+        errorCode: "ELEDGERREBUILD",
+      }),
+    );
+  }
+  if (!checks.some((check) => check.status === "fail" || check.status === "unknown")) {
+    checks.push(
+      diagnosticCheck({
+        id: `${scope}.records.schema`,
+        scope,
+        status: "pass",
+        summary: `${records.length} Delivery Ledger message(s) passed bounded reconstruction`,
+        verification: "schema",
+      }),
+    );
   }
   return { checks, records };
 }
@@ -1358,6 +1531,7 @@ export function inspectRouteState({ stateDir, sessions = [] } = {}) {
     scope: "route-deliveries",
     validate: validRouteDelivery,
   });
+  const ledger = inspectDeliveryLedger(stateDir);
   const quarantine = scanJsonDirectory({
     stateDir,
     directoryName: "quarantine",
@@ -1368,6 +1542,7 @@ export function inspectRouteState({ stateDir, sessions = [] } = {}) {
   const checks = [
     ...bindings.checks,
     ...deliveries.checks,
+    ...ledger.checks,
     ...quarantine.checks,
   ];
   const sessionsByName = new Map(sessions.map((record) => [record.name, record]));
@@ -1390,14 +1565,15 @@ export function inspectRouteState({ stateDir, sessions = [] } = {}) {
       }),
     );
   }
-  for (const delivery of deliveries.records) {
+  for (const delivery of [...deliveries.records, ...ledger.records]) {
+    const deliveryScope = delivery.version === 2 ? "delivery-ledger" : "route-deliveries";
     if (delivery.targetThreadId) {
       const target = sessionsByName.get(delivery.target);
       const identityMatches = target?.threadId === delivery.targetThreadId;
       checks.push(
         diagnosticCheck({
-          id: `route-deliveries.target.${safeLabel(delivery.logicalMessageId)}`,
-          scope: "route-deliveries",
+          id: `${deliveryScope}.target.${safeLabel(delivery.logicalMessageId)}`,
+          scope: deliveryScope,
           status: identityMatches ? "pass" : "fail",
           summary: identityMatches
             ? "Route Delivery retains its registered target thread identity"
@@ -1414,8 +1590,8 @@ export function inspectRouteState({ stateDir, sessions = [] } = {}) {
       const legacyIdentity = !delivery.targetThreadId;
       checks.push(
         diagnosticCheck({
-          id: `route-deliveries.reconcile.${safeLabel(delivery.logicalMessageId)}`,
-          scope: "route-deliveries",
+          id: `${deliveryScope}.reconcile.${safeLabel(delivery.logicalMessageId)}`,
+          scope: deliveryScope,
           status: "warn",
           summary: legacyIdentity
             ? "Unconfirmed legacy Route Delivery lacks pinned target identity"

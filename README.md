@@ -98,6 +98,22 @@ reusing it with different content fails as an idempotency conflict. Targets
 without an explicit binding retain legacy unscoped-send compatibility during
 migration.
 
+New ordinary Codex Peer Messages are committed to the owner-only Delivery
+Ledger before App Server dispatch. One append record atomically contains the
+Logical Message metadata and its single recipient Delivery; later append-only
+records distinguish the dispatch attempt from `turn_started` or `unknown`
+evidence. The Ledger stores body byte count, digest, and an optional opaque
+Content Reference, never the raw body. Legacy `route-deliveries` records remain
+readable for reconciliation but new sends do not create them.
+
+The first Ledger slice supports immediate single-recipient delivery only. It
+does not schedule, retry, purge, fan out, or infer task completion. An
+ambiguous dispatch remains `unknown`, and only positive App Server acceptance
+evidence may strengthen it to `turn_started`. Storage uses private 8 MiB JSONL
+segments, a 64 MiB fail-closed quota with bounded terminal-evidence reserve,
+and a 256 MiB hard scan ceiling. Automatic retention and purge remain disabled
+until their policy is explicitly selected.
+
 Legacy compatibility applies only when the binding file is genuinely absent.
 If a binding path exists but its file type, owner, mode, link count, JSON, or
 identity schema is invalid, cxmsg quarantines the message as
@@ -836,6 +852,11 @@ signal.
   fail-closed write quota, and no automatic deletion. Existing bodies remain
   readable above the write quota through a separate 256 MiB bounded scan
   ceiling, so quota exhaustion does not strand retained content.
+- Each new ordinary Codex Peer Message commits one Logical Message and one
+  recipient Delivery to the append-only Delivery Ledger before transport. Its
+  body is represented only by byte count, digest, and optional Content
+  Reference. Dispatch-attempt and evidence records remain distinct; neither
+  `turn_started` nor a peer reply proves durable task completion.
 - Peer-triggered turns cannot open an approval path. Operations outside the
   target's existing sandbox and permissions fail normally.
 - Offline stored threads are resumed before delivery.
