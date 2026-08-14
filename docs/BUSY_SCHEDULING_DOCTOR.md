@@ -23,6 +23,9 @@ Server, sockets, bridges, relay, registries, Jobs, permissions, and the future
 schedule without starting a model turn or silently repairing state.
 
 The terms in [CONTEXT.md](../CONTEXT.md) are normative for this proposal.
+Stable identity, ordinary message history, and Direct or Group Conversation
+rules are defined in the companion
+[Coordination graph and conversation plan](COORDINATION_GRAPH_CONVERSATIONS.md).
 
 ## Goals
 
@@ -69,7 +72,7 @@ The policy is explicit and operation-specific:
 
 ```text
 busy + ordinary immediate Peer Message  -> steer the observed active turn
-busy + Scheduled Peer Message           -> remain queued until eligible and idle
+busy + Scheduled Peer Message           -> remain scheduled until eligible and idle
 busy + authorized Delegation            -> queue only when explicitly requested,
                                            otherwise fail; never implicitly steer
 ```
@@ -83,16 +86,22 @@ cxmsg send worker "Use the revised schema when you reach the migration step."
 ```
 
 If `worker` is Busy, cxmsg steers the message into the observed active turn. If
-the turn completes between `thread/read` and `turn/steer`, the first version
-returns an explicit delivery error. It does not retry as `turn/start` because
-current immediate sends have no durable cxmsg delivery record.
+the turn completes between observation and `turn/steer`, cxmsg uses the durable
+Logical Message and Delivery record to reconcile the outcome.
 
-`clientUserMessageId` carries one correlation ID, but App Server deduplication
-must be verified against every supported Codex version before cxmsg relies on
-it for a cross-method retry. Adding a durable record to immediate sends, or
-enabling reconcile-and-start after a steering race, is outside this proposal's
-first implementation. This keeps current immediate delivery at one mutating
-attempt and avoids an unverified duplicate path.
+A deterministic expected-turn mismatch permits one bounded reread only on a
+pinned Codex version whose regression test proves that this mismatch performed
+no mutation. Without that proof, the Delivery becomes `unknown` with bounded
+`unverified_expected_turn_mismatch` evidence and is not replayed. On a verified
+version, cxmsg may dispatch to the now-Idle thread using the same message ID. If
+reread observes another Busy turn, cxmsg does not steer again; the Delivery
+fails with bounded `turn_changed` evidence and requires explicit resend. A
+connection loss with an unknown result also becomes `unknown` and is not
+replayed automatically.
+
+`clientUserMessageId` carries the Logical Message ID. App Server
+cross-method deduplication must still be verified against every supported Codex
+version and remains defense in depth rather than the only duplicate guard.
 
 ### Scheduled Peer Message
 
@@ -123,7 +132,7 @@ Semantics:
 - A missing turn or Job is rejected at enqueue time. If it later becomes
   unverifiable, the schedule becomes `blocked`, not silently eligible.
 - Reaching a Trigger never converts delivery into steering. A newly Busy target
-  leaves the record queued for its next Idle state.
+  leaves the Delivery scheduled for its next Idle state.
 - Every schedule supports an expiry and explicit cancellation. The default
   expiry should be documented and bounded before release.
 
@@ -145,9 +154,12 @@ Fork execution may eventually stop requiring the source thread to remain Idle
 after a safe, version-tested App Server fork contract is established. Until
 then, the conservative Idle precondition remains.
 
-## Scheduled record and state machine
+## Scheduled Delivery and state machine
 
-A schedule record is owner-only, mode `0600`, and includes at least:
+Every scheduled Peer Message first creates the same owner-only Logical Message
+and recipient Delivery used by immediate send. Trigger and claim fields extend
+that Delivery; they are not copied into a second schedule truth source. The
+Delivery includes at least:
 
 - stable schedule/message ID and idempotency key;
 - source identity, target identity, and target thread ID;
@@ -160,23 +172,34 @@ A schedule record is owner-only, mode `0600`, and includes at least:
 Task text remains in the private record and must never appear in web snapshots,
 default Doctor output, logs, or error telemetry.
 
+Delivery `status` records transport or execution evidence:
+
 ```text
-queued
-  -> blocked            trigger or target cannot currently be verified
-  -> eligible           trigger is satisfied
-  -> claimed            one dispatcher owns a bounded lease
-  -> delivering
-       -> delivered
-       -> queued         transient failure or target became Busy
-       -> failed         permanent validation or policy failure
-  -> expired
-  -> cancelled
+created -> scheduled
+        -> transport_delivered -> turn_started -> replied
+        -> failed | expired | cancelled | unknown
+```
+
+Not every transport produces every evidence state. `transport_delivered` and
+`turn_started` may advance when stronger evidence arrives. `failed`, `expired`,
+and `cancelled` are terminal. `unknown` prohibits automatic replay, but a late
+correlated receipt may reconcile it to a stronger state.
+
+Scheduling readiness is a separate `scheduleState` while the Delivery remains
+`scheduled`:
+
+```text
+waiting-trigger <-> blocked -> eligible
 ```
 
 `blocked` is observational and recoverable. Reconciliation can return it to
-`queued` or `eligible`. `delivered`, `failed`, `expired`, and `cancelled` are
-terminal. A dispatcher that loses its lease must stop; a later dispatcher may
-claim the same record using the same idempotency key.
+`waiting-trigger` or `eligible`. Claim is not Delivery evidence: `claimOwner`,
+`claimNonce`, and `leaseUntil` express exclusive dispatch without inventing a
+parallel status. If the target
+becomes Busy after claim but before a transport attempt, the claim is released
+and the same Delivery returns to `scheduled` with its next readiness state. A
+dispatcher that loses its lease must stop; a later dispatcher may claim the
+same Delivery using the same idempotency key.
 
 ## Ordering and concurrency
 
@@ -184,8 +207,8 @@ claim the same record using the same idempotency key.
   ID as the stable tie-breaker.
 - The first version permits one active scheduled dispatch per target.
 - Enqueue enforces a fixed per-target queue-depth limit. Exceeding it fails
-  before a schedule record is written; expiry is not a substitute for this
-  admission limit.
+  before the Logical Message and Delivery batch is committed; expiry is not a
+  substitute for this admission limit.
 - An earlier record blocked on an unsatisfied explicit Trigger does not block a
   later `when-idle` record. Among records that are eligible together, FIFO is
   preserved.
@@ -219,8 +242,8 @@ raw JSON-RPC messages independently.
 
 On connection loss, the Module reconnects and reconciles known thread and turn
 IDs. It never replays an uncertain `turn/start` or `turn/steer`. If the outcome
-cannot be established, the record becomes `blocked` or `unknown` and Doctor
-reports it.
+cannot be established, a deferred Delivery uses `scheduleState=blocked`; an
+attempted Delivery uses `status=unknown`. Doctor reports either condition.
 
 Notification support is version-sensitive. The Adapter must capability-check
 the pinned Codex CLI and keep reconciliation available when notifications are
@@ -231,8 +254,8 @@ absent or missed.
 The Scheduler Module owns durable eligibility, claims, ordering, and dispatch.
 It uses four narrow Interfaces:
 
-1. a schedule store Interface for atomic create, claim, renew, transition, and
-   cancel operations;
+1. the shared Delivery Ledger persistence Interface for atomic message batches,
+   claim, renew, transition, expiry, and cancel operations;
 2. the Turn Lifecycle Interface for Busy/Idle and terminal-turn evidence;
 3. the Job Interface for correlated terminal state;
 4. delivery Adapters for Peer Message and Delegation dispatch.
@@ -268,7 +291,14 @@ Required changes:
 - source verification applies to both envelopes;
 - retries preserve the delivery ID and do not duplicate accepted work;
 - a late valid terminal envelope may reconcile a timeout when its source and
-  correlation ID still match, while recording that it arrived late.
+  correlation ID still match, while recording that it arrived late;
+- every bridge, relay, or host-tool terminal ACK crosses one Claude completion
+  Reconciliation Interface. It validates the exact source and correlation ID,
+  durably updates the original Delivery, and only then emits an optional Codex
+  wake or reply copy;
+- all ACK paths use one receipt ID for idempotency. A copied Peer Message is
+  untrusted presentation and cannot reconcile a Delivery by parsing correlation
+  text from its body.
 
 A Claude peer's Busy state is advisory because cxmsg does not own Claude's turn
 lifecycle. Direct delivery may be accepted by its native session socket while
@@ -384,6 +414,9 @@ groups operational warnings with confirmed failures.
 - approval waits show age and deadline without approval prompt contents;
 - overdue, orphaned, or contradictory Job states are reported;
 - Claude `acknowledged` deliveries past their completion deadline are reported;
+- a validated terminal ACK or bridge-emitted reply wake whose original Delivery
+  remains `ack_timeout` is reported as
+  `validated_reply_without_delivery_reconciliation`;
 - terminal Job result and error bodies are never emitted by Doctor.
 
 #### Permissions and grants
@@ -479,48 +512,29 @@ acquiring mutation authority accidentally.
 9. Doctor is read-only; Repair is explicit and fail-closed.
 10. No diagnostic path emits capability secrets or private conversation text.
 
-## Implementation phases
+## Implementation sequence mapping
 
-### Phase 1: read-only Doctor foundation
+The canonical Phase 0–7 roadmap is owned by the
+[Coordination graph and conversation plan](COORDINATION_GRAPH_CONVERSATIONS.md#implementation-sequence).
+This document does not define a second phase numbering scheme. Its work maps to
+that roadmap as follows:
 
-- split pure Job and Claude-delivery Inspector Interfaces from mutating refresh
-  paths, including worker-exit, timeout, and ACK-deadline state transitions;
-  the Inspector returns the same evidence without rewriting a record;
-- add the finding schema, check registry, text renderer, and JSON renderer;
-- reuse existing process and socket evidence;
-- cover runtime, state filesystem, App Server, bridge, relay, registry, Job,
-  permission, and grant checks;
-- document stable exit codes;
-- ship without Repair.
+| Canonical phase | Busy, scheduling, and Doctor scope |
+| --- | --- |
+| Phase 0 | Bounded activity reads, delivery/ACK evidence, stale Job reconciliation |
+| Phase 1 | Read-only Doctor Interfaces, findings, renderers, and stable exit codes |
+| Phase 2 | Turn Lifecycle notifications, reconnect, reconciliation, and shared durable primitives |
+| Phase 3 | Identity-checked Endpoint ownership needed by scheduler target lanes |
+| Phase 4 | Immediate and Triggered Delivery Ledger, Scheduler, scheduled Delegation, and Claude completion lifecycle |
+| Phase 5 | No additional scope in this document |
+| Phase 6 | Scheduled per-recipient policy is consumed by Group Conversation; no separate scheduler truth |
+| Phase 7 | Extended schedule, lifecycle, and Ledger consistency checks in Doctor |
 
-### Phase 2: Turn Lifecycle Module
-
-- surface App Server notifications;
-- add bounded subscription and reconciliation Interfaces;
-- make closed transports reconnectable without replaying a mutation;
-- test with the pinned Codex CLI and with notifications disabled.
-
-### Phase 3: durable Scheduler Module
-
-- add mode-`0600` records and atomic claim leases;
-- implement `when-idle`, `after-turn`, and `after-job`;
-- add list, show, cancel, expiry, restart recovery, and per-target FIFO;
-- include schedule checks in Doctor.
-
-### Phase 4: scheduled Delegation and Claude lifecycle
-
-- add explicit `delegate --when-idle` with execution-time reauthorization;
-- separate idle-wait deadline from execution deadline for Claude requests;
-- formalize `accepted` then terminal ACK and `completion_timeout`;
-- add one per-target Claude request lane or another explicitly documented
-  concurrency rule.
-
-### Phase 5: selected Repairs
-
-- add only Repairs with strong identity evidence and recoverable behavior;
-- require an exact finding ID and revalidation;
-- keep restart, signal, record removal, grant, permission, and approval actions
-  outside broad automation.
+Repair remains outside the canonical implementation sequence until read-only
+Doctor and identity evidence are proven. Any later Repair proposal adds only
+mutations with strong identity evidence, exact finding revalidation, and
+recoverable behavior. Restart, signal, record removal, grant, permission, and
+approval actions remain outside broad automation.
 
 ## Acceptance tests
 
@@ -528,23 +542,30 @@ acquiring mutation authority accidentally.
 
 1. Immediate Peer Message to a Busy Codex target steers the exact observed
    turn.
-2. Turn completion racing with steering produces either one successful steer
-   or an explicit error; it never falls back to an unverified second mutation.
-3. `--when-idle` never steers and delivers once after Idle.
-4. `--after-turn` does not deliver for another turn's completion.
-5. Status JSON exposes bounded active/recent turn IDs without turn contents.
-6. `--after-job` waits for the exact correlation ID and triggers for any
+2. Every immediate send records its Logical Message and intended Delivery before
+   transport.
+3. A deterministic expected-turn mismatch reconciles at most once with the same
+   message ID and only on a pinned version proving no mutation. A second Busy
+   turn receives no steer; an ambiguous connection loss becomes `unknown` with
+   no replay. A version without mismatch proof also becomes `unknown` with no
+   replay.
+4. `--when-idle` never steers and delivers once after Idle.
+5. `--after-turn` does not deliver for another turn's completion.
+6. Status JSON exposes bounded active/recent turn IDs without turn contents.
+7. `--after-job` waits for the exact correlation ID and triggers for any
    terminal Job status, including failure.
-7. A target becoming Busy after eligibility leaves the schedule queued.
-8. Restart during `claimed` delivery causes lease reconciliation and no
+8. A target becoming Busy after eligibility releases any unused claim and
+   leaves the Delivery `scheduled`; it never converts to steering.
+9. Restart while claim fields are active causes lease reconciliation and no
    duplicate model turn.
-9. FIFO holds among simultaneously eligible records for one target.
-10. Enqueue above the per-target depth limit fails without writing a record.
-11. Expired and cancelled records cannot be claimed.
-12. A queued Delegation with a revoked grant fails before a turn starts.
-13. Peer Message scheduling never inherits Delegation permissions.
-14. Missed App Server notifications are recovered by bounded reconciliation.
-15. Connection loss after uncertain `turn/start` never causes blind replay.
+10. FIFO holds among simultaneously eligible records for one target.
+11. Enqueue above the per-target depth limit fails without committing a Logical
+    Message or Delivery.
+12. Expired and cancelled records cannot be claimed.
+13. A queued Delegation with a revoked grant fails before a turn starts.
+14. Peer Message scheduling never inherits Delegation permissions.
+15. Missed App Server notifications are recovered by bounded reconciliation.
+16. Connection loss after uncertain `turn/start` never causes blind replay.
 
 ### Claude completion
 
@@ -553,6 +574,13 @@ acquiring mutation authority accidentally.
 3. Wrong-source accepted or terminal ACK is `ack_rejected`.
 4. Retryable 429/529 behavior keeps one correlation ID and a bounded budget.
 5. `transport_delivered` is never rendered as model completion.
+6. A late valid terminal ACK changes `ack_timeout` to `completed` or `failed`
+   and records its late arrival.
+7. The bridge durably reconciles the original Delivery before emitting a Codex
+   wake or reply copy, and duplicate copies remain idempotent.
+8. An ordinary untrusted Peer Message that merely contains a correlation ID
+   changes no Delivery state.
+9. A wrong-source or wrong-correlation late ACK changes no Delivery state.
 
 ### Doctor
 
@@ -570,6 +598,9 @@ acquiring mutation authority accidentally.
 9. Eligible schedules are reported but not dispatched.
 10. Future Repair refuses unknown identity and reruns its exact check after a
     successful mutation.
+11. A validated reply wake without a reconciled original Delivery reports
+    `validated_reply_without_delivery_reconciliation` without emitting reply
+    text.
 
 ## Documentation changes required at implementation time
 
@@ -584,10 +615,10 @@ acquiring mutation authority accidentally.
 ## Decisions required before implementation
 
 The following values must be fixed in code, tests, and reference documentation
-before Phase 3 begins:
+before canonical Phase 4 begins:
 
 - default and maximum schedule expiry;
-- terminal schedule retention and cleanup ownership;
+- terminal Delivery and schedule metadata retention and cleanup ownership;
 - claim lease duration and renewal interval;
 - scheduler start, supervision, and stop ownership, including whether
   `cxmsg server stop` releases active leases while preserving queued records and
@@ -595,14 +626,18 @@ before Phase 3 begins:
 - per-target queue-depth default and maximum, with enqueue-time rejection when
   the configured limit is reached;
 - per-target dispatch-lane identity when names are renamed;
-- supported Codex CLI version range for notification behavior.
+- Delivery Ledger metadata, message-body, and terminal evidence retention;
+- total storage quota, segment size, index rebuild limits, and purge behavior;
+- migration treatment for existing Jobs and unavailable ordinary send history;
+- supported Codex CLI version range for notification behavior and
+  expected-turn mismatch non-mutation behavior.
 
 Until these are decided, implementations must not choose silent defaults.
 
 ## Recommended first slice
 
-Implement Phase 1 without Repair, then Phase 2 before the Scheduler Module.
-Doctor immediately improves supportability using existing evidence, while the
-Turn Lifecycle Module removes the polling and reconnect weaknesses that would
-otherwise be copied into scheduling. This sequence creates depth and leverage
-without changing existing `send` or `delegate` behavior prematurely.
+Implement Phase 0 first because full-history reads already make long-lived
+threads unreachable. Then implement Phase 1 without Repair and Phase 2 before
+the Scheduler Module. Doctor improves supportability using existing evidence,
+while the Turn Lifecycle Module removes polling and reconnect weaknesses before
+they are copied into scheduling and the Delivery Ledger.

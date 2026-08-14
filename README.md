@@ -719,6 +719,7 @@ not needed.
 ## Development proposals
 
 - [Busy delivery, scheduling, and doctor improvement plan](docs/BUSY_SCHEDULING_DOCTOR.md)
+- [Coordination graph and conversation plan](docs/COORDINATION_GRAPH_CONVERSATIONS.md)
 - [Domain language](CONTEXT.md)
 
 ## References
