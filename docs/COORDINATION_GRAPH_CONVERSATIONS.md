@@ -210,6 +210,12 @@ copying members. Doctor validates lifecycle conflicts, missing or orphaned
 versions, exact one-member transitions, and Node references without repairing
 records. Conversation fan-out and graph projection remain later modules.
 
+The Delivery Ledger does not address a Cluster as a dynamic recipient set.
+Conversation creation or membership change first pins an explicit Cluster
+`membershipVersion`; recipient Deliveries then reference that immutable set.
+This keeps Ledger dispatch dependent on Conversation evidence rather than on a
+mutable Directory query.
+
 ## Delivery Ledger
 
 ### One truth for scheduling and delivery
@@ -668,6 +674,14 @@ For `dispatching` or `unknown` Route Delivery records, Phase 4 reconciliation
 must first prove whether App Server accepted the stable client message ID.
 Neither automatic nor operator-triggered retry may replay an uncertain wake
 until that evidence contract and its crash tests exist.
+
+The current pre-Ledger `cxmsg route reconcile` implements positive evidence
+only. On the pinned Codex 0.147.0 protocol it searches a bounded summary window
+for a `userMessage.clientId` equal to the Logical Message ID and may strengthen
+the Delivery to `turn_started`. Absence, pagination exhaustion, legacy records
+without a pinned target thread, and target replacement all authorize zero
+replays. Actual retry remains a Phase 4 operation after durable body and
+negative-acceptance evidence contracts exist.
 
 No Implementation may silently choose these values.
 

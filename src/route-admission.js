@@ -26,6 +26,7 @@ import { CXMSG_STATE_DIR } from "./runtime.js";
 export const ROUTE_BINDINGS_DIR = path.join(CXMSG_STATE_DIR, "route-bindings");
 export const ROUTE_DELIVERIES_DIR = path.join(CXMSG_STATE_DIR, "route-deliveries");
 export const QUARANTINE_DIR = path.join(CXMSG_STATE_DIR, "quarantine");
+export const ROUTE_RECONCILE_GRACE_MS = 30_000;
 
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -308,8 +309,72 @@ function deliveryLockPath(messageId) {
   return path.join(ROUTE_DELIVERIES_DIR, `${validateUuid("logical message id", messageId)}.lock`);
 }
 
-function readRouteDelivery(messageId) {
-  return readJson(deliveryPath(messageId));
+function validRouteDeliveryRecord(record, messageId) {
+  return Boolean(
+    record?.version === 1 &&
+      record.logicalMessageId === messageId &&
+      UUID_PATTERN.test(record.logicalMessageId || "") &&
+      NAME_PATTERN.test(record.from || "") &&
+      NAME_PATTERN.test(record.target || "") &&
+      (record.targetThreadId === undefined ||
+        UUID_PATTERN.test(record.targetThreadId || "")) &&
+      Number.isSafeInteger(record.messageBytes) &&
+      record.messageBytes > 0 &&
+      /^[0-9a-f]{64}$/.test(record.messageSha256 || "") &&
+      record.routeFingerprint === routeFingerprint(record.route ?? null) &&
+      ["admitted", "quarantined"].includes(record.admissionState) &&
+      ["dispatching", "turn_started", "unknown", "quarantined"].includes(
+        record.status,
+      ) &&
+      Number.isFinite(Date.parse(record.createdAt || "")) &&
+      Number.isFinite(Date.parse(record.updatedAt || "")),
+  );
+}
+
+export function routeDeliveryState(messageId) {
+  const filename = deliveryPath(messageId);
+  let metadata;
+  try {
+    metadata = lstatSync(filename);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { state: "missing", record: null };
+    return {
+      state: "invalid",
+      record: null,
+      errorCode: error?.code || "EDELIVERYSTAT",
+    };
+  }
+  if (
+    !metadata.isFile() ||
+    metadata.isSymbolicLink() ||
+    metadata.nlink !== 1 ||
+    metadata.size > MAX_STORED_MESSAGE_BYTES ||
+    (typeof process.getuid === "function" && metadata.uid !== process.getuid()) ||
+    (metadata.mode & 0o077) !== 0
+  ) {
+    return { state: "invalid", record: null, errorCode: "EDELIVERYMETADATA" };
+  }
+  try {
+    const record = JSON.parse(readFileSync(filename, "utf8"));
+    if (!validRouteDeliveryRecord(record, messageId)) {
+      return { state: "invalid", record: null, errorCode: "EDELIVERYSCHEMA" };
+    }
+    return { state: "valid", record };
+  } catch {
+    return { state: "invalid", record: null, errorCode: "EDELIVERYJSON" };
+  }
+}
+
+export function readRouteDelivery(messageId) {
+  return routeDeliveryState(messageId).record;
+}
+
+function requireRouteDelivery(messageId) {
+  const state = routeDeliveryState(messageId);
+  if (state.state !== "valid") {
+    throw new Error(`Route Delivery changed or failed validation: ${messageId}`);
+  }
+  return state.record;
 }
 
 function boundedErrorCode(error) {
@@ -361,7 +426,11 @@ export async function routePeerMessage(
 
   let prepared;
   await withFileLock(deliveryLockPath(logicalMessageId), async () => {
-    const existing = readRouteDelivery(logicalMessageId);
+    const deliveryState = routeDeliveryState(logicalMessageId);
+    if (deliveryState.state === "invalid") {
+      throw new Error(`Route Delivery failed validation: ${logicalMessageId}`);
+    }
+    const existing = deliveryState.record;
     if (existing) {
       if (
         existing.from !== from ||
@@ -377,11 +446,12 @@ export async function routePeerMessage(
 
     const targetBinding = routeBindingState(target);
     const senderBinding = routeBindingState(from);
+    const targetRecord = readSessionRecord(target);
     const decision = admission(
       targetBinding,
       normalizedRoute,
       senderBinding,
-      readSessionRecord(target),
+      targetRecord,
       readSessionRecord(from),
     );
     const now = new Date().toISOString();
@@ -390,6 +460,9 @@ export async function routePeerMessage(
       logicalMessageId,
       from,
       target,
+      ...(targetRecord?.threadId
+        ? { targetThreadId: targetRecord.threadId }
+        : {}),
       messageBytes: Buffer.byteLength(message, "utf8"),
       messageSha256,
       routeFingerprint: fingerprint,
@@ -451,7 +524,7 @@ export async function routePeerMessage(
       route: normalizedRoute,
     });
     const completed = await withFileLock(deliveryLockPath(logicalMessageId), async () => {
-      const current = readRouteDelivery(logicalMessageId);
+      const current = requireRouteDelivery(logicalMessageId);
       return atomicWrite(ROUTE_DELIVERIES_DIR, messageFilename(logicalMessageId), {
         ...current,
         status: "turn_started",
@@ -463,7 +536,7 @@ export async function routePeerMessage(
     return publicOutcome(completed, { result });
   } catch (error) {
     await withFileLock(deliveryLockPath(logicalMessageId), async () => {
-      const current = readRouteDelivery(logicalMessageId);
+      const current = requireRouteDelivery(logicalMessageId);
       atomicWrite(ROUTE_DELIVERIES_DIR, messageFilename(logicalMessageId), {
         ...current,
         status: "unknown",
@@ -473,6 +546,118 @@ export async function routePeerMessage(
     });
     throw error;
   }
+}
+
+export async function reconcileRouteDelivery(
+  logicalMessageId,
+  inspect,
+  {
+    log = writeCoordinationEvent,
+    now = Date.now(),
+    dispatchingGraceMs = ROUTE_RECONCILE_GRACE_MS,
+  } = {},
+) {
+  validateUuid("logical message id", logicalMessageId);
+  let prepared;
+  await withFileLock(deliveryLockPath(logicalMessageId), async () => {
+    const state = routeDeliveryState(logicalMessageId);
+    if (state.state === "missing") {
+      throw new Error(`unknown Route Delivery: ${logicalMessageId}`);
+    }
+    if (state.state === "invalid") {
+      throw new Error(`Route Delivery failed validation: ${logicalMessageId}`);
+    }
+    const record = state.record;
+    if (record.admissionState !== "admitted") {
+      throw new Error("Quarantined Route Deliveries cannot be reconciled or replayed");
+    }
+    if (record.status === "turn_started") {
+      prepared = { terminal: record };
+      return;
+    }
+    if (!record.targetThreadId) {
+      throw new Error(
+        "Legacy Route Delivery lacks pinned target thread identity; replay is forbidden",
+      );
+    }
+    if (!["dispatching", "unknown"].includes(record.status)) {
+      throw new Error(`Route Delivery status cannot be reconciled: ${record.status}`);
+    }
+    if (
+      record.status === "dispatching" &&
+      now - Date.parse(record.updatedAt) < dispatchingGraceMs
+    ) {
+      throw new Error("Route Delivery is still within its active dispatch grace period");
+    }
+    const targetRecord = readSessionRecord(record.target);
+    if (!targetRecord || targetRecord.threadId !== record.targetThreadId) {
+      throw new Error("Route Delivery target identity changed; replay is forbidden");
+    }
+    prepared = { record };
+  });
+  if (prepared.terminal) {
+    return publicOutcome(prepared.terminal, {
+      reconciled: false,
+      reconciliation: "already-confirmed",
+    });
+  }
+
+  const evidence = await inspect({
+    logicalMessageId,
+    target: prepared.record.target,
+    targetThreadId: prepared.record.targetThreadId,
+  });
+  const accepted =
+    evidence?.state === "accepted" && UUID_PATTERN.test(evidence.turnId || "");
+  const reconciledAt = new Date(now).toISOString();
+  const updated = await withFileLock(deliveryLockPath(logicalMessageId), async () => {
+    const state = routeDeliveryState(logicalMessageId);
+    if (state.state !== "valid") {
+      throw new Error(`Route Delivery changed or failed validation: ${logicalMessageId}`);
+    }
+    const current = state.record;
+    if (current.targetThreadId !== prepared.record.targetThreadId) {
+      throw new Error("Route Delivery target identity changed during reconciliation");
+    }
+    if (current.status === "turn_started") return current;
+    if (!["dispatching", "unknown"].includes(current.status)) {
+      throw new Error("Route Delivery state changed during reconciliation");
+    }
+    return atomicWrite(ROUTE_DELIVERIES_DIR, messageFilename(logicalMessageId), {
+      ...current,
+      status: accepted ? "turn_started" : "unknown",
+      ...(accepted
+        ? {
+            delivery: "reconciled",
+            turnId: evidence.turnId,
+            errorCode: null,
+          }
+        : { errorCode: "EACCEPTANCEUNVERIFIED" }),
+      reconciledAt,
+      updatedAt: reconciledAt,
+    });
+  });
+  const confirmed = updated.status === "turn_started";
+  await log({
+    kind: "route-delivery",
+    phase: "reconciliation",
+    correlationId: logicalMessageId,
+    target: updated.target,
+    outcome: confirmed ? "turn_started" : "unknown",
+    errorCode: confirmed ? null : "EACCEPTANCEUNVERIFIED",
+  });
+  return publicOutcome(updated, {
+    reconciled: accepted,
+    reconciliation: accepted
+      ? "accepted"
+      : confirmed
+        ? "concurrent-confirmation"
+        : "not-observed",
+    evidenceComplete: evidence?.complete === true,
+    pagesInspected: Number.isSafeInteger(evidence?.pagesInspected)
+      ? evidence.pagesInspected
+      : 0,
+  });
 }
 
 export function listQuarantine() {

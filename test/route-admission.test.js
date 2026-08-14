@@ -24,6 +24,11 @@ registry.writeSessionRecord({
   threadId: "91345678-1234-4234-8234-123456789abc",
   cwd: path.resolve("."),
 });
+registry.writeSessionRecord({
+  name: "reconcile-worker",
+  threadId: "a7345678-1234-4234-8234-123456789abc",
+  cwd: path.resolve("."),
+});
 
 test.after(() => {
   rmSync(stateDir, { recursive: true, force: true });
@@ -42,6 +47,8 @@ const ids = {
   targetMismatch: "a1345678-1234-4234-8234-123456789abc",
   invalidSenderBinding: "d4345678-1234-4234-8234-123456789abc",
   invalidTargetBinding: "e5345678-1234-4234-8234-123456789abc",
+  reconcileAccepted: "f6345678-1234-4234-8234-123456789abc",
+  reconcileUnknown: "a7345678-2234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -348,4 +355,104 @@ test("an existing malformed target binding fails closed before context injection
   );
   assert.equal(outcome.reason, "binding_invalid");
   assert.equal(dispatches, 0);
+});
+
+test("Route Delivery reconciliation strengthens only positive App Server acceptance evidence", async () => {
+  const privateMessage = "reconciliation body must not enter logs";
+  await assert.rejects(
+    routes.routePeerMessage(
+      {
+        from: "coordinator",
+        target: "reconcile-worker",
+        message: privateMessage,
+        logicalMessageId: ids.reconcileAccepted,
+      },
+      async () => {
+        const error = new Error("connection closed after an uncertain write");
+        error.code = "EPIPE";
+        throw error;
+      },
+    ),
+    /uncertain write/,
+  );
+  const uncertain = routes.readRouteDelivery(ids.reconcileAccepted);
+  assert.equal(uncertain.status, "unknown");
+  assert.equal(
+    uncertain.targetThreadId,
+    "a7345678-1234-4234-8234-123456789abc",
+  );
+
+  const events = [];
+  const accepted = await routes.reconcileRouteDelivery(
+    ids.reconcileAccepted,
+    async ({ logicalMessageId, targetThreadId }) => {
+      assert.equal(logicalMessageId, ids.reconcileAccepted);
+      assert.equal(targetThreadId, uncertain.targetThreadId);
+      return {
+        state: "accepted",
+        turnId: "b8345678-1234-4234-8234-123456789abc",
+        pagesInspected: 2,
+      };
+    },
+    { log: async (event) => events.push(event) },
+  );
+  assert.equal(accepted.status, "turn_started");
+  assert.equal(accepted.delivery, "reconciled");
+  assert.equal(accepted.reconciled, true);
+  assert.equal(accepted.turnId, "b8345678-1234-4234-8234-123456789abc");
+  assert.doesNotMatch(JSON.stringify(events), /reconciliation body/);
+
+  await assert.rejects(
+    routes.routePeerMessage(
+      {
+        from: "coordinator",
+        target: "reconcile-worker",
+        message: "another private body",
+        logicalMessageId: ids.reconcileUnknown,
+      },
+      async () => {
+        throw Object.assign(new Error("uncertain"), { code: "ECONNRESET" });
+      },
+    ),
+    /uncertain/,
+  );
+  const notObserved = await routes.reconcileRouteDelivery(
+    ids.reconcileUnknown,
+    async () => ({
+      state: "not-observed",
+      complete: true,
+      pagesInspected: 1,
+    }),
+    { log: async () => {} },
+  );
+  assert.equal(notObserved.status, "unknown");
+  assert.equal(notObserved.reconciled, false);
+  assert.equal(
+    routes.readRouteDelivery(ids.reconcileUnknown).errorCode,
+    "EACCEPTANCEUNVERIFIED",
+  );
+
+  const fresh = routes.readRouteDelivery(ids.reconcileUnknown);
+  writeFileSync(
+    path.join(routes.ROUTE_DELIVERIES_DIR, `${ids.reconcileUnknown}.json`),
+    `${JSON.stringify(
+      { ...fresh, status: "dispatching", updatedAt: new Date().toISOString() },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  let inspections = 0;
+  await assert.rejects(
+    routes.reconcileRouteDelivery(
+      ids.reconcileUnknown,
+      async () => {
+        inspections += 1;
+        return { state: "accepted" };
+      },
+      { log: async () => {} },
+    ),
+    /active dispatch grace period/,
+  );
+  assert.equal(inspections, 0);
 });

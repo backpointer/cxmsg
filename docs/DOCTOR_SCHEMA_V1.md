@@ -123,6 +123,18 @@ live or Tombstoned Node, but an orphaned Cluster snapshot or missing Node
 identity fails inspection. Cluster Tombstones contain no members, paths,
 endpoints, Conversation state, wake policy, or authority. Doctor never fills a
 version gap, changes membership, resurrects a Cluster, or deletes history.
+One valid next snapshot beyond a matching live head is reported as optional
+`ECLUSTERMEMBERSHIPREDO` with an explicit `directory cluster recover`
+remediation; Doctor does not perform the redo. At 1,024 retained membership
+versions, `ECLUSTERMEMBERSHIPRETENTION` requests operator policy review without
+purging files.
+
+Route Delivery findings pin new records to the registered target thread.
+`dispatching` and `unknown` records produce optional `EROUTEUNCONFIRMED`
+findings and recommend positive reconciliation, never replay. A legacy record
+without the pinned thread reports `EROUTELEGACYIDENTITY`; a replacement target
+reports `EROUTETARGETIDENTITY`. Doctor reads no message body and does not call
+the App Server reconciliation path itself.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.

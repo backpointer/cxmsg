@@ -770,6 +770,58 @@ function assertClusterMembershipHead(cluster) {
   return head;
 }
 
+function validClusterMembershipTransition(current, next) {
+  if (
+    next.clusterId !== current.clusterId ||
+    next.membershipVersion !== current.membershipVersion + 1 ||
+    Date.parse(next.createdAt) < Date.parse(current.updatedAt)
+  ) {
+    return false;
+  }
+  const before = new Set(current.members);
+  const after = new Set(next.members);
+  const added = next.members.filter((member) => !before.has(member));
+  const removed = current.members.filter((member) => !after.has(member));
+  return next.changeKind === "member-added"
+    ? added.length === 1 &&
+        removed.length === 0 &&
+        added[0] === next.changedNodeKey
+    : next.changeKind === "member-removed"
+      ? removed.length === 1 &&
+        added.length === 0 &&
+        removed[0] === next.changedNodeKey
+      : false;
+}
+
+function recoverClusterMembershipLocked(current) {
+  assertClusterMembershipHead(current);
+  const nextVersion = current.membershipVersion + 1;
+  const nextPath = clusterMembershipPath(current.clusterId, nextVersion);
+  if (!existsSync(nextPath)) return { record: current, recovered: false };
+  const next = readClusterMembership(current.clusterId, nextVersion);
+  if (!next) {
+    throw new Error("Cluster orphan membership snapshot failed schema validation");
+  }
+  if (existsSync(clusterMembershipPath(current.clusterId, nextVersion + 1))) {
+    throw new Error("Cluster has multiple unapplied membership snapshots");
+  }
+  if (!validClusterMembershipTransition(current, next)) {
+    throw new Error("Cluster orphan membership snapshot has an invalid transition");
+  }
+  for (const member of next.members) {
+    if (!nodeOrTombstone(member)) {
+      throw new Error("Cluster orphan membership snapshot references a missing Node");
+    }
+  }
+  const record = atomicWrite(CLUSTERS_DIR, `${current.clusterId}.json`, {
+    ...current,
+    membershipVersion: next.membershipVersion,
+    members: next.members,
+    updatedAt: next.createdAt,
+  });
+  return { record, recovered: true };
+}
+
 function resolveCluster(identity) {
   const byId = UUID_PATTERN.test(identity || "") ? readCluster(identity) : null;
   const byRouting = findClusterByRoutingId(identity);
@@ -813,11 +865,31 @@ export async function ensureCluster({
       throw new Error("Cluster ID already belongs to another routing identity");
     }
     if (byRouting) {
-      assertClusterMembershipHead(byRouting);
-      return byRouting;
+      return recoverClusterMembershipLocked(byRouting).record;
     }
     if (existsSync(clusterPath(clusterId))) {
       throw new Error("Cluster record exists but failed schema validation");
+    }
+    const initialPath = clusterMembershipPath(clusterId, 1);
+    if (existsSync(initialPath)) {
+      const initial = readClusterMembership(clusterId, 1);
+      if (
+        !initial ||
+        initial.changeKind !== "created" ||
+        initial.members.length !== 0 ||
+        existsSync(clusterMembershipPath(clusterId, 2))
+      ) {
+        throw new Error("Cluster initial orphan snapshot cannot be recovered");
+      }
+      return atomicWrite(CLUSTERS_DIR, `${clusterId}.json`, {
+        version: 1,
+        clusterId,
+        routingId,
+        membershipVersion: 1,
+        members: [],
+        createdAt: initial.createdAt,
+        updatedAt: initial.createdAt,
+      });
     }
     const now = new Date().toISOString();
     writeClusterMembership({
@@ -846,11 +918,11 @@ async function changeClusterMember({ cluster, memberNodeKey, add }) {
   ensureDirectory(CLUSTERS_DIR);
   ensureDirectory(CLUSTER_MEMBERSHIPS_DIR);
   return withFileLock(path.join(NODE_DIRECTORY_DIR, "clusters.lock"), async () => {
-    const current = resolveCluster(cluster);
+    let current = resolveCluster(cluster);
     if (existsSync(clusterTombstonePath(current.clusterId))) {
       throw new Error("Cluster lifecycle conflicts with a Tombstone");
     }
-    assertClusterMembershipHead(current);
+    current = recoverClusterMembershipLocked(current).record;
     if (add) {
       const live = readNode(parsed.runtimeKind, parsed.nativeId);
       const retired = readNodeTombstone(parsed.runtimeKind, parsed.nativeId);
@@ -899,6 +971,18 @@ export async function removeClusterMember({ cluster, memberNodeKey }) {
   return changeClusterMember({ cluster, memberNodeKey, add: false });
 }
 
+export async function recoverClusterMembership(identity) {
+  ensureDirectory(CLUSTERS_DIR);
+  ensureDirectory(CLUSTER_MEMBERSHIPS_DIR);
+  return withFileLock(path.join(NODE_DIRECTORY_DIR, "clusters.lock"), async () => {
+    const current = resolveCluster(identity);
+    if (existsSync(clusterTombstonePath(current.clusterId))) {
+      throw new Error("Cluster lifecycle conflicts with a Tombstone");
+    }
+    return recoverClusterMembershipLocked(current);
+  });
+}
+
 export async function tombstoneCluster(
   identity,
   { reason = "explicit", missingOk = false } = {},
@@ -929,7 +1013,7 @@ export async function tombstoneCluster(
       if (missingOk && /^unknown Cluster:/.test(error.message)) return null;
       throw error;
     }
-    assertClusterMembershipHead(current);
+    current = recoverClusterMembershipLocked(current).record;
     if (existsSync(clusterTombstonePath(current.clusterId))) {
       throw new Error("Cluster Tombstone exists but failed schema validation");
     }

@@ -8,9 +8,15 @@ import test from "node:test";
 const stateDir = mkdtempSync(path.join(os.tmpdir(), "cxmsg-route-cli-"));
 process.env.CXMSG_STATE_DIR = stateDir;
 const registry = await import(`../src/registry.js?route-cli=${Date.now()}`);
+const routes = await import(`../src/route-admission.js?route-cli=${Date.now()}`);
 registry.writeSessionRecord({
   name: "worker",
   threadId: "71345678-1234-4234-8234-123456789abc",
+  cwd: path.resolve("."),
+});
+registry.writeSessionRecord({
+  name: "terminal-worker",
+  threadId: "b8345678-1234-4234-8234-123456789abc",
   cwd: path.resolve("."),
 });
 
@@ -112,4 +118,28 @@ test("CLI reports an existing invalid binding and send fails closed", () => {
   assert.equal(sent.status, 1);
   assert.match(sent.stderr, /quarantined .*binding_invalid/);
   assert.doesNotMatch(sent.stderr, /App Server/);
+});
+
+test("route reconcile reports already-confirmed Delivery without starting App Server", async () => {
+  const logicalMessageId = "c9345678-1234-4234-8234-123456789abc";
+  await routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "terminal-worker",
+      message: "already delivered",
+      logicalMessageId,
+    },
+    async () => ({
+      delivery: "started",
+      turnId: "da345678-1234-4234-8234-123456789abc",
+    }),
+    { log: async () => {} },
+  );
+
+  const reconciled = cxmsg("route", "reconcile", logicalMessageId, "--json");
+  assert.equal(reconciled.status, 0, reconciled.stderr);
+  const outcome = JSON.parse(reconciled.stdout);
+  assert.equal(outcome.status, "turn_started");
+  assert.equal(outcome.reconciled, false);
+  assert.equal(outcome.reconciliation, "already-confirmed");
 });

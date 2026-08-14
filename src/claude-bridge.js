@@ -59,7 +59,7 @@ import {
 } from "./socket-probe.js";
 
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
-export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 7;
+export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 8;
 
 function bridgeRecordPath(target) {
   return path.join(CLAUDE_BRIDGES_DIR, `${validateSessionName(target)}.json`);

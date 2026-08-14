@@ -103,6 +103,14 @@ replayed automatically.
 cross-method deduplication must still be verified against every supported Codex
 version and remains defense in depth rather than the only duplicate guard.
 
+The pre-Ledger recovery command is deliberately narrower than retry:
+`cxmsg route reconcile <logical-message-id>` searches bounded summary turns for
+an exact `userMessage.clientId`. A match records positive `turn_started`
+evidence without starting or steering a turn. No match remains `unknown`, even
+when the scanned window reaches its end, because history compaction and future
+protocol changes prevent absence from proving rejection. Blind replay remains
+forbidden.
+
 ### Scheduled Peer Message
 
 The initial command forms are:

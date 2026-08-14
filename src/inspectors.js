@@ -38,6 +38,7 @@ const PENDING_JOB_STATES = new Set([
 const ENDPOINT_HISTORY_LIMIT = 64;
 const ENDPOINT_TRANSPORT_LIMIT = 16;
 const CLUSTER_MEMBER_LIMIT = 256;
+const CLUSTER_MEMBERSHIP_HISTORY_WARN_LIMIT = 1024;
 const ENDPOINT_STATUSES = new Set([
   "reachable",
   "external-writer",
@@ -406,6 +407,8 @@ function validRouteDelivery(record, stem) {
         UUID_PATTERN.test(record.logicalMessageId || "") &&
         SESSION_PATTERN.test(record.from || "") &&
         SESSION_PATTERN.test(record.target || "") &&
+        (record.targetThreadId === undefined ||
+          UUID_PATTERN.test(record.targetThreadId || "")) &&
         /^[0-9a-f]{64}$/.test(record.messageSha256 || "") &&
         record.routeFingerprint === expectedFingerprint &&
         ["admitted", "quarantined"].includes(record.admissionState) &&
@@ -633,6 +636,29 @@ function validClusterMembers(members) {
       members.every((member) => nodeKeyPattern.test(member)) &&
       members.every((member, index) => index === 0 || members[index - 1] < member),
   );
+}
+
+function clusterMembershipTransitionMatches(current, next) {
+  if (
+    next?.membershipVersion !== current?.membershipVersion + 1 ||
+    Date.parse(next?.createdAt || "") <
+      Date.parse(current?.updatedAt || current?.createdAt || "")
+  ) {
+    return false;
+  }
+  const before = new Set(current.members);
+  const after = new Set(next.members);
+  const added = next.members.filter((member) => !before.has(member));
+  const removed = current.members.filter((member) => !after.has(member));
+  return next.changeKind === "member-added"
+    ? added.length === 1 &&
+        removed.length === 0 &&
+        added[0] === next.changedNodeKey
+    : next.changeKind === "member-removed"
+      ? removed.length === 1 &&
+        added.length === 0 &&
+        removed[0] === next.changedNodeKey
+      : false;
 }
 
 function validDirectoryCluster(record, stem) {
@@ -1104,21 +1130,80 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
     ) {
       consistent = false;
     }
+    const liveCluster = liveClusters.get(clusterId);
+    const headSnapshot = liveCluster
+      ? history.find(
+          (snapshot) =>
+            snapshot.membershipVersion === liveCluster.membershipVersion,
+        )
+      : null;
+    const redoSnapshot = liveCluster
+      ? history.find(
+          (snapshot) =>
+            snapshot.membershipVersion === liveCluster.membershipVersion + 1,
+        )
+      : null;
+    const recoverableRedo = Boolean(
+      liveCluster &&
+        history.length === liveCluster.membershipVersion + 1 &&
+        history.every(
+          (snapshot, index) => snapshot.membershipVersion === index + 1,
+        ) &&
+        headSnapshot &&
+        JSON.stringify(headSnapshot.members) ===
+          JSON.stringify(liveCluster.members) &&
+        headSnapshot.createdAt === liveCluster.updatedAt &&
+        redoSnapshot &&
+        clusterMembershipTransitionMatches(liveCluster, redoSnapshot) &&
+        redoSnapshot.members.every((member) => identities.has(member)) &&
+        !existsSync(
+          path.join(
+            stateDir,
+            "directory",
+            "cluster-memberships",
+            `${clusterId}--${String(liveCluster.membershipVersion + 2).padStart(10, "0")}.json`,
+          ),
+        ),
+    );
     checks.push(
       diagnosticCheck({
         id: `directory-cluster-memberships.history.${safeLabel(clusterId)}`,
         scope: "directory-cluster-memberships",
-        status: consistent ? "pass" : "fail",
+        status: consistent ? "pass" : recoverableRedo ? "warn" : "fail",
         summary: consistent
           ? "Cluster membership history is complete, ordered, and identity-resolved"
+          : recoverableRedo
+            ? "Cluster has one deterministic membership snapshot awaiting head redo"
           : "Cluster membership history conflicts with version, transition, or Node reference invariants",
         verification: "records",
-        errorCode: consistent ? null : "ECLUSTERMEMBERSHIP",
+        errorCode: consistent
+          ? null
+          : recoverableRedo
+            ? "ECLUSTERMEMBERSHIPREDO"
+            : "ECLUSTERMEMBERSHIP",
         remediation: consistent
           ? null
-          : "Inspect the owner-only immutable snapshots; Doctor will not synthesize or rewrite membership history",
+          : recoverableRedo
+            ? "Run cxmsg directory cluster recover for this Cluster; Doctor remains read-only"
+            : "Inspect the owner-only immutable snapshots; Doctor will not synthesize or rewrite membership history",
+        required: !recoverableRedo,
       }),
     );
+    if (history.length >= CLUSTER_MEMBERSHIP_HISTORY_WARN_LIMIT) {
+      checks.push(
+        diagnosticCheck({
+          id: `directory-cluster-memberships.retention.${safeLabel(clusterId)}`,
+          scope: "directory-cluster-memberships",
+          status: "warn",
+          summary: "Cluster membership history reached the operator review threshold",
+          verification: "bounded",
+          errorCode: "ECLUSTERMEMBERSHIPRETENTION",
+          remediation:
+            "Review retention before further high-frequency membership churn; cxmsg does not purge immutable history automatically",
+          required: false,
+        }),
+      );
+    }
   }
   const predecessorBySuccessor = new Map();
   for (const relation of successors.records) {
@@ -1304,6 +1389,48 @@ export function inspectRouteState({ stateDir, sessions = [] } = {}) {
           : "Re-bind the intended registered session; do not release quarantined messages automatically",
       }),
     );
+  }
+  for (const delivery of deliveries.records) {
+    if (delivery.targetThreadId) {
+      const target = sessionsByName.get(delivery.target);
+      const identityMatches = target?.threadId === delivery.targetThreadId;
+      checks.push(
+        diagnosticCheck({
+          id: `route-deliveries.target.${safeLabel(delivery.logicalMessageId)}`,
+          scope: "route-deliveries",
+          status: identityMatches ? "pass" : "fail",
+          summary: identityMatches
+            ? "Route Delivery retains its registered target thread identity"
+            : "Route Delivery target no longer matches its registered thread identity",
+          verification: "registry",
+          errorCode: identityMatches ? null : "EROUTETARGETIDENTITY",
+          remediation: identityMatches
+            ? null
+            : "Do not replay this Delivery; reconciliation is bound to the original target thread",
+        }),
+      );
+    }
+    if (["dispatching", "unknown"].includes(delivery.status)) {
+      const legacyIdentity = !delivery.targetThreadId;
+      checks.push(
+        diagnosticCheck({
+          id: `route-deliveries.reconcile.${safeLabel(delivery.logicalMessageId)}`,
+          scope: "route-deliveries",
+          status: "warn",
+          summary: legacyIdentity
+            ? "Unconfirmed legacy Route Delivery lacks pinned target identity"
+            : "Route Delivery requires positive App Server acceptance reconciliation",
+          verification: "records",
+          errorCode: legacyIdentity
+            ? "EROUTELEGACYIDENTITY"
+            : "EROUTEUNCONFIRMED",
+          remediation: legacyIdentity
+            ? "Do not replay this legacy Delivery; create a new logical message only after operator review"
+            : `Run cxmsg route reconcile ${delivery.logicalMessageId}; absence is not replay permission`,
+          required: false,
+        }),
+      );
+    }
   }
   checks.push(
     diagnosticCheck({

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  findClientUserMessage,
   findThreadTurn,
   readThreadForInput,
   readThreadMetadata,
@@ -109,6 +110,91 @@ test("turn lookup paginates bounded summary pages", async () => {
       },
     ],
   );
+});
+
+test("client message reconciliation reports only positive bounded acceptance evidence", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      if (!params.cursor) {
+        return {
+          data: [
+            {
+              id: "turn-newer",
+              items: [{ type: "agentMessage", id: "agent-1", text: "private" }],
+            },
+          ],
+          nextCursor: "page-2",
+        };
+      }
+      return {
+        data: [
+          {
+            id: "turn-accepted",
+            items: [
+              {
+                type: "userMessage",
+                id: "user-1",
+                clientId: "logical-message-1",
+                content: [{ type: "text", text: "private body" }],
+              },
+            ],
+          },
+        ],
+        nextCursor: null,
+      };
+    },
+  };
+
+  const accepted = await findClientUserMessage(
+    client,
+    "thread-1",
+    "logical-message-1",
+    { pageSize: 1, maxPages: 2 },
+  );
+  assert.deepEqual(accepted, {
+    state: "accepted",
+    turnId: "turn-accepted",
+    pagesInspected: 2,
+  });
+  assert.deepEqual(calls, [
+    {
+      method: "thread/turns/list",
+      params: {
+        threadId: "thread-1",
+        limit: 1,
+        sortDirection: "desc",
+        itemsView: "summary",
+      },
+    },
+    {
+      method: "thread/turns/list",
+      params: {
+        threadId: "thread-1",
+        limit: 1,
+        sortDirection: "desc",
+        itemsView: "summary",
+        cursor: "page-2",
+      },
+    },
+  ]);
+
+  const incomplete = await findClientUserMessage(
+    {
+      async request() {
+        return { data: [], nextCursor: "more" };
+      },
+    },
+    "thread-1",
+    "missing",
+    { pageSize: 1, maxPages: 1 },
+  );
+  assert.deepEqual(incomplete, {
+    state: "not-observed",
+    complete: false,
+    pagesInspected: 1,
+  });
 });
 
 test("unloaded input threads resume without hydrating turn history", async () => {

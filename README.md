@@ -83,11 +83,16 @@ turn is started or steered. Inspect redacted metadata only with:
 ```bash
 cxmsg route show worker --json
 cxmsg route list --json
+cxmsg route reconcile <logical-message-id> --json
 cxmsg quarantine list --json
 ```
 
-There is intentionally no automatic quarantine release, retry, reroute, or
-permission effect. Reusing the same `logical_message_id` with identical
+There is intentionally no automatic quarantine release, replay, reroute, or
+permission effect. `route reconcile` starts no model turn: it scans a bounded
+App Server turn window for a `userMessage.clientId` exactly matching the
+Logical Message ID. Positive evidence strengthens `dispatching` or `unknown`
+to `turn_started`. Missing or truncated evidence remains `unknown` and is never
+permission to retry. Reusing the same `logical_message_id` with identical
 sender, target, route, and body is a no-op after its first dispatch attempt;
 reusing it with different content fails as an idempotency conflict. Targets
 without an explicit binding retain legacy unscoped-send compatibility during
@@ -143,6 +148,7 @@ cxmsg directory node show codex <thread-id> --history --json
 cxmsg directory cluster ensure release-reviewers --json
 cxmsg directory cluster member add release-reviewers codex <thread-id>
 cxmsg directory cluster show release-reviewers --history --json
+cxmsg directory cluster recover release-reviewers --json
 cxmsg directory clusters --json
 cxmsg directory cluster tombstone release-reviewers --reason group-retired
 cxmsg directory cluster-tombstones --json
@@ -204,6 +210,19 @@ advance the version. A live Cluster can add only live Nodes, while existing
 history may continue to reference Node Tombstones. Removing a Cluster creates
 a reduced Tombstone and retains its membership snapshots for later graph
 history.
+
+Snapshot-first writes have one recoverable crash window: an immutable next
+version can exist before the current Cluster head advances. Cluster mutation
+and Tombstoning deterministically redo exactly one valid next snapshot while
+holding the Cluster lock; `directory cluster recover` exposes the same bounded
+operation explicitly. Multiple, malformed, non-contiguous, or identity-broken
+snapshots remain fail-closed. Doctor stays read-only and reports the single
+redo case separately. At 1,024 retained versions Doctor warns for operator
+retention review, but cxmsg never purges immutable membership automatically.
+
+A Cluster Tombstone permanently reserves both its stable UUID and routing
+label. Creating another Cluster with the retired label is intentionally
+rejected rather than interpreted as identity reuse.
 
 Cluster membership is organizational metadata only. It does not create a
 Conversation, route, transport reachability, wake, grant, permission, approval,

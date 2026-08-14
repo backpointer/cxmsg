@@ -127,6 +127,7 @@ import {
   readExecutionThread,
   readCluster,
   readNode,
+  recoverClusterMembership,
   removeClusterMember,
   tombstoneCluster,
   tombstoneNode,
@@ -135,11 +136,15 @@ import {
 import {
   listQuarantine,
   listRouteBindings,
+  reconcileRouteDelivery,
   routeBindingState,
   routePeerMessage,
   writeRouteBinding,
 } from "../src/route-admission.js";
-import { readThreadMetadata } from "../src/thread-activity.js";
+import {
+  findClientUserMessage,
+  readThreadMetadata,
+} from "../src/thread-activity.js";
 import {
   listSessionRecords,
   readSessionRecord,
@@ -180,6 +185,7 @@ function usage(exitCode = 0) {
   cxmsg route bind <session> --project <id> --role <role>
   cxmsg route show <session> [--json]
   cxmsg route list [--json]
+  cxmsg route reconcile <logical-message-id> [--json]
   cxmsg quarantine list [--json]
   cxmsg directory project ensure <routing-id> <root> [--json]
   cxmsg directory sync --project <routing-id> [--codex-only|--claude-only] [--json]
@@ -187,6 +193,7 @@ function usage(exitCode = 0) {
   cxmsg directory cluster ensure <routing-id> [--json]
   cxmsg directory cluster show <routing-id|cluster-id> [--json] [--members] [--history]
   cxmsg directory cluster member <add|remove> <routing-id|cluster-id> <codex|claude> <native-id> [--json] [--members]
+  cxmsg directory cluster recover <routing-id|cluster-id> [--json] [--members]
   cxmsg directory cluster tombstone <routing-id|cluster-id> [--reason <id>] [--json]
   cxmsg directory clusters [--json] [--members]
   cxmsg directory cluster-tombstones [--json]
@@ -1850,6 +1857,29 @@ async function commandRoute(args) {
     );
     return;
   }
+  if (operation === "reconcile") {
+    const logicalMessageId = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (!logicalMessageId || args.some((value) => value !== "--json")) {
+      throw new Error("route reconcile requires one logical message ID");
+    }
+    const outcome = await reconcileRouteDelivery(
+      logicalMessageId,
+      async ({ targetThreadId }) => {
+        await ensureServer();
+        return withAppServer((client) =>
+          findClientUserMessage(client, targetThreadId, logicalMessageId),
+        );
+      },
+    );
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(outcome, null, 2)}\n`
+        : `route ${outcome.logicalMessageId} ${outcome.status} (${outcome.reconciliation})\n`,
+    );
+    if (outcome.status === "unknown") process.exitCode = 1;
+    return;
+  }
   usage(2);
 }
 
@@ -2030,6 +2060,28 @@ async function commandDirectory(args) {
         jsonOutput
           ? `${JSON.stringify(output, null, 2)}\n`
           : `cluster ${output.routingId} v${output.membershipVersion} members=${output.memberCount}\n`,
+      );
+      return;
+    }
+    if (clusterOperation === "recover") {
+      const identity = args.shift();
+      const jsonOutput = args.includes("--json");
+      const includeMembers = args.includes("--members");
+      if (
+        !identity ||
+        args.some((value) => !["--json", "--members"].includes(value))
+      ) {
+        usage(2);
+      }
+      const recovered = await recoverClusterMembership(identity);
+      const output = {
+        recovered: recovered.recovered,
+        cluster: publicCluster(recovered.record, { includeMembers }),
+      };
+      process.stdout.write(
+        jsonOutput
+          ? `${JSON.stringify(output, null, 2)}\n`
+          : `${output.recovered ? "recovered" : "consistent"} ${output.cluster.routingId} v${output.cluster.membershipVersion}\n`,
       );
       return;
     }

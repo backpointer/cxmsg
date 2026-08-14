@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -129,6 +129,37 @@ test("Directory CLI manages explicit Cluster membership and private history", ()
   assert.equal(added.status, 0, added.stderr);
   assert.deepEqual(JSON.parse(added.stdout).members, [`codex:${threadId}`]);
 
+  writeFileSync(
+    path.join(
+      directory.CLUSTER_MEMBERSHIPS_DIR,
+      `${cluster.clusterId}--0000000003.json`,
+    ),
+    `${JSON.stringify(
+      {
+        version: 1,
+        clusterId: cluster.clusterId,
+        membershipVersion: 3,
+        members: [],
+        changeKind: "member-removed",
+        changedNodeKey: `codex:${threadId}`,
+        createdAt: new Date().toISOString(),
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  const recovered = cxmsg(
+    "directory",
+    "cluster",
+    "recover",
+    "hermes-auditors",
+    "--json",
+  );
+  assert.equal(recovered.status, 0, recovered.stderr);
+  assert.equal(JSON.parse(recovered.stdout).recovered, true);
+  assert.equal(JSON.parse(recovered.stdout).cluster.membershipVersion, 3);
+
   const hidden = cxmsg(
     "directory",
     "cluster",
@@ -160,7 +191,7 @@ test("Directory CLI manages explicit Cluster membership and private history", ()
     "--json",
   );
   assert.equal(retired.status, 0, retired.stderr);
-  assert.equal(JSON.parse(retired.stdout).lastMembershipVersion, 2);
+  assert.equal(JSON.parse(retired.stdout).lastMembershipVersion, 3);
   assert.equal("members" in JSON.parse(retired.stdout), false);
   const tombstones = cxmsg("directory", "cluster-tombstones", "--json");
   assert.equal(tombstones.status, 0, tombstones.stderr);

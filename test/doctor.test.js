@@ -241,6 +241,21 @@ test("Route Inspector checks binding identity and redacts quarantined bodies", a
     const messageId = "7ddaa4e0-fa31-454e-a37e-a37f8807f0e7";
     const message = "private quarantined body";
     const digest = createHash("sha256").update(message).digest("hex");
+    await writeJson(path.join(root, "route-deliveries", `${messageId}.json`), {
+      version: 1,
+      logicalMessageId: messageId,
+      from: "coordinator",
+      target: "worker",
+      targetThreadId: THREAD_ID,
+      messageSha256: digest,
+      routeFingerprint: createHash("sha256")
+        .update(JSON.stringify(null))
+        .digest("hex"),
+      route: null,
+      admissionState: "admitted",
+      admissionReason: "legacy-unbound",
+      status: "unknown",
+    });
     await writeJson(path.join(root, "quarantine", `${messageId}.json`), {
       version: 1,
       logicalMessageId: messageId,
@@ -263,6 +278,12 @@ test("Route Inspector checks binding identity and redacts quarantined bodies", a
     assert.equal(
       checks.find((check) => check.id === "quarantine.records.count").status,
       "warn",
+    );
+    assert.ok(
+      checks.some(
+        (check) =>
+          check.errorCode === "EROUTEUNCONFIRMED" && check.status === "warn",
+      ),
     );
     assert.doesNotMatch(JSON.stringify(checks), /private quarantined body/);
   } finally {
@@ -490,11 +511,33 @@ test("Node Directory Inspector reports Cluster lifecycle and membership gaps wit
     const clusters = path.join(root, "directory", "clusters");
     const memberships = path.join(root, "directory", "cluster-memberships");
     const tombstones = path.join(root, "directory", "tombstones", "clusters");
-    for (const directory of [clusters, memberships, tombstones]) {
+    const projects = path.join(root, "directory", "projects");
+    const nodes = path.join(root, "directory", "nodes");
+    for (const directory of [clusters, memberships, tombstones, projects, nodes]) {
       await fs.mkdir(directory, { recursive: true, mode: 0o700 });
     }
     const clusterId = "f2345678-1234-4234-8234-123456789abc";
     const orphanId = "a3345678-1234-4234-8234-123456789abc";
+    const recoverableId = "b4345678-1234-4234-8234-123456789abc";
+    const projectId = "c5345678-1234-4234-8234-123456789abc";
+    const nodeId = "d6345678-1234-4234-8234-123456789abc";
+    await writeJson(path.join(projects, `${projectId}.json`), {
+      version: 1,
+      projectId,
+      routingId: "recovery-project",
+      discovery: { kind: "canonical-root", key: "/private/recovery-project" },
+      rootAliases: [{ path: "/private/recovery-project" }],
+    });
+    await writeJson(path.join(nodes, `codex--${nodeId}.json`), {
+      version: 1,
+      nodeKey: `codex:${nodeId}`,
+      runtimeKind: "codex",
+      nativeId: nodeId,
+      projectId,
+      aliases: [{ value: "recovery-node" }],
+      selectedEndpoints: {},
+      endpointHistory: [],
+    });
     await writeJson(path.join(clusters, `${clusterId}.json`), {
       version: 1,
       clusterId,
@@ -534,12 +577,55 @@ test("Node Directory Inspector reports Cluster lifecycle and membership gaps wit
         createdAt: "2026-08-14T00:00:00.000Z",
       },
     );
+    await writeJson(path.join(clusters, `${recoverableId}.json`), {
+      version: 1,
+      clusterId: recoverableId,
+      routingId: "recoverable-cluster",
+      membershipVersion: 1,
+      members: [],
+      createdAt: "2026-08-14T00:00:00.000Z",
+      updatedAt: "2026-08-14T00:00:00.000Z",
+    });
+    await writeJson(
+      path.join(memberships, `${recoverableId}--0000000001.json`),
+      {
+        version: 1,
+        clusterId: recoverableId,
+        membershipVersion: 1,
+        members: [],
+        changeKind: "created",
+        createdAt: "2026-08-14T00:00:00.000Z",
+      },
+    );
+    await writeJson(
+      path.join(memberships, `${recoverableId}--0000000002.json`),
+      {
+        version: 1,
+        clusterId: recoverableId,
+        membershipVersion: 2,
+        members: [`codex:${nodeId}`],
+        changeKind: "member-added",
+        changedNodeKey: `codex:${nodeId}`,
+        createdAt: "2026-08-14T00:01:00.000Z",
+      },
+    );
 
-    const checks = inspectNodeDirectory({ stateDir: root });
+    const checks = inspectNodeDirectory({
+      stateDir: root,
+      sessions: [{ name: "recovery-node", threadId: nodeId }],
+    });
     assert.ok(
       checks.some(
         (check) =>
           check.errorCode === "ECLUSTERLIFECYCLE" && check.status === "fail",
+      ),
+    );
+    assert.ok(
+      checks.some(
+        (check) =>
+          check.errorCode === "ECLUSTERMEMBERSHIPREDO" &&
+          check.status === "warn" &&
+          check.required === false,
       ),
     );
     assert.ok(

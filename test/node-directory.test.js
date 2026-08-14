@@ -33,6 +33,7 @@ const otherProjectId = "72345678-1234-4234-8234-123456789abc";
 const otherNodeId = "82345678-1234-4234-8234-123456789abc";
 const reviewClusterId = "d3345678-1234-4234-8234-123456789abc";
 const releaseClusterId = "e3345678-1234-4234-8234-123456789abc";
+const initialRecoveryClusterId = "f6345678-1234-4234-8234-123456789abc";
 const discovery = (root) => ({
   kind: "canonical-root",
   key: path.resolve(root),
@@ -610,14 +611,43 @@ test("Clusters retain explicit versioned membership without creating authority",
     /immutable snapshot history/,
   );
   writeFileSync(releaseHeadPath, `${JSON.stringify(releaseHead, null, 2)}\n`);
+  const orphanTime = new Date().toISOString();
+  writeFileSync(
+    path.join(
+      directory.CLUSTER_MEMBERSHIPS_DIR,
+      `${releaseClusterId}--0000000004.json`,
+    ),
+    `${JSON.stringify(
+      {
+        version: 1,
+        clusterId: releaseClusterId,
+        membershipVersion: 4,
+        members: [`codex:${successorNodeId}`],
+        changeKind: "member-removed",
+        changedNodeKey: `codex:${nodeId}`,
+        createdAt: orphanTime,
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  const recovered = await directory.recoverClusterMembership(releaseClusterId);
+  assert.equal(recovered.recovered, true);
+  assert.equal(recovered.record.membershipVersion, 4);
+  assert.deepEqual(recovered.record.members, [`codex:${successorNodeId}`]);
+  assert.equal(
+    (await directory.recoverClusterMembership(releaseClusterId)).recovered,
+    false,
+  );
   const retired = await directory.tombstoneCluster("release-gate", {
     reason: "group-retired",
   });
-  assert.equal(retired.lastMembershipVersion, 3);
+  assert.equal(retired.lastMembershipVersion, 4);
   assert.equal("members" in retired, false);
   assert.equal("permissions" in retired, false);
   assert.equal(directory.readCluster(releaseClusterId), null);
-  assert.equal(directory.listClusterMemberships(releaseClusterId).length, 3);
+  assert.equal(directory.listClusterMemberships(releaseClusterId).length, 4);
   assert.equal(statSync(directory.CLUSTERS_DIR).mode & 0o777, 0o700);
   assert.equal(statSync(directory.CLUSTER_MEMBERSHIPS_DIR).mode & 0o777, 0o700);
   assert.equal(statSync(directory.CLUSTER_TOMBSTONES_DIR).mode & 0o777, 0o700);
@@ -629,6 +659,60 @@ test("Clusters retain explicit versioned membership without creating authority",
     }),
     /automatic reactivation is forbidden/,
   );
+
+  const initialTime = new Date().toISOString();
+  writeFileSync(
+    path.join(
+      directory.CLUSTER_MEMBERSHIPS_DIR,
+      `${initialRecoveryClusterId}--0000000001.json`,
+    ),
+    `${JSON.stringify(
+      {
+        version: 1,
+        clusterId: initialRecoveryClusterId,
+        membershipVersion: 1,
+        members: [],
+        changeKind: "created",
+        createdAt: initialTime,
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  const initialRecovered = await directory.ensureCluster({
+    routingId: "initial-recovery",
+    clusterId: initialRecoveryClusterId,
+  });
+  assert.equal(initialRecovered.createdAt, initialTime);
+  assert.equal(initialRecovered.membershipVersion, 1);
+  const initialNextTime = new Date().toISOString();
+  writeFileSync(
+    path.join(
+      directory.CLUSTER_MEMBERSHIPS_DIR,
+      `${initialRecoveryClusterId}--0000000002.json`,
+    ),
+    `${JSON.stringify(
+      {
+        version: 1,
+        clusterId: initialRecoveryClusterId,
+        membershipVersion: 2,
+        members: [`codex:${successorNodeId}`],
+        changeKind: "member-added",
+        changedNodeKey: `codex:${successorNodeId}`,
+        createdAt: initialNextTime,
+      },
+      null,
+      2,
+    )}\n`,
+    { mode: 0o600 },
+  );
+  const automaticallyRecovered = await directory.addClusterMember({
+    cluster: "initial-recovery",
+    memberNodeKey: `codex:${successorNodeId}`,
+  });
+  assert.equal(automaticallyRecovered.membershipVersion, 2);
+  assert.deepEqual(automaticallyRecovered.members, [`codex:${successorNodeId}`]);
 });
 
 test("Node Tombstones retain minimal identity and prevent automatic resurrection", async () => {

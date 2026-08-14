@@ -2,6 +2,8 @@ import { AppServerError } from "./app-server-client.js";
 
 export const RECENT_TURN_LIMIT = 8;
 export const MAX_TURN_SEARCH_PAGES = 8;
+export const CLIENT_MESSAGE_SEARCH_PAGE_SIZE = 64;
+export const MAX_CLIENT_MESSAGE_SEARCH_PAGES = 8;
 
 function boundedPositiveInteger(value, fallback, maximum) {
   if (!Number.isSafeInteger(value) || value < 1) return fallback;
@@ -98,4 +100,58 @@ export async function findThreadTurn(
     cursor = page.nextCursor;
   }
   return null;
+}
+
+export async function findClientUserMessage(
+  client,
+  threadId,
+  clientId,
+  {
+    pageSize = CLIENT_MESSAGE_SEARCH_PAGE_SIZE,
+    maxPages = MAX_CLIENT_MESSAGE_SEARCH_PAGES,
+  } = {},
+) {
+  const boundedPageSize = boundedPositiveInteger(
+    pageSize,
+    CLIENT_MESSAGE_SEARCH_PAGE_SIZE,
+    CLIENT_MESSAGE_SEARCH_PAGE_SIZE,
+  );
+  const boundedMaxPages = boundedPositiveInteger(
+    maxPages,
+    MAX_CLIENT_MESSAGE_SEARCH_PAGES,
+    64,
+  );
+  let cursor = null;
+  for (let pageIndex = 0; pageIndex < boundedMaxPages; pageIndex += 1) {
+    const page = await listRecentTurns(client, threadId, {
+      limit: boundedPageSize,
+      cursor,
+      itemsView: "summary",
+    });
+    const match = (page.data || []).find((turn) =>
+      (turn.items || []).some(
+        (item) => item?.type === "userMessage" && item.clientId === clientId,
+      ),
+    );
+    if (match) {
+      return {
+        state: "accepted",
+        turnId: match.id,
+        pagesInspected: pageIndex + 1,
+      };
+    }
+    if (!page.nextCursor) {
+      return {
+        state: "not-observed",
+        complete: true,
+        pagesInspected: pageIndex + 1,
+      };
+    }
+    cursor = page.nextCursor;
+  }
+  return {
+    state: "not-observed",
+    complete: false,
+    pagesInspected: boundedMaxPages,
+  };
 }
