@@ -214,7 +214,7 @@ export async function refreshJob(client, job) {
     return job;
   }
   const terminal = status !== "running";
-  if (!terminal && job.status === "running") return job;
+  if (!terminal && job.status === "running") return readJob(job.jobId) || job;
   return updateJob(job, {
     status,
     result: terminal ? finalTurnResult(turn) : null,

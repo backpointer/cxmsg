@@ -19,7 +19,19 @@ const POLL_MS = 50;
 function readOwner(target) {
   try {
     const raw = readFileSync(target, "utf8");
-    const parsed = JSON.parse(raw);
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      const legacyPid = /^\d+$/.test(raw.trim()) ? Number(raw.trim()) : null;
+      parsed = Number.isSafeInteger(legacyPid) && legacyPid > 1
+        ? { pid: legacyPid, token: null }
+        : null;
+    }
+    if (Number.isSafeInteger(parsed) && parsed > 1) {
+      parsed = { pid: parsed, token: null };
+    }
+    if (!parsed) return null;
     return {
       raw,
       pid: Number.isSafeInteger(parsed.pid) ? parsed.pid : null,

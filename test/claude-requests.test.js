@@ -11,7 +11,8 @@ const SESSION_ID = "97654321-4321-4321-4321-cba987654321";
 test("authorized Claude requests run in a fork and return one correlated reply", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-request-state-"));
   process.env.CXMSG_STATE_DIR = stateDir;
-  const socketDir = "/tmp/cc-socks";
+  const socketDir = await fs.mkdtemp(path.join("/tmp", "cxmsg-request-sockets-"));
+  process.env.CXMSG_CLAUDE_SOCKETS_DIR = socketDir;
   const socketPath = path.join(
     socketDir,
     `${process.pid}${String(Date.now()).slice(-6)}.sock`,
@@ -104,7 +105,7 @@ test("authorized Claude requests run in a fork and return one correlated reply",
 
     const result = await processClaudeRequest({
       bridgeRecord: {
-        socketPath: "/tmp/cc-socks/55555.sock",
+        socketPath: path.join(socketDir, "55555.sock"),
       },
       targetRecord,
       job,
@@ -126,6 +127,8 @@ test("authorized Claude requests run in a fork and return one correlated reply",
     await new Promise((resolve) => server.close(resolve));
     await fs.unlink(socketPath).catch(() => {});
     await fs.rm(stateDir, { recursive: true, force: true });
+    await fs.rm(socketDir, { recursive: true, force: true });
     delete process.env.CXMSG_STATE_DIR;
+    delete process.env.CXMSG_CLAUDE_SOCKETS_DIR;
   }
 });

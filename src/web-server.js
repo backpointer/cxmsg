@@ -6,7 +6,6 @@ import { probeAppServerSocket, withAppServer } from "./app-server-client.js";
 import {
   attachmentCommandMatches,
   readAttachmentRecord,
-  removeAttachmentRecord,
   sessionPresentation,
 } from "./attachments.js";
 import { claudeBridgeState } from "./claude-bridge.js";
@@ -76,18 +75,22 @@ function publicClaudePeer(peer) {
   };
 }
 
-function liveAttachment(name) {
-  const attachment = readAttachmentRecord(name);
+export function liveAttachment(
+  name,
+  {
+    read = readAttachmentRecord,
+    state = processState,
+    identity = processIdentity,
+  } = {},
+) {
+  const attachment = read(name);
   if (!attachment) return null;
-  if (processState(attachment.childPid) === "missing") {
-    removeAttachmentRecord(name, attachment.childPid);
-    return null;
-  }
-  const identity = processIdentity(attachment.childPid, []);
-  if (identity.state !== "matched") return attachment;
-  if (attachmentCommandMatches(attachment, identity.command)) return attachment;
-  removeAttachmentRecord(name, attachment.childPid);
-  return null;
+  if (state(attachment.childPid) === "missing") return null;
+  const evidence = identity(attachment.childPid, []);
+  if (evidence.state !== "matched") return attachment;
+  return attachmentCommandMatches(attachment, evidence.command)
+    ? attachment
+    : null;
 }
 
 async function permissionProfiles(client, cwd, cache) {

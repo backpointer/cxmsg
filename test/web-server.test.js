@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildWebSnapshot, publicJob, startWebServer } from "../src/web-server.js";
+import {
+  buildWebSnapshot,
+  liveAttachment,
+  publicJob,
+  startWebServer,
+} from "../src/web-server.js";
 import { buildTopology, edgeTone, focusProject } from "../web/topology.js";
 
 test("web job snapshots omit task, result, error, and capability material", () => {
@@ -90,6 +95,48 @@ test("web snapshot redacts Claude addresses, grant hints, and App Server errors"
   assert.equal(snapshot.codexSessions[0].hasError, true);
   assert.equal("address" in snapshot.codexSessions[0].claudeGrants[0], false);
   assert.equal("tokenHint" in snapshot.codexSessions[0].claudeGrants[0], false);
+});
+
+test("web attachment inspection is read-only and rejects stale identities", () => {
+  const attachment = {
+    version: 1,
+    name: "worker",
+    threadId: "thread-1",
+    childPid: 123,
+    parentPid: 122,
+    cwd: "/project",
+    startedAt: "2026-08-12T00:00:00.000Z",
+  };
+  let reads = 0;
+  const read = () => {
+    reads += 1;
+    return attachment;
+  };
+  assert.equal(
+    liveAttachment("worker", {
+      read,
+      state: () => "missing",
+      identity: () => assert.fail("missing processes have no identity probe"),
+    }),
+    null,
+  );
+  assert.equal(
+    liveAttachment("worker", {
+      read,
+      state: () => "alive",
+      identity: () => ({ state: "matched", command: "unrelated process" }),
+    }),
+    null,
+  );
+  assert.equal(
+    liveAttachment("worker", {
+      read,
+      state: () => "unverified",
+      identity: () => ({ state: "unavailable", command: null }),
+    }),
+    attachment,
+  );
+  assert.equal(reads, 3);
 });
 
 test("loopback web server separates dashboard, orchestration, and snapshot routes", async () => {

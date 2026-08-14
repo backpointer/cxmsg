@@ -17,6 +17,7 @@ test("job refresh preserves approval records written while thread state is read"
       updateJob,
       withJobLock,
     } = await import("../src/jobs.js");
+    const { withFileLock } = await import("../src/file-lock.js");
     const created = createJob({
       jobId: "72345678-1234-1234-1234-123456789abc",
       from: "coordinator",
@@ -72,6 +73,51 @@ test("job refresh preserves approval records written while thread state is read"
     assert.equal(refreshed.approvals.length, 1);
     assert.equal(readJob(running.jobId).approvals[0].status, "pending");
 
+    const approvalRace = createJob({
+      jobId: "b2345678-1234-1234-1234-123456789abc",
+      from: "coordinator",
+      target: "worker",
+      targetThreadId: "source-thread",
+      threadId: "execution-thread",
+      task: "request approval",
+    });
+    const approvalRunning = await updateJob(approvalRace, {
+      status: "running",
+      turnId: "turn-approval",
+      turnStartedAt: new Date(Date.now() - 20_000).toISOString(),
+    });
+    let releaseActiveRead;
+    let markActiveReadStarted;
+    const activeReadStarted = new Promise((resolve) => {
+      markActiveReadStarted = resolve;
+    });
+    const activeReadResult = new Promise((resolve) => {
+      releaseActiveRead = resolve;
+    });
+    const activeRefresh = refreshJob(
+      {
+        request: async () => {
+          markActiveReadStarted();
+          return activeReadResult;
+        },
+      },
+      approvalRunning,
+    );
+    await activeReadStarted;
+    await mutateJob(approvalRunning.jobId, (current) => ({
+      ...current,
+      status: "awaiting_approval",
+      approvals: [{ approvalId: "approval-1", status: "pending" }],
+    }));
+    releaseActiveRead({
+      thread: {
+        id: "execution-thread",
+        turns: [{ id: "turn-approval", status: "inProgress", items: [] }],
+      },
+    });
+    assert.equal((await activeRefresh).status, "awaiting_approval");
+    assert.equal(readJob(approvalRunning.jobId).status, "awaiting_approval");
+
     let releaseFirst;
     let markFirstEntered;
     const firstEntered = new Promise((resolve) => {
@@ -96,6 +142,20 @@ test("job refresh preserves approval records written while thread state is read"
     releaseFirst();
     await Promise.all([first, second]);
     assert.deepEqual(order, ["first-enter", "first-exit", "second-enter"]);
+
+    const legacyLock = path.join(stateDir, "legacy.lock");
+    await fs.writeFile(legacyLock, "2147483647\n", { mode: 0o600 });
+    const expired = new Date(Date.now() - 60_000);
+    await fs.utimes(legacyLock, expired, expired);
+    let legacyAcquired = false;
+    await withFileLock(
+      legacyLock,
+      async () => {
+        legacyAcquired = true;
+      },
+      { timeoutMs: 1_000, leaseMs: 10 },
+    );
+    assert.equal(legacyAcquired, true);
 
     const orphan = createJob({
       jobId: "92345678-1234-1234-1234-123456789abc",
