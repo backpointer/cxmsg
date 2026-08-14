@@ -8,7 +8,11 @@ import {
   refreshJob,
   updateJob,
 } from "./jobs.js";
-import { deliverDelegatedTask, deliverPeerMessage } from "./messaging.js";
+import {
+  deliverDelegatedTask,
+  deliverPeerMessage,
+  truncateUtf8,
+} from "./messaging.js";
 import { readSessionRecord } from "./registry.js";
 
 export const EXECUTION_MODES = new Set(["fork", "inline"]);
@@ -73,7 +77,7 @@ function mirrorMessage(job) {
   }
   const result = job.result || job.error || "No result.";
   const bounded = Buffer.byteLength(result, "utf8") > 2_048
-    ? `${Buffer.from(result, "utf8").subarray(0, 2_048).toString("utf8")}\n[truncated]`
+    ? `${truncateUtf8(result, 2_048)}\n[truncated]`
     : result;
   return `${header}\n\nResult summary:\n${bounded}`;
 }
@@ -94,7 +98,7 @@ async function mirrorResult(client, job) {
       from: job.from,
       message: mirrorMessage(job),
     });
-    return updateJob(job, {
+    return await updateJob(job, {
       mirrorDelivery: {
         status: "delivered",
         turnId: delivery.turnId,
@@ -103,7 +107,7 @@ async function mirrorResult(client, job) {
       },
     });
   } catch (error) {
-    return updateJob(job, {
+    return await updateJob(job, {
       mirrorDelivery: {
         status: "failed",
         turnId: null,
@@ -159,7 +163,7 @@ export async function runDelegationWorker(jobId, { Client = AppServerClient } = 
   } catch (error) {
     job = readJob(jobId) || job;
     if (isPendingJob(job)) {
-      updateJob(job, {
+      await updateJob(job, {
         status: "failed",
         error: error.message,
         completedAt: new Date().toISOString(),

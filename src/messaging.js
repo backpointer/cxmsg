@@ -52,6 +52,14 @@ export function validateMessage(message) {
   return message;
 }
 
+export function truncateUtf8(value, maxBytes) {
+  const bytes = Buffer.from(String(value || ""), "utf8");
+  if (bytes.length <= maxBytes) return bytes.toString("utf8");
+  let end = maxBytes;
+  while (end > 0 && (bytes[end] & 0xc0) === 0x80) end -= 1;
+  return bytes.subarray(0, end).toString("utf8");
+}
+
 export function peerMessageInput({ from, message, messageId = randomUUID() }) {
   validateSessionName(from);
   validateMessage(message);

@@ -1,9 +1,31 @@
 import { lstatSync } from "node:fs";
+import path from "node:path";
+import { CXMSG_VERSION } from "./version.js";
 import { socketPath as defaultSocketPath } from "./runtime.js";
 import { failedProbe, healthyProbe } from "./socket-probe.js";
 import { UnixWebSocket } from "./unix-websocket.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+
+export function validateAppServerSocket(socketPath) {
+  const metadata = lstatSync(socketPath);
+  if (!metadata.isSocket()) throw new Error("not a Unix socket");
+  if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
+    throw new Error("Unix socket is owned by another user");
+  }
+  if ((metadata.mode & 0o077) !== 0) {
+    throw new Error("Unix socket permissions are too broad");
+  }
+  const parent = lstatSync(path.dirname(socketPath));
+  if (!parent.isDirectory()) throw new Error("Unix socket parent is not a directory");
+  if (typeof process.getuid === "function" && parent.uid !== process.getuid()) {
+    throw new Error("Unix socket parent is owned by another user");
+  }
+  if ((parent.mode & 0o077) !== 0) {
+    throw new Error("Unix socket parent permissions are too broad");
+  }
+  return metadata;
+}
 
 export class AppServerError extends Error {
   constructor(message, details = undefined) {
@@ -33,6 +55,8 @@ export class AppServerClient {
   async connect() {
     if (this.transport) return;
 
+    if (!this.transportFactory) validateAppServerSocket(this.socketPath);
+
     this.transport = this.transportFactory
       ? this.transportFactory(this.socketPath)
       : new UnixWebSocket(this.socketPath);
@@ -50,7 +74,7 @@ export class AppServerClient {
       clientInfo: {
         name: "cxmsg",
         title: "Codex Session Messaging",
-        version: "0.8.0",
+        version: CXMSG_VERSION,
       },
       capabilities: {
         experimentalApi: true,
@@ -111,7 +135,7 @@ export class AppServerClient {
   async close() {
     if (this.closed) return;
     this.closed = true;
-    this.transport?.close();
+    await this.transport?.close();
     this.#failAll(new AppServerError("app-server client closed"));
   }
 
@@ -180,18 +204,10 @@ export async function probeAppServerSocket(
   socketPath = defaultSocketPath(),
   { timeoutMs = 1_000 } = {},
 ) {
-  let metadata;
   try {
-    metadata = lstatSync(socketPath);
+    validateAppServerSocket(socketPath);
   } catch (error) {
     return failedProbe(error);
-  }
-  if (!metadata.isSocket()) return failedProbe(new Error("not a Unix socket"));
-  if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
-    return failedProbe(new Error("Unix socket is owned by another user"));
-  }
-  if ((metadata.mode & 0o077) !== 0) {
-    return failedProbe(new Error("Unix socket permissions are too broad"));
   }
 
   const client = new AppServerClient({ socketPath, timeoutMs });

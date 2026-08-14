@@ -122,7 +122,7 @@ export async function runHostRelay({
             throw new Error(`invalid Claude delivery job: ${body.jobId}`);
           }
         } else {
-          job = createDelivery({
+          job = await createDelivery({
             from,
             sourceRecord,
             peer,

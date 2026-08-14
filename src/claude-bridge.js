@@ -18,10 +18,11 @@ import { withAppServer } from "./app-server-client.js";
 import {
   CLAUDE_PEER_PROTOCOL,
   CLAUDE_SESSIONS_DIR,
-  CLAUDE_SOCKETS_DIR,
+  claudeSocketsDir,
   MAX_CLAUDE_FRAME_BYTES,
   parseClaudePeerFrame,
   parseClaudeRequestBody,
+  redactClaudeRequestCapabilities,
   validateClaudeSocketPath,
 } from "./claude-messaging.js";
 import { findClaudeRequestGrant } from "./claude-grants.js";
@@ -36,7 +37,11 @@ import {
   processClaudeRequest,
 } from "./claude-requests.js";
 import { isPendingJob, listJobs, mutateJob, readJob } from "./jobs.js";
-import { deliverPeerMessage, validateSessionName } from "./messaging.js";
+import {
+  deliverPeerMessage,
+  truncateUtf8,
+  validateSessionName,
+} from "./messaging.js";
 import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import { processState, serviceEvidence } from "./process-state.js";
@@ -252,9 +257,7 @@ async function deliverClaudeMessage(target, parsed) {
 
 function claudeDeliveryWakeBody(delivery) {
   const detail = delivery.result || delivery.error || "No result detail was provided.";
-  const bounded = Buffer.from(detail, "utf8")
-    .subarray(0, 12 * 1024)
-    .toString("utf8");
+  const bounded = truncateUtf8(detail, 12 * 1024);
   return (
     `Claude delivery ${delivery.jobId} reached terminal status ${delivery.status}.\n\n` +
     bounded
@@ -312,6 +315,47 @@ export async function handleClaudeDeliveryAck(
   }
 }
 
+export async function handleClaudeRequestOrMessage(
+  target,
+  parsed,
+  {
+    readRecord = readSessionRecord,
+    findGrant = findClaudeRequestGrant,
+    createRequest = createClaudeRequestJob,
+    scheduleRequest,
+    deliverMessage = deliverClaudeMessage,
+  } = {},
+) {
+  const currentRecord = readRecord(target);
+  if (!currentRecord) throw new Error(`unknown Codex session: ${target}`);
+  const request = parseClaudeRequestBody(parsed.body);
+  const grant = request
+    ? findGrant(currentRecord, {
+        ...parsed,
+        grantToken: request.grantToken,
+      })
+    : null;
+  if (request && grant) {
+    if (typeof scheduleRequest !== "function") {
+      throw new Error("authorized Claude request requires a scheduler");
+    }
+    const job = await createRequest({
+      target,
+      targetRecord: currentRecord,
+      parsed,
+      grant,
+      task: request.task,
+    });
+    scheduleRequest(currentRecord, job);
+    return { kind: "request", job };
+  }
+  const delivery = await deliverMessage(target, {
+    ...parsed,
+    body: redactClaudeRequestCapabilities(parsed.body),
+  });
+  return { kind: "message", delivery };
+}
+
 export async function runClaudeBridge(target) {
   validateSessionName(target);
   const targetRecord = readSessionRecord(target);
@@ -320,9 +364,10 @@ export async function runClaudeBridge(target) {
   mkdirSync(CLAUDE_BRIDGES_DIR, { recursive: true, mode: 0o700 });
   chmodSync(CLAUDE_BRIDGES_DIR, 0o700);
   mkdirSync(CLAUDE_SESSIONS_DIR, { recursive: true, mode: 0o700 });
-  mkdirSync(CLAUDE_SOCKETS_DIR, { recursive: true, mode: 0o700 });
+  const socketsDir = claudeSocketsDir();
+  mkdirSync(socketsDir, { recursive: true, mode: 0o700 });
 
-  const socketPath = path.join(CLAUDE_SOCKETS_DIR, `${process.pid}.sock`);
+  const socketPath = path.join(socketsDir, `${process.pid}.sock`);
   if (existsSync(socketPath)) unlinkSync(socketPath);
   const record = {
     version: 1,
@@ -355,14 +400,18 @@ export async function runClaudeBridge(target) {
     deliveryTimers.set(job.jobId, timer);
   };
 
-  const scanDeliveries = () => {
+  const scanDeliveries = async () => {
     for (const job of listJobs()) {
       if (job.kind !== "claude-delivery" || job.from !== target) continue;
-      const current = refreshClaudeDelivery(job);
+      const current = await refreshClaudeDelivery(job);
       if (current.status === "retry_scheduled") scheduleDelivery(current);
     }
   };
-  const deliveryMonitor = setInterval(scanDeliveries, 5_000);
+  const deliveryMonitor = setInterval(() => {
+    scanDeliveries().catch((error) => {
+      process.stderr.write(`cxmsg Claude delivery scan failed: ${error.message}\n`);
+    });
+  }, 5_000);
   deliveryMonitor.unref();
 
   const scheduleRequest = (targetRecord, job) => {
@@ -429,27 +478,9 @@ export async function runClaudeBridge(target) {
           scheduleDelivery(delivery);
           return;
         }
-        const currentRecord = readSessionRecord(target);
-        if (!currentRecord) throw new Error(`unknown Codex session: ${target}`);
-        const request = parseClaudeRequestBody(parsed.body);
-        const grant = request
-          ? findClaudeRequestGrant(currentRecord, {
-              ...parsed,
-              grantToken: request.grantToken,
-            })
-          : null;
-        if (request && grant) {
-          const job = createClaudeRequestJob({
-            target,
-            targetRecord: currentRecord,
-            parsed,
-            grant,
-            task: request.task,
-          });
-          scheduleRequest(currentRecord, job);
-        } else {
-          await deliverClaudeMessage(target, parsed);
-        }
+        await handleClaudeRequestOrMessage(target, parsed, {
+          scheduleRequest,
+        });
       } catch (error) {
         process.stderr.write(`cxmsg Claude bridge delivery failed: ${error.message}\n`);
       } finally {
@@ -489,24 +520,36 @@ export async function runClaudeBridge(target) {
   process.once("exit", cleanup);
 
   await new Promise((resolve, reject) => {
-    server.once("error", reject);
+    const onListenError = (error) => reject(error);
+    server.once("error", onListenError);
     server.listen(socketPath, () => {
+      server.off("error", onListenError);
       chmodSync(socketPath, 0o600);
       atomicWrite(bridgeRecordPath(target), record);
       writeClaudeRegistry(record, targetRecord, "idle");
       resolve();
     });
   });
+  server.on("error", (error) => {
+    process.stderr.write(`cxmsg Claude bridge listener failed: ${error.message}\n`);
+    cleanup();
+    process.exitCode = 1;
+  });
 
-  scanDeliveries();
-  for (const job of listJobs()) {
-    if (
-      job.kind === "claude-request" &&
-      job.target === target &&
-      (isPendingJob(job) || job.reply?.status !== "delivered")
-    ) {
-      scheduleRequest(targetRecord, job);
+  try {
+    await scanDeliveries();
+    for (const job of listJobs()) {
+      if (
+        job.kind === "claude-request" &&
+        job.target === target &&
+        (isPendingJob(job) || job.reply?.status !== "delivered")
+      ) {
+        scheduleRequest(targetRecord, job);
+      }
     }
+  } catch (error) {
+    cleanup();
+    throw error;
   }
 }
 

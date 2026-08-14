@@ -27,7 +27,9 @@ export function findClaudeRequestGrant(record, source) {
     listClaudeRequestGrants(record).find(
       (grant) =>
         grant.token === source.grantToken &&
-        (!source.fromSession || grant.sessionId === source.fromSession),
+        (source.fromSession
+          ? grant.sessionId === source.fromSession
+          : Boolean(grant.address && grant.address === source.fromAddress)),
     ) || null
   );
 }

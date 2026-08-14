@@ -17,7 +17,7 @@ test("job refresh tolerates a newly started turn missing from the first read", a
       threadId: null,
       task: "inspect",
     });
-    const running = updateJob(created, {
+    const running = await updateJob(created, {
       status: "running",
       threadId: "execution-thread",
       turnId: "new-turn",
@@ -42,7 +42,7 @@ test("job refresh tolerates a newly started turn missing from the first read", a
       threadId: null,
       task: "inspect",
     });
-    const transientRunning = updateJob(transient, {
+    const transientRunning = await updateJob(transient, {
       status: "running",
       threadId: "execution-thread",
       turnId: "new-turn",

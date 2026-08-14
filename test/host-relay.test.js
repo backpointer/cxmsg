@@ -46,6 +46,20 @@ test("authenticated host relay sends without caller access to Claude UDS", async
       assert.equal(sent.length, 1);
 
       await assert.rejects(
+        hostRelayRequest("/v1/claude/send", {
+          method: "POST",
+          record: relay.record,
+          body: {
+            from: "coordinator",
+            target: "reviewer",
+            message: "a".repeat(16 * 1024 + 1),
+          },
+        }),
+        /message exceeds 16384 bytes/,
+      );
+      assert.equal(sent.length, 1);
+
+      await assert.rejects(
         hostRelayRequest("/health", {
           record: { ...relay.record, token: "wrong-token" },
         }),

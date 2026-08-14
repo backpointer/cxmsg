@@ -131,6 +131,30 @@ test("MCP rejects unreachable and ambiguous targets without sending", async () =
     ),
     /multiple live/,
   );
+  await assert.rejects(
+    callCxmsgMcpTool(
+      "cxmsg_send_peer",
+      {
+        from_session: "coordinator",
+        target_session: "reviewer",
+        message: "a".repeat(16 * 1024 + 1),
+      },
+      { ...base, peers: async () => [peer()] },
+    ),
+    /message exceeds 16384 bytes/,
+  );
+  await assert.rejects(
+    callCxmsgMcpTool(
+      "cxmsg_send_peer",
+      {
+        from_session: "_coordinator",
+        target_session: "reviewer",
+        message: "hello",
+      },
+      { ...base, peers: async () => [peer()] },
+    ),
+    /session name/,
+  );
 });
 
 test("MCP stdio emits JSON-RPC responses without protocol noise", async () => {

@@ -5,6 +5,7 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -60,6 +61,7 @@ import {
 import {
   activeJobsForTarget,
   createJob,
+  failJobIfWorkerExited,
   isPendingJob,
   newJobId,
   readJob,
@@ -264,19 +266,36 @@ async function startServer() {
       stdio: ["ignore", logFd, logFd],
     },
   );
+  let childError = null;
+  child.once("error", (error) => {
+    childError = error;
+  });
   child.unref();
   closeSync(logFd);
+  if (!child.pid) throw new Error("failed to start app-server");
   writeFileSync(PID_PATH, `${child.pid}\n`, { mode: 0o600 });
 
   const ready = await waitUntil(
-    async () =>
-      processState(child.pid) !== "missing" &&
-      (await probeAppServerSocket(DEFAULT_SOCKET_PATH)).state === "healthy",
+    async () => {
+      if (childError) return true;
+      if (processState(child.pid) === "missing") return false;
+      try {
+        const metadata = lstatSync(DEFAULT_SOCKET_PATH);
+        if (!metadata.isSocket()) return false;
+        if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
+          return false;
+        }
+        chmodSync(DEFAULT_SOCKET_PATH, 0o600);
+      } catch {
+        return false;
+      }
+      return (await probeAppServerSocket(DEFAULT_SOCKET_PATH)).state === "healthy";
+    },
   );
+  if (childError) throw childError;
   if (!ready) {
     throw new Error(`app-server did not become ready; inspect ${LOG_PATH}`);
   }
-  chmodSync(DEFAULT_SOCKET_PATH, 0o600);
   return child.pid;
 }
 
@@ -520,9 +539,17 @@ async function commandRelay(args) {
     detached: true,
     stdio: ["ignore", logFd, logFd],
   });
+  let childError = null;
+  child.once("error", (error) => {
+    childError = error;
+  });
   child.unref();
   closeSync(logFd);
-  const ready = await waitUntil(async () => (await relayState()).status === "running");
+  const ready = await waitUntil(async () => {
+    if (childError) return true;
+    return (await relayState()).status === "running";
+  });
+  if (childError) throw childError;
   if (!ready) throw new Error(`host relay did not become ready; inspect ${HOST_RELAY_LOG_PATH}`);
   process.stdout.write(`started cxmsg host relay (pid ${child.pid}, port ${port}).\n`);
 }
@@ -757,6 +784,7 @@ async function commandStatus(name, jsonOutput) {
       };
     }
   });
+  await Promise.all(activeJobsForTarget(name).map((job) => failJobIfWorkerExited(job)));
   const activeJobs = activeJobsForTarget(name);
   const awaitingApprovals = activeJobs.filter(
     (job) => job.status === "awaiting_approval",
@@ -956,13 +984,19 @@ async function commandClaudeBridge(action, target) {
     detached: true,
     stdio: ["ignore", logFd, logFd],
   });
+  let childError = null;
+  child.once("error", (error) => {
+    childError = error;
+  });
   child.unref();
   closeBridgeLog(logFd);
   const ready = await waitUntil(() => {
+    if (childError) return true;
     return claudeBridgeState(target).then(
       (state) => state.running && state.record.pid === child.pid,
     );
   });
+  if (childError) throw childError;
   if (!ready) {
     throw new Error(`Claude bridge did not become ready; inspect ${bridgeLogPath(target)}`);
   }
@@ -1032,7 +1066,7 @@ async function commandClaudeSend(args) {
     await relaySend();
     return;
   }
-  let job = createClaudeDeliveryJob({
+  let job = await createClaudeDeliveryJob({
     from,
     sourceRecord,
     peer,
@@ -1202,12 +1236,12 @@ async function commandClaudeRetry(jobId) {
   );
 }
 
-function commandClaudeDelivery(jobId, jsonOutput) {
+async function commandClaudeDelivery(jobId, jsonOutput) {
   let job = readJob(jobId);
   if (!job || job.kind !== "claude-delivery") {
     throw new Error(`unknown Claude delivery: ${jobId}`);
   }
-  job = refreshClaudeDelivery(job);
+  job = await refreshClaudeDelivery(job);
   const value = {
     jobId: job.jobId,
     from: job.from,
@@ -1268,7 +1302,7 @@ async function commandClaude(args) {
     if (args.length > (jsonOutput ? 1 : 0)) {
       throw new Error(`unexpected option: ${args[0]}`);
     }
-    commandClaudeDelivery(jobId, jsonOutput);
+    await commandClaudeDelivery(jobId, jsonOutput);
     return;
   }
   usage(2);
@@ -1421,27 +1455,40 @@ async function commandDelegate(args) {
         throw new Error("target session already has an active turn");
       }
     });
-    updateJob(job, { status: "queued" });
+    await updateJob(job, { status: "queued" });
     const child = spawn(process.execPath, [delegationWorker, jobId], {
       detached: true,
       stdio: "ignore",
     });
+    let childError = null;
+    child.once("error", (error) => {
+      childError = error;
+    });
     child.unref();
     if (!child.pid) throw new Error("failed to start delegation worker");
-    await waitUntil(() => {
+    await updateJob(job, {
+      workerPid: child.pid,
+      workerStartedAt: new Date().toISOString(),
+    });
+    const workerReady = await waitUntil(() => {
+      if (childError) return true;
+      if (processState(child.pid) === "missing") return true;
       const current = readJob(jobId);
       return Boolean(current?.turnId || (current && !isPendingJob(current)));
     });
-    const started = readJob(jobId);
+    if (childError) throw childError;
+    let started = readJob(jobId);
     if (!started) throw new Error(`delegation job disappeared: ${jobId}`);
+    started = await failJobIfWorkerExited(started);
     if (started.status === "failed") throw new Error(started.error || "delegation failed");
+    if (!workerReady) throw new Error("delegation worker did not start before the readiness deadline");
     process.stdout.write(
       `delegated ${jobId} to ${target} (${execution}, ${approval}, turn ${started.turnId || "pending"})\n`,
     );
   } catch (error) {
     const current = readJob(jobId) || job;
     if (isPendingJob(current)) {
-      updateJob(current, {
+      await updateJob(current, {
         status: "failed",
         error: error.message,
         completedAt: new Date().toISOString(),
@@ -1521,10 +1568,11 @@ function printJob(job, jsonOutput) {
 async function loadAndRefreshJob(jobId) {
   let job = readJob(jobId);
   if (!job) throw new Error(`unknown job: ${jobId}`);
-  if (job.status !== "running") return job;
-  await ensureServer();
-  job = await withAppServer((client) => refreshJob(client, job));
-  return job;
+  if (job.status === "running") {
+    await ensureServer();
+    job = await withAppServer((client) => refreshJob(client, job));
+  }
+  return failJobIfWorkerExited(job);
 }
 
 async function commandResult(args) {

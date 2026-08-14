@@ -40,7 +40,7 @@ test("authorized Claude requests run in a fork and return one correlated reply",
       threadId: "source-thread",
       cwd: process.cwd(),
     };
-    const job = createClaudeRequestJob({
+    const job = await createClaudeRequestJob({
       target: "worker",
       targetRecord,
       parsed: {

@@ -85,6 +85,10 @@ export function createApprovalHandler(jobId) {
     if (initial.approval === "never") {
       throw new Error("approval requested by a delegation configured with --approval never");
     }
+    const automaticResponse =
+      initial.approval === "auto"
+        ? approvalResponse(method, params, true)
+        : null;
     const approvalId = randomUUID();
     const requestedAt = new Date().toISOString();
     let job = await mutateJob(jobId, (current) => ({
@@ -106,7 +110,7 @@ export function createApprovalHandler(jobId) {
       ],
     }));
 
-    if (job.approval === "auto") return approvalResponse(method, params, true);
+    if (job.approval === "auto") return automaticResponse;
 
     const deadline = Date.now() + (job.approvalTimeoutSeconds || 600) * 1_000;
     while (Date.now() < deadline) {

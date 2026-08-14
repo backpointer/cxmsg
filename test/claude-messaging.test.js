@@ -3,21 +3,24 @@ import { promises as fs } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import {
-  CLAUDE_SOCKETS_DIR,
   buildClaudePeerFrame,
   buildClaudeRequestBody,
   buildClaudeResponseBody,
+  claudeSocketsDir,
   listClaudePeers,
   parseClaudePeerFrame,
   parseClaudeRequestBody,
+  redactClaudeRequestCapabilities,
   resolveClaudePeer,
   sendClaudePeerFrame,
 } from "../src/claude-messaging.js";
+import { handleClaudeRequestOrMessage } from "../src/claude-bridge.js";
 import {
   findClaudeRequestGrant,
   listClaudeRequestGrants,
+  publicClaudeRequestGrant,
   removeClaudeRequestGrant,
   upsertClaudeRequestGrant,
 } from "../src/claude-grants.js";
@@ -26,11 +29,20 @@ import { failedProbe } from "../src/socket-probe.js";
 const MESSAGE_ID = "12345678-1234-1234-1234-123456789abc";
 const SESSION_ID = "87654321-4321-4321-4321-cba987654321";
 const GRANT_TOKEN = "abcdefab-1234-1234-1234-abcdefabcdef";
+const TEST_CLAUDE_SOCKETS_DIR = await fs.mkdtemp(
+  path.join(os.tmpdir(), "cxmsg-claude-sockets-"),
+);
+process.env.CXMSG_CLAUDE_SOCKETS_DIR = TEST_CLAUDE_SOCKETS_DIR;
+after(async () => {
+  delete process.env.CXMSG_CLAUDE_SOCKETS_DIR;
+  await fs.rm(TEST_CLAUDE_SOCKETS_DIR, { recursive: true, force: true });
+});
 
 async function listenOnTestSocket(handler) {
-  await fs.mkdir(CLAUDE_SOCKETS_DIR, { recursive: true, mode: 0o700 });
+  const socketsDir = claudeSocketsDir();
+  await fs.mkdir(socketsDir, { recursive: true, mode: 0o700 });
   const socketPath = path.join(
-    CLAUDE_SOCKETS_DIR,
+    socketsDir,
     `${process.pid}${String(Date.now()).slice(-6)}.sock`,
   );
   const server = net.createServer(handler);
@@ -72,6 +84,13 @@ test("Claude request and response envelopes are explicit and correlated", () => 
     task: "inspect the report",
   });
   assert.equal(parseClaudeRequestBody("ordinary message"), null);
+  const malformed = `<cxmsg-request grant = '${GRANT_TOKEN}'>\nreview\n</cxmsg-request>`;
+  assert.match(redactClaudeRequestCapabilities(malformed), /grant="\[redacted\]"/);
+  assert.doesNotMatch(redactClaudeRequestCapabilities(malformed), new RegExp(GRANT_TOKEN));
+  assert.equal(
+    redactClaudeRequestCapabilities(`ordinary grant="${GRANT_TOKEN}"`),
+    `ordinary grant="${GRANT_TOKEN}"`,
+  );
   assert.match(
     buildClaudeResponseBody({
       requestId: MESSAGE_ID,
@@ -80,6 +99,75 @@ test("Claude request and response envelopes are explicit and correlated", () => 
     }),
     /in-reply-to="12345678-1234-1234-1234-123456789abc"[\s\S]*looks good/,
   );
+});
+
+test("unauthorized Claude requests are sanitized and delivered as untrusted messages", async () => {
+  const record = upsertClaudeRequestGrant(
+    { name: "worker", threadId: "thread-worker", allowedClaudeRequesters: [] },
+    {
+      name: "reviewer",
+      sessionId: SESSION_ID,
+      address: "uds:/tmp/cc-socks/12345.sock",
+    },
+    ":read-only",
+    "never",
+    GRANT_TOKEN,
+  );
+  const deliveries = [];
+  let created = 0;
+  let scheduled = 0;
+  const dependencies = {
+    readRecord: () => record,
+    createRequest: async (input) => {
+      created += 1;
+      return { jobId: input.parsed.messageId };
+    },
+    scheduleRequest: () => {
+      scheduled += 1;
+    },
+    deliverMessage: async (_target, parsed) => {
+      deliveries.push(parsed.body);
+      return { delivery: "started" };
+    },
+  };
+  const base = {
+    fromName: "reviewer",
+    fromSession: SESSION_ID,
+    fromAddress: "uds:/tmp/cc-socks/12345.sock",
+    messageId: MESSAGE_ID,
+  };
+
+  const unauthorized = await handleClaudeRequestOrMessage(
+    "worker",
+    { ...base, body: buildClaudeRequestBody("inspect", "22222222-2222-2222-2222-222222222222") },
+    dependencies,
+  );
+  assert.equal(unauthorized.kind, "message");
+  assert.match(deliveries[0], /grant="\[redacted\]"/);
+  assert.doesNotMatch(deliveries[0], /22222222/);
+
+  const wrongSession = await handleClaudeRequestOrMessage(
+    "worker",
+    {
+      ...base,
+      fromSession: "77654321-4321-4321-4321-cba987654321",
+      body: buildClaudeRequestBody("inspect", GRANT_TOKEN),
+    },
+    dependencies,
+  );
+  assert.equal(wrongSession.kind, "message");
+  assert.doesNotMatch(deliveries[1], new RegExp(GRANT_TOKEN));
+  assert.equal(created, 0);
+
+  const authorized = await handleClaudeRequestOrMessage(
+    "worker",
+    { ...base, body: buildClaudeRequestBody("inspect", GRANT_TOKEN) },
+    dependencies,
+  );
+  assert.equal(authorized.kind, "request");
+  assert.equal(created, 1);
+  assert.equal(scheduled, 1);
+  assert.equal(deliveries.length, 2);
 });
 
 test("Claude peer resolution rejects ambiguous display names", () => {
@@ -123,6 +211,14 @@ test("Claude request grants bind authorization to stable session ids", () => {
   );
   assert.equal(
     findClaudeRequestGrant(granted, {
+      fromSession: null,
+      fromAddress: "uds:/tmp/cc-socks/99999.sock",
+      grantToken: GRANT_TOKEN,
+    }),
+    null,
+  );
+  assert.equal(
+    findClaudeRequestGrant(granted, {
       fromSession: SESSION_ID,
       grantToken: "11111111-1111-1111-1111-111111111111",
     }),
@@ -132,6 +228,47 @@ test("Claude request grants bind authorization to stable session ids", () => {
     listClaudeRequestGrants(removeClaudeRequestGrant(granted, SESSION_ID)).length,
     0,
   );
+});
+
+test("regranting a Claude session rotates and redacts its capability token", () => {
+  const peer = {
+    name: "reviewer",
+    sessionId: SESSION_ID,
+    address: "uds:/tmp/cc-socks/12345.sock",
+  };
+  const firstToken = "11111111-1111-1111-1111-111111111111";
+  const secondToken = "22222222-2222-2222-2222-222222222222";
+  const first = upsertClaudeRequestGrant(
+    { name: "worker", allowedClaudeRequesters: [] },
+    peer,
+    ":read-only",
+    "never",
+    firstToken,
+  );
+  const rotated = upsertClaudeRequestGrant(
+    first,
+    { ...peer, address: "uds:/tmp/cc-socks/54321.sock" },
+    ":workspace",
+    "relay",
+    secondToken,
+  );
+  assert.equal(listClaudeRequestGrants(rotated).length, 1);
+  assert.equal(
+    findClaudeRequestGrant(rotated, {
+      fromSession: SESSION_ID,
+      grantToken: firstToken,
+    }),
+    null,
+  );
+  const active = findClaudeRequestGrant(rotated, {
+    fromSession: SESSION_ID,
+    grantToken: secondToken,
+  });
+  assert.equal(active.permissions, ":workspace");
+  assert.equal(active.approval, "relay");
+  const publicGrant = publicClaudeRequestGrant(active);
+  assert.equal(publicGrant.token, undefined);
+  assert.equal(publicGrant.tokenHint, "22222222…");
 });
 
 test("Claude peer sender writes one JSONL frame over the Unix socket", async () => {
@@ -160,12 +297,13 @@ test("Claude peer sender writes one JSONL frame over the Unix socket", async () 
 
 test("Claude peer discovery uses live owner-only session sockets", async () => {
   const sessionsDir = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-claude-sessions-"));
-  const canonicalSocket = path.join(CLAUDE_SOCKETS_DIR, `${process.pid}.sock`);
+  const socketsDir = claudeSocketsDir();
+  const canonicalSocket = path.join(socketsDir, `${process.pid}.sock`);
   const server = net.createServer((socket) => {
     socket.resume();
     socket.on("end", () => socket.end());
   });
-  await fs.mkdir(CLAUDE_SOCKETS_DIR, { recursive: true, mode: 0o700 });
+  await fs.mkdir(socketsDir, { recursive: true, mode: 0o700 });
   await fs.unlink(canonicalSocket).catch(() => {});
   await new Promise((resolve, reject) => {
     server.once("error", reject);

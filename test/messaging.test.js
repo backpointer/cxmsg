@@ -10,6 +10,8 @@ import {
   finalTurnResult,
   resolveTarget,
   storedSessionName,
+  truncateUtf8,
+  validateMessage,
   validateSessionName,
 } from "../src/messaging.js";
 
@@ -17,7 +19,18 @@ test("session names are validated and stored in a private namespace", () => {
   assert.equal(storedSessionName("worker-1"), "cxmsg:worker-1");
   assert.equal(displaySessionName("cxmsg:worker-1"), "worker-1");
   assert.equal(displaySessionName("ordinary thread"), null);
+  assert.equal(validateSessionName(`a${"b".repeat(63)}`).length, 64);
   assert.throws(() => validateSessionName("bad name"));
+  assert.throws(() => validateSessionName(`a${"b".repeat(64)}`));
+  assert.throws(() => validateSessionName("_worker"));
+});
+
+test("message byte limits and UTF-8 truncation preserve character boundaries", () => {
+  assert.equal(validateMessage("a".repeat(16 * 1024)).length, 16 * 1024);
+  assert.throws(() => validateMessage("a".repeat(16 * 1024 + 1)));
+  const truncated = truncateUtf8("가".repeat(10), 10);
+  assert.equal(Buffer.byteLength(truncated, "utf8"), 9);
+  assert.doesNotMatch(truncated, /\uFFFD/);
 });
 
 test("only cxmsg threads are discoverable as peers", () => {

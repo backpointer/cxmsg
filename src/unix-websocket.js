@@ -3,6 +3,9 @@ import { EventEmitter } from "node:events";
 import net from "node:net";
 
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
+const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
+const DEFAULT_MAX_BUFFER_BYTES = 1024 * 1024;
 
 function encodeFrame(payload, opcode = 0x1) {
   const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, "utf8");
@@ -31,14 +34,26 @@ function encodeFrame(payload, opcode = 0x1) {
 }
 
 export class UnixWebSocket extends EventEmitter {
-  constructor(socketPath) {
+  constructor(
+    socketPath,
+    {
+      connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS,
+      closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS,
+      maxBufferBytes = DEFAULT_MAX_BUFFER_BYTES,
+    } = {},
+  ) {
     super();
     this.socketPath = socketPath;
+    this.connectTimeoutMs = connectTimeoutMs;
+    this.closeTimeoutMs = closeTimeoutMs;
+    this.maxBufferBytes = maxBufferBytes;
     this.socket = null;
     this.upgraded = false;
     this.closed = false;
+    this.closing = false;
     this.buffer = Buffer.alloc(0);
     this.fragments = [];
+    this.fragmentBytes = 0;
     this.fragmentOpcode = null;
   }
 
@@ -52,6 +67,18 @@ export class UnixWebSocket extends EventEmitter {
         .update(key + WEBSOCKET_GUID)
         .digest("base64");
       let settled = false;
+      const upgradeTimer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const error = Object.assign(
+          new Error("app-server WebSocket upgrade timed out"),
+          { code: "ETIMEDOUT" },
+        );
+        reject(error);
+        this.socket.destroy(error);
+      }, this.connectTimeoutMs);
+      upgradeTimer.unref();
+      const settle = () => clearTimeout(upgradeTimer);
 
       this.socket = net.createConnection({ path: this.socketPath });
       this.socket.once("connect", () => {
@@ -69,6 +96,16 @@ export class UnixWebSocket extends EventEmitter {
         );
       });
       this.socket.on("data", (chunk) => {
+        if (this.buffer.length + chunk.length > this.maxBufferBytes) {
+          const error = new Error("app-server WebSocket buffer limit exceeded");
+          if (!settled) {
+            settled = true;
+            settle();
+            reject(error);
+          }
+          this.socket.destroy(error);
+          return;
+        }
         if (!this.upgraded) {
           this.buffer = Buffer.concat([this.buffer, chunk]);
           const boundary = this.buffer.indexOf("\r\n\r\n");
@@ -81,6 +118,7 @@ export class UnixWebSocket extends EventEmitter {
           if (!statusOk || acceptMatch?.[1]?.trim() !== expectedAccept) {
             const error = new Error("invalid app-server WebSocket upgrade response");
             settled = true;
+            settle();
             reject(error);
             this.socket.destroy(error);
             return;
@@ -88,6 +126,7 @@ export class UnixWebSocket extends EventEmitter {
 
           this.upgraded = true;
           settled = true;
+          settle();
           resolve();
         } else {
           this.buffer = Buffer.concat([this.buffer, chunk]);
@@ -97,8 +136,9 @@ export class UnixWebSocket extends EventEmitter {
       this.socket.on("error", (error) => {
         if (!settled) {
           settled = true;
+          settle();
           reject(error);
-        } else if (!this.closed) {
+        } else if (this.upgraded && !this.closed && !this.closing) {
           this.emit("error", error);
         }
       });
@@ -106,6 +146,7 @@ export class UnixWebSocket extends EventEmitter {
         this.closed = true;
         if (!settled) {
           settled = true;
+          settle();
           reject(new Error("app-server closed during WebSocket upgrade"));
         }
         this.emit("close");
@@ -120,14 +161,34 @@ export class UnixWebSocket extends EventEmitter {
     this.socket.write(encodeFrame(text));
   }
 
-  close() {
-    if (this.closed) return;
-    this.closed = true;
-    if (this.upgraded && this.socket?.writable) {
-      this.socket.write(encodeFrame(Buffer.alloc(0), 0x8));
+  async close() {
+    if (this.closed || this.closing) return;
+    this.closing = true;
+    const socket = this.socket;
+    if (!socket || socket.destroyed) {
+      this.closed = true;
+      return;
     }
-    this.socket?.end();
-    this.socket?.destroy();
+
+    await new Promise((resolve) => {
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        if (!socket.destroyed) socket.destroy();
+        this.closed = true;
+        resolve();
+      };
+      const timer = setTimeout(finish, this.closeTimeoutMs);
+      timer.unref();
+      socket.once("close", finish);
+      if (this.upgraded && socket.writable) {
+        socket.write(encodeFrame(Buffer.alloc(0), 0x8), () => socket.end());
+      } else {
+        socket.end();
+      }
+    });
   }
 
   #decodeFrames() {
@@ -148,11 +209,16 @@ export class UnixWebSocket extends EventEmitter {
         if (this.buffer.length < 10) return;
         const wideLength = this.buffer.readBigUInt64BE(2);
         if (wideLength > BigInt(Number.MAX_SAFE_INTEGER)) {
-          this.socket.destroy(new Error("WebSocket frame is too large"));
+          this.#failProtocol(new Error("WebSocket frame is too large"));
           return;
         }
         length = Number(wideLength);
         offset = 10;
+      }
+
+      if (length > this.maxBufferBytes) {
+        this.#failProtocol(new Error("WebSocket frame exceeds the buffer limit"));
+        return;
       }
 
       const maskLength = masked ? 4 : 0;
@@ -173,7 +239,7 @@ export class UnixWebSocket extends EventEmitter {
 
   #handleFrame(opcode, final, payload) {
     if (opcode === 0x8) {
-      this.close();
+      void this.close();
       return;
     }
     if (opcode === 0x9) {
@@ -189,10 +255,16 @@ export class UnixWebSocket extends EventEmitter {
       }
       this.fragmentOpcode = opcode;
       this.fragments = [payload];
+      this.fragmentBytes = payload.length;
       return;
     }
     if (opcode === 0x0 && this.fragmentOpcode !== null) {
+      if (this.fragmentBytes + payload.length > this.maxBufferBytes) {
+        this.#failProtocol(new Error("WebSocket fragments exceed the buffer limit"));
+        return;
+      }
       this.fragments.push(payload);
+      this.fragmentBytes += payload.length;
       if (final) {
         const complete = Buffer.concat(this.fragments);
         if (this.fragmentOpcode === 0x1) {
@@ -200,7 +272,13 @@ export class UnixWebSocket extends EventEmitter {
         }
         this.fragmentOpcode = null;
         this.fragments = [];
+        this.fragmentBytes = 0;
       }
     }
+  }
+
+  #failProtocol(error) {
+    if (!this.closed && !this.closing) this.emit("error", error);
+    this.socket?.destroy();
   }
 }

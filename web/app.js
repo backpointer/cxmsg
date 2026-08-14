@@ -84,7 +84,7 @@ function renderAuthority(session) {
     const chip = document.createElement("span");
     chip.className = "chip claude";
     chip.textContent = `${grant.name || shortId(grant.sessionId)} · ${grant.permissions}`;
-    chip.title = `Claude grant ${grant.tokenHint}`;
+    chip.title = "Claude request grant";
     wrapper.append(chip);
   }
   for (const profile of session.permissionProfiles.filter((candidate) => candidate.allowed)) {
@@ -518,4 +518,9 @@ async function refresh() {
 }
 
 refresh();
-setInterval(refresh, POLL_INTERVAL_MS);
+setInterval(() => {
+  if (!document.hidden) refresh();
+}, POLL_INTERVAL_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) refresh();
+});

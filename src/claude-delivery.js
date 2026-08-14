@@ -66,7 +66,7 @@ function ackSourceMatches(job, parsed) {
   );
 }
 
-export function createClaudeDeliveryJob({
+export async function createClaudeDeliveryJob({
   from,
   sourceRecord,
   peer,
@@ -128,29 +128,29 @@ export async function sendClaudeDeliveryJob(
 ) {
   const current = readJob(job.jobId) || job;
   if ((current.delivery?.attempt || 0) >= (current.delivery?.maxAttempts || 4)) {
-    return updateJob(current, {
+    return await updateJob(current, {
       status: "failed",
       error: "Claude delivery exhausted its retry budget",
       completedAt: new Date().toISOString(),
     });
   }
-  const peer = resolveStoredTarget(await peers(), current);
   const messageId = randomUUID();
   const attemptedAt = new Date().toISOString();
   const attempt = (current.delivery?.attempt || 0) + 1;
-  const frame = buildClaudePeerFrame({
-    fromSocket: bridgeRecord.socketPath,
-    fromName: `codex-${current.from}`,
-    fromSession: sourceRecord.threadId,
-    message: deliveryBody(current),
-    messageId,
-  });
   try {
+    const peer = resolveStoredTarget(await peers(), current);
+    const frame = buildClaudePeerFrame({
+      fromSocket: bridgeRecord.socketPath,
+      fromName: `codex-${current.from}`,
+      fromSession: sourceRecord.threadId,
+      message: deliveryBody(current),
+      messageId,
+    });
     await send(peer.socketPath, frame);
     const ackDeadlineAt = new Date(
       Date.now() + (current.ackTimeoutSeconds || 120) * 1_000,
     ).toISOString();
-    return updateJob(current, {
+    return await updateJob(current, {
       status: "transport_delivered",
       error: null,
       delivery: {
@@ -166,7 +166,7 @@ export async function sendClaudeDeliveryJob(
       },
     });
   } catch (error) {
-    return updateJob(current, {
+    return await updateJob(current, {
       status: error?.code === "EPERM" ? "unreachable" : "transport_error",
       error: error.message,
       delivery: {
@@ -280,7 +280,7 @@ export async function recordClaudeDeliveryAck(parsed, ack) {
   return { ...updated, ackTransitioned };
 }
 
-export function refreshClaudeDelivery(job) {
+export async function refreshClaudeDelivery(job) {
   if (
     job?.kind === "claude-delivery" &&
     job.status === "transport_delivered" &&

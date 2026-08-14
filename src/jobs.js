@@ -5,18 +5,15 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
-  statSync,
-  unlinkSync,
   writeFileSync,
-  openSync,
-  closeSync,
 } from "node:fs";
 import path from "node:path";
+import { withFileLock } from "./file-lock.js";
 import { finalTurnResult } from "./messaging.js";
+import { processState } from "./process-state.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 const JOBS_DIR = path.join(CXMSG_STATE_DIR, "jobs");
-const LOCK_STALE_MS = 30_000;
 
 function ensureJobsDirectory() {
   mkdirSync(JOBS_DIR, { recursive: true, mode: 0o700 });
@@ -124,50 +121,10 @@ export function isPendingJob(job) {
   );
 }
 
-export function updateJob(job, changes) {
-  return writeJob({
-    ...job,
-    ...changes,
-    updatedAt: new Date().toISOString(),
-  });
-}
-
 export async function withJobLock(jobId, callback, timeoutMs = 10_000) {
   validateJobId(jobId);
   ensureJobsDirectory();
-  const target = jobLockPath(jobId);
-  const deadline = Date.now() + timeoutMs;
-  let descriptor;
-
-  while (descriptor === undefined) {
-    try {
-      descriptor = openSync(target, "wx", 0o600);
-      writeFileSync(descriptor, `${process.pid}\n`);
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - statSync(target).mtimeMs > LOCK_STALE_MS) {
-          unlinkSync(target);
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`timed out acquiring job lock: ${jobId}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-  }
-
-  try {
-    return await callback();
-  } finally {
-    closeSync(descriptor);
-    try {
-      unlinkSync(target);
-    } catch {}
-  }
+  return withFileLock(jobLockPath(jobId), callback, { timeoutMs });
 }
 
 export async function mutateJob(jobId, mutate) {
@@ -181,8 +138,45 @@ export async function mutateJob(jobId, mutate) {
   });
 }
 
+export async function updateJob(job, changes) {
+  return mutateJob(job.jobId, (current) => ({
+    ...current,
+    ...changes,
+  }));
+}
+
 export function activeJobsForTarget(target) {
   return listJobs().filter((job) => job.target === target && isPendingJob(job));
+}
+
+export async function failJobIfWorkerExited(
+  job,
+  { processStateFn = processState } = {},
+) {
+  if (
+    job?.kind !== "delegation" ||
+    !isPendingJob(job) ||
+    !Number.isSafeInteger(job.workerPid) ||
+    processStateFn(job.workerPid) !== "missing"
+  ) {
+    return job;
+  }
+  return mutateJob(job.jobId, (current) => {
+    if (
+      current.kind !== "delegation" ||
+      !isPendingJob(current) ||
+      current.workerPid !== job.workerPid
+    ) {
+      return current;
+    }
+    return {
+      ...current,
+      status: "failed",
+      failureCode: "worker_exited",
+      error: "delegation worker exited before job completion",
+      completedAt: new Date().toISOString(),
+    };
+  });
 }
 
 export async function refreshJob(client, job) {
@@ -197,7 +191,7 @@ export async function refreshJob(client, job) {
     if (Number.isFinite(startedAt) && Date.now() - startedAt < 10_000) {
       return job;
     }
-    return updateJob(job, {
+    return await updateJob(job, {
       status: "unknown",
       error: `turn not found: ${job.turnId}`,
       completedAt: job.completedAt || new Date().toISOString(),

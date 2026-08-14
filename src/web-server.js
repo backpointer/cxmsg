@@ -3,15 +3,19 @@ import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { probeAppServerSocket, withAppServer } from "./app-server-client.js";
-import { readAttachmentRecord, sessionPresentation } from "./attachments.js";
+import {
+  attachmentCommandMatches,
+  readAttachmentRecord,
+  removeAttachmentRecord,
+  sessionPresentation,
+} from "./attachments.js";
 import { claudeBridgeState } from "./claude-bridge.js";
 import {
   listClaudeRequestGrants,
-  publicClaudeRequestGrant,
 } from "./claude-grants.js";
 import { listClaudePeers } from "./claude-messaging.js";
 import { listJobs } from "./jobs.js";
-import { processState } from "./process-state.js";
+import { processIdentity, processState } from "./process-state.js";
 import { listSessionRecords } from "./registry.js";
 import { DEFAULT_SOCKET_PATH, PID_PATH, socketPath } from "./runtime.js";
 
@@ -74,9 +78,16 @@ function publicClaudePeer(peer) {
 
 function liveAttachment(name) {
   const attachment = readAttachmentRecord(name);
-  return attachment && processState(attachment.childPid) !== "missing"
-    ? attachment
-    : null;
+  if (!attachment) return null;
+  if (processState(attachment.childPid) === "missing") {
+    removeAttachmentRecord(name, attachment.childPid);
+    return null;
+  }
+  const identity = processIdentity(attachment.childPid, []);
+  if (identity.state !== "matched") return attachment;
+  if (attachmentCommandMatches(attachment, identity.command)) return attachment;
+  removeAttachmentRecord(name, attachment.childPid);
+  return null;
 }
 
 async function permissionProfiles(client, cwd, cache) {
@@ -134,12 +145,18 @@ async function codexSessionSnapshot(client, record, profileCache) {
       allowed: profile.allowed,
       description: profile.description || null,
     })),
-    error,
+    hasError: Boolean(error),
   };
 }
 
 function publicClaudeRequestGrants(record) {
-  return listClaudeRequestGrants(record).map(publicClaudeRequestGrant);
+  return listClaudeRequestGrants(record).map((grant) => ({
+    sessionId: grant.sessionId,
+    name: grant.name,
+    permissions: grant.permissions,
+    approval: grant.approval || "never",
+    grantedAt: grant.grantedAt,
+  }));
 }
 
 export async function buildWebSnapshot({
@@ -226,7 +243,26 @@ function send(res, status, contentType, body, headOnly = false) {
 export function createWebRequestHandler({
   snapshot = buildWebSnapshot,
   webRoot = DEFAULT_WEB_ROOT,
+  snapshotCacheMs = 1_000,
 } = {}) {
+  let cachedSnapshot = null;
+  let cacheExpiresAt = 0;
+  let snapshotInFlight = null;
+  const currentSnapshot = async () => {
+    if (cachedSnapshot && Date.now() < cacheExpiresAt) return cachedSnapshot;
+    if (!snapshotInFlight) {
+      snapshotInFlight = Promise.resolve(snapshot())
+        .then((value) => {
+          cachedSnapshot = value;
+          cacheExpiresAt = Date.now() + snapshotCacheMs;
+          return value;
+        })
+        .finally(() => {
+          snapshotInFlight = null;
+        });
+    }
+    return snapshotInFlight;
+  };
   return async function handleRequest(req, res) {
     const headOnly = req.method === "HEAD";
     if (req.method !== "GET" && !headOnly) {
@@ -246,7 +282,7 @@ export function createWebRequestHandler({
     }
     if (pathname === "/api/snapshot") {
       try {
-        const body = JSON.stringify(await snapshot());
+        const body = JSON.stringify(await currentSnapshot());
         send(res, 200, "application/json; charset=utf-8", body, headOnly);
       } catch (error) {
         send(
@@ -278,11 +314,14 @@ export async function startWebServer({
   port = 4173,
   snapshot = buildWebSnapshot,
   webRoot = DEFAULT_WEB_ROOT,
+  snapshotCacheMs = 1_000,
 } = {}) {
   if (!Number.isInteger(port) || port < 0 || port > 65_535) {
     throw new Error("web port must be an integer between 0 and 65535");
   }
-  const server = http.createServer(createWebRequestHandler({ snapshot, webRoot }));
+  const server = http.createServer(
+    createWebRequestHandler({ snapshot, webRoot, snapshotCacheMs }),
+  );
   await new Promise((resolve, reject) => {
     server.once("error", reject);
     server.listen(port, LOOPBACK_HOST, resolve);

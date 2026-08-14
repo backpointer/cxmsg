@@ -13,6 +13,11 @@ import {
 
 export const CLAUDE_SESSIONS_DIR = path.join(os.homedir(), ".claude", "sessions");
 export const CLAUDE_SOCKETS_DIR = path.join(path.sep, "tmp", "cc-socks");
+export function claudeSocketsDir() {
+  return process.env.CXMSG_CLAUDE_SOCKETS_DIR
+    ? path.resolve(process.env.CXMSG_CLAUDE_SOCKETS_DIR)
+    : CLAUDE_SOCKETS_DIR;
+}
 export const CLAUDE_PEER_PROTOCOL = 1;
 export const MAX_CLAUDE_FRAME_BYTES = 64 * 1024;
 const CLAUDE_REQUEST_CLOSE = "</cxmsg-request>";
@@ -110,6 +115,19 @@ export function parseClaudeRequestBody(body) {
   return { grantToken: match[1], task: match[2] };
 }
 
+export function redactClaudeRequestCapabilities(body) {
+  if (typeof body !== "string" || !/^\s*<cxmsg-request\b/i.test(body)) {
+    return body;
+  }
+  const openingEnd = body.indexOf(">");
+  if (openingEnd === -1) return "<cxmsg-request grant=\"[redacted]\">";
+  const opening = body.slice(0, openingEnd + 1).replace(
+    /\bgrant\s*=\s*(?:"[^"\r\n]*"|'[^'\r\n]*'|[^\s>]+)/gi,
+    'grant="[redacted]"',
+  );
+  return `${opening}${body.slice(openingEnd + 1)}`;
+}
+
 export function buildClaudeResponseBody({ requestId, status, result, error }) {
   if (!isUuid(requestId)) throw new Error("Claude request id must be a UUID");
   if (!/^[a-z][a-zA-Z0-9_-]{0,31}$/.test(status || "")) {
@@ -165,7 +183,7 @@ export function parseClaudePeerFrame(frame) {
 export async function validateClaudeSocketPath(socketPath) {
   const resolved = path.resolve(socketPath || "");
   if (
-    path.dirname(resolved) !== path.resolve(CLAUDE_SOCKETS_DIR) ||
+    path.dirname(resolved) !== claudeSocketsDir() ||
     !/^\d+\.sock$/.test(path.basename(resolved))
   ) {
     throw new Error(`refusing non-Claude UDS path: ${socketPath}`);

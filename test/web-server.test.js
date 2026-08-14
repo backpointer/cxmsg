@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { publicJob, startWebServer } from "../src/web-server.js";
+import { buildWebSnapshot, publicJob, startWebServer } from "../src/web-server.js";
 import { buildTopology, edgeTone, focusProject } from "../web/topology.js";
 
 test("web job snapshots omit task, result, error, and capability material", () => {
@@ -42,6 +42,56 @@ test("web job snapshots omit task, result, error, and capability material", () =
   assert.doesNotMatch(JSON.stringify(job), /private|capability-secret|uds:/);
 });
 
+test("web snapshot redacts Claude addresses, grant hints, and App Server errors", async () => {
+  const secretToken = "92345678-1234-4123-8123-123456789abc";
+  const snapshot = await buildWebSnapshot({
+    connect: async (callback) =>
+      callback({
+        request: async (method) => {
+          if (method === "thread/read") throw new Error("private App Server error");
+          if (method === "permissionProfile/list") return { data: [] };
+          assert.fail(`unexpected request: ${method}`);
+        },
+      }),
+    sessions: () => [
+      {
+        name: "worker",
+        threadId: "thread-1",
+        cwd: "/project",
+        allowedClaudeRequesters: [
+          {
+            sessionId: "87654321-4321-4321-8321-123456789abc",
+            name: "reviewer",
+            address: "uds:/private/grant.sock",
+            permissions: ":read-only",
+            token: secretToken,
+            grantedAt: "2026-08-12T00:00:00.000Z",
+          },
+        ],
+      },
+    ],
+    claudePeers: async () => [
+      {
+        pid: 123,
+        name: "reviewer",
+        sessionId: "87654321-4321-4321-8321-123456789abc",
+        cwd: "/project",
+        address: "uds:/private/peer.sock",
+        socketPath: "/private/peer.sock",
+      },
+    ],
+    jobs: () => [],
+    appServerProbe: async () => ({ state: "healthy", errorCode: null }),
+  });
+
+  const encoded = JSON.stringify(snapshot);
+  assert.doesNotMatch(encoded, /uds:|private App Server error/);
+  assert.doesNotMatch(encoded, new RegExp(secretToken.slice(0, 8)));
+  assert.equal(snapshot.codexSessions[0].hasError, true);
+  assert.equal("address" in snapshot.codexSessions[0].claudeGrants[0], false);
+  assert.equal("tokenHint" in snapshot.codexSessions[0].claudeGrants[0], false);
+});
+
 test("loopback web server separates dashboard, orchestration, and snapshot routes", async () => {
   const snapshot = {
     generatedAt: "2026-08-12T00:00:00.000Z",
@@ -50,7 +100,14 @@ test("loopback web server separates dashboard, orchestration, and snapshot route
     claudeSessions: [],
     jobs: [],
   };
-  const web = await startWebServer({ port: 0, snapshot: async () => snapshot });
+  let snapshotCalls = 0;
+  const web = await startWebServer({
+    port: 0,
+    snapshot: async () => {
+      snapshotCalls += 1;
+      return snapshot;
+    },
+  });
   try {
     const dashboard = await fetch(`${web.origin}/dashboard`);
     assert.equal(dashboard.status, 200);
@@ -64,6 +121,13 @@ test("loopback web server separates dashboard, orchestration, and snapshot route
     const response = await fetch(`${web.origin}/api/snapshot`);
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), snapshot);
+    const cached = await Promise.all([
+      fetch(`${web.origin}/api/snapshot`),
+      fetch(`${web.origin}/api/snapshot`),
+    ]);
+    assert.deepEqual(await cached[0].json(), snapshot);
+    assert.deepEqual(await cached[1].json(), snapshot);
+    assert.equal(snapshotCalls, 1);
 
     const rejected = await fetch(`${web.origin}/api/snapshot`, { method: "POST" });
     assert.equal(rejected.status, 405);

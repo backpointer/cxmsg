@@ -19,7 +19,7 @@ test("relay and auto approvals preserve decisions and audit records", async () =
       approval: "relay",
       approvalTimeoutSeconds: 5,
     });
-    updateJob(created, { status: "running" });
+    await updateJob(created, { status: "running" });
     const pendingResponse = createApprovalHandler(created.jobId)({
       method: "item/commandExecution/requestApproval",
       params: {
@@ -53,7 +53,7 @@ test("relay and auto approvals preserve decisions and audit records", async () =
       approval: "relay",
       approvalTimeoutSeconds: 5,
     });
-    updateJob(concurrent, { status: "running" });
+    await updateJob(concurrent, { status: "running" });
     const handler = createApprovalHandler(concurrent.jobId);
     const firstResponse = handler({
       method: "item/commandExecution/requestApproval",
@@ -85,7 +85,7 @@ test("relay and auto approvals preserve decisions and audit records", async () =
       task: "request permissions",
       approval: "auto",
     });
-    updateJob(automatic, { status: "running" });
+    await updateJob(automatic, { status: "running" });
     const requested = { network: { enabled: true } };
     const response = await createApprovalHandler(automatic.jobId)({
       method: "item/permissions/requestApproval",
@@ -95,6 +95,32 @@ test("relay and auto approvals preserve decisions and audit records", async () =
     const automaticJob = readJob(automatic.jobId);
     assert.equal(automaticJob.approvals[0].automatic, true);
     assert.equal(automaticJob.approvals[0].status, "approved");
+
+    const typed = createJob({
+      jobId: "72345678-1234-1234-1234-123456789abc",
+      from: "coordinator",
+      target: "worker",
+      threadId: "execution-thread",
+      task: "answer a typed question",
+      approval: "auto",
+    });
+    await updateJob(typed, { status: "running" });
+    await assert.rejects(
+      createApprovalHandler(typed.jobId)({
+        method: "item/tool/requestUserInput",
+        params: {
+          itemId: "question-1",
+          questions: [
+            {
+              id: "branch",
+              options: [{ label: "Custom value" }],
+            },
+          ],
+        },
+      }),
+      /requires a typed answer/,
+    );
+    assert.equal(readJob(typed.jobId).approvals.length, 0);
   } finally {
     await fs.rm(stateDir, { recursive: true, force: true });
     delete process.env.CXMSG_STATE_DIR;

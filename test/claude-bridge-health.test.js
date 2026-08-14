@@ -1,17 +1,28 @@
 import assert from "node:assert/strict";
 import { promises as fs } from "node:fs";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 import {
   evaluateClaudeBridgeRecord,
   probeClaudeBridge,
 } from "../src/claude-bridge.js";
-import { CLAUDE_SOCKETS_DIR } from "../src/claude-messaging.js";
+import { claudeSocketsDir } from "../src/claude-messaging.js";
+
+const TEST_CLAUDE_SOCKETS_DIR = await fs.mkdtemp(
+  path.join(os.tmpdir(), "cxmsg-bridge-sockets-"),
+);
+process.env.CXMSG_CLAUDE_SOCKETS_DIR = TEST_CLAUDE_SOCKETS_DIR;
+after(async () => {
+  delete process.env.CXMSG_CLAUDE_SOCKETS_DIR;
+  await fs.rm(TEST_CLAUDE_SOCKETS_DIR, { recursive: true, force: true });
+});
 
 test("bridge identity handshake supports EPERM status and rejects mismatches", async () => {
   const pid = Number(`${process.pid}${String(Date.now()).slice(-5)}`);
-  const socketPath = path.join(CLAUDE_SOCKETS_DIR, `${pid}.sock`);
+  const socketsDir = claudeSocketsDir();
+  const socketPath = path.join(socketsDir, `${pid}.sock`);
   const record = {
     target: "worker",
     targetThreadId: "thread-1",
@@ -36,7 +47,7 @@ test("bridge identity handshake supports EPERM status and rejects mismatches", a
       );
     });
   });
-  await fs.mkdir(CLAUDE_SOCKETS_DIR, { recursive: true, mode: 0o700 });
+  await fs.mkdir(socketsDir, { recursive: true, mode: 0o700 });
   await fs.unlink(socketPath).catch(() => {});
   await new Promise((resolve, reject) => {
     server.once("error", reject);

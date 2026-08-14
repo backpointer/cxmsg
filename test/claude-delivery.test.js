@@ -24,7 +24,7 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
       status: "idle",
     };
     const sourceRecord = { threadId: "source-thread" };
-    let job = createClaudeDeliveryJob({
+    let job = await createClaudeDeliveryJob({
       from: "coordinator",
       sourceRecord,
       peer,
@@ -84,7 +84,7 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
         return { turn: { id: "wake-turn" } };
       },
     };
-    let addressFallback = createClaudeDeliveryJob({
+    let addressFallback = await createClaudeDeliveryJob({
       from: "coordinator",
       sourceRecord,
       peer,
@@ -146,7 +146,7 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.equal(wakes.length, 1);
 
     const wrongSession = "77654321-4321-4321-4321-cba987654321";
-    const sessionMismatch = createClaudeDeliveryJob({
+    const sessionMismatch = await createClaudeDeliveryJob({
       from: "coordinator",
       sourceRecord,
       peer,
@@ -173,8 +173,12 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.equal(rejectedSession.status, "ack_rejected");
     assert.equal(rejectedSession.ack.code, "source_mismatch");
     assert.equal(rejectedSession.delivery.errorCode, "source_mismatch");
+    assert.equal(
+      (await refreshClaudeDelivery(rejectedSession)).status,
+      "ack_rejected",
+    );
 
-    const addressMismatch = createClaudeDeliveryJob({
+    const addressMismatch = await createClaudeDeliveryJob({
       from: "coordinator",
       sourceRecord,
       peer,
@@ -195,20 +199,36 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     );
     assert.equal(readJob(addressMismatch.jobId).status, "ack_rejected");
 
-    let timedOut = createClaudeDeliveryJob({
+    const vanishedPeer = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "record target resolution failure",
+    });
+    const failedResolution = await sendClaudeDeliveryJob(
+      { socketPath: "/tmp/cc-socks/99999.sock" },
+      sourceRecord,
+      vanishedPeer,
+      { peers: async () => [], send: async () => assert.fail("must not send") },
+    );
+    assert.equal(failedResolution.status, "transport_error");
+    assert.match(failedResolution.error, /not reachable/);
+    assert.equal(readJob(vanishedPeer.jobId).status, "transport_error");
+
+    let timedOut = await createClaudeDeliveryJob({
       from: "coordinator",
       sourceRecord,
       peer,
       message: "check ACK timeout",
     });
-    timedOut = updateJob(timedOut, {
+    timedOut = await updateJob(timedOut, {
       status: "transport_delivered",
       delivery: {
         ...timedOut.delivery,
         ackDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
       },
     });
-    assert.equal(refreshClaudeDelivery(timedOut).status, "ack_timeout");
+    assert.equal((await refreshClaudeDelivery(timedOut)).status, "ack_timeout");
   } finally {
     await fs.rm(stateDir, { recursive: true, force: true });
     delete process.env.CXMSG_STATE_DIR;

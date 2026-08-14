@@ -1,23 +1,20 @@
 import { randomUUID } from "node:crypto";
 import {
   chmodSync,
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
   readdirSync,
   renameSync,
-  statSync,
   unlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { withFileLock } from "./file-lock.js";
 import { validateSessionName } from "./messaging.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 const SESSIONS_DIR = path.join(CXMSG_STATE_DIR, "sessions");
-const LOCK_STALE_MS = 30_000;
 
 function ensureRegistry() {
   mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
@@ -86,35 +83,5 @@ export function removeSessionRecord(name) {
 
 export async function withSessionLock(name, callback, timeoutMs = 10_000) {
   ensureRegistry();
-  const target = lockPath(name);
-  const deadline = Date.now() + timeoutMs;
-  let descriptor;
-
-  while (descriptor === undefined) {
-    try {
-      descriptor = openSync(target, "wx", 0o600);
-      writeFileSync(descriptor, `${process.pid}\n`);
-    } catch (error) {
-      if (error.code !== "EEXIST") throw error;
-      try {
-        if (Date.now() - statSync(target).mtimeMs > LOCK_STALE_MS) {
-          unlinkSync(target);
-          continue;
-        }
-      } catch {
-        continue;
-      }
-      if (Date.now() >= deadline) {
-        throw new Error(`timed out acquiring session lock: ${name}`);
-      }
-      await new Promise((resolve) => setTimeout(resolve, 50));
-    }
-  }
-
-  try {
-    return await callback();
-  } finally {
-    closeSync(descriptor);
-    if (existsSync(target)) unlinkSync(target);
-  }
+  return withFileLock(lockPath(name), callback, { timeoutMs });
 }

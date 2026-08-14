@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { promises as fs } from "node:fs";
+import net from "node:net";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
-import { AppServerClient } from "../src/app-server-client.js";
+import {
+  AppServerClient,
+  validateAppServerSocket,
+} from "../src/app-server-client.js";
 
 class FakeTransport extends EventEmitter {
   constructor() {
@@ -54,4 +61,27 @@ test("App Server client answers server-initiated approval requests", async () =>
     { id: 99, result: { decision: "accept" } },
   );
   await client.close();
+});
+
+test("App Server socket validation requires a private owner-controlled path", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-app-socket-"));
+  const socketPath = path.join(directory, "app-server.sock");
+  const server = net.createServer();
+  await fs.chmod(directory, 0o700);
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(socketPath, resolve);
+  });
+  try {
+    await fs.chmod(socketPath, 0o600);
+    assert.equal(validateAppServerSocket(socketPath).isSocket(), true);
+    await fs.chmod(socketPath, 0o666);
+    assert.throws(() => validateAppServerSocket(socketPath), /too broad/);
+    await fs.chmod(socketPath, 0o600);
+    await fs.chmod(directory, 0o755);
+    assert.throws(() => validateAppServerSocket(socketPath), /parent permissions/);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
 });

@@ -113,6 +113,12 @@ Stop the local server when no attached Codex session needs it:
 cxmsg server stop
 ```
 
+Create a durable named session without attaching a TUI:
+
+```bash
+cxmsg create worker
+```
+
 Remove a named session and its saved Codex thread:
 
 ```bash
@@ -124,6 +130,9 @@ Adopt an existing App Server thread under a peer name:
 ```bash
 cxmsg register worker <thread-id>
 ```
+
+Peer names are 1-64 characters, start with an ASCII letter or digit, and may
+otherwise contain letters, digits, `.`, `_`, or `-`.
 
 The existing thread must be addressable by the same App Server. A regular
 standalone `codex` TUI keeps an active-writer lock; close it before resuming the
@@ -571,10 +580,15 @@ signal.
 - `delegate` requires an explicit `grant <sender> <target>` relationship.
 - Every job receives a UUID correlation ID stored under
   `~/.codex/cxmsg/jobs/` with mode `0600`.
+- Job and registry updates use owner-checked lease locks so concurrent status,
+  approval, and completion writes do not overwrite one another.
 - The job record binds the logical target thread, execution thread, App Server
   turn ID, task, permission profile, status, error, and final result.
 - `wait` polls only the correlated turn until it reaches a terminal state.
 - `result` refreshes a running job once or returns its cached terminal result.
+- If a delegation worker exits before recording a terminal result, later
+  `status`, `wait`, or `result` calls mark the job failed with
+  `failureCode: "worker_exited"` instead of leaving it running indefinitely.
 
 Each delegated job runs in a persistent fork of the target worker thread. The
 fork retains the worker's conversation context while keeping job-specific

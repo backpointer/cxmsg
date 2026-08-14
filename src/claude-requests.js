@@ -14,7 +14,11 @@ import {
   refreshJob,
   updateJob,
 } from "./jobs.js";
-import { activeTurnId, deliverDelegatedTask } from "./messaging.js";
+import {
+  activeTurnId,
+  deliverDelegatedTask,
+  truncateUtf8,
+} from "./messaging.js";
 
 export const CLAUDE_REQUEST_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_REPLY_TEXT_BYTES = 24 * 1024;
@@ -28,12 +32,11 @@ function senderName(parsed) {
 
 function boundedReplyText(value) {
   const text = value || "Codex completed without a final response.";
-  const bytes = Buffer.from(text, "utf8");
-  if (bytes.length <= MAX_REPLY_TEXT_BYTES) return text;
-  return `${bytes.subarray(0, MAX_REPLY_TEXT_BYTES).toString("utf8")}\n\n[truncated by cxmsg]`;
+  if (Buffer.byteLength(text, "utf8") <= MAX_REPLY_TEXT_BYTES) return text;
+  return `${truncateUtf8(text, MAX_REPLY_TEXT_BYTES)}\n\n[truncated by cxmsg]`;
 }
 
-function terminalFailure(job, message) {
+async function terminalFailure(job, message) {
   return updateJob(job, {
     status: "failed",
     error: message,
@@ -129,7 +132,7 @@ async function waitForCompletion(client, job, deadline) {
   return current;
 }
 
-export function createClaudeRequestJob({ target, targetRecord, parsed, grant, task }) {
+export async function createClaudeRequestJob({ target, targetRecord, parsed, grant, task }) {
   const existing = readJob(parsed.messageId);
   if (existing) {
     if (existing.kind !== "claude-request") {
@@ -229,10 +232,10 @@ export async function processClaudeRequest({
     );
   } catch (error) {
     current = readJob(job.jobId) || current;
-    if (isPendingJob(current)) current = terminalFailure(current, error.message);
+    if (isPendingJob(current)) current = await terminalFailure(current, error.message);
   }
   if (isPendingJob(current)) {
-    current = terminalFailure(current, "Claude request stopped before completion");
+    current = await terminalFailure(current, "Claude request stopped before completion");
   }
   return replyToClaudeRequest(bridgeRecord, targetRecord, current);
 }
