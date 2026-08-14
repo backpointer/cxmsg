@@ -276,6 +276,9 @@ export async function listClaudePeers({
               : "socket",
             errorCode: unreachable ? probe.errorCode : null,
             kind: typeof record.kind === "string" ? record.kind : null,
+            startedAt: Number.isSafeInteger(record.startedAt)
+              ? record.startedAt
+              : null,
             peerProtocol: record.peerProtocol,
             socketPath: record.messagingSocketPath,
             address: claudePeerAddress(record.messagingSocketPath),

@@ -98,6 +98,17 @@ import {
   readMessageBody,
 } from "../src/message-bodies.js";
 import {
+  ensureProject,
+  findProjectByRoutingId,
+  listNodes,
+  listProjects,
+  projectContainsPath,
+  publicNode,
+  publicProject,
+  readNode,
+  upsertNode,
+} from "../src/node-directory.js";
+import {
   listQuarantine,
   listRouteBindings,
   readRouteBinding,
@@ -146,6 +157,11 @@ function usage(exitCode = 0) {
   cxmsg route show <session> [--json]
   cxmsg route list [--json]
   cxmsg quarantine list [--json]
+  cxmsg directory project ensure <routing-id> <root> [--json]
+  cxmsg directory sync --project <routing-id> [--codex-only|--claude-only] [--json]
+  cxmsg directory projects [--json] [--paths]
+  cxmsg directory nodes [--json] [--endpoints]
+  cxmsg directory node show <codex|claude> <native-id> [--json] [--endpoints]
   cxmsg message info <message-id|content-ref> [--json]
   cxmsg message show <message-id|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -1721,10 +1737,36 @@ async function commandRoute(args) {
     if (!projectId || !role) {
       throw new Error("route bind requires --project and --role");
     }
+    const directoryProject = findProjectByRoutingId(projectId);
+    let directoryNode = null;
+    if (directoryProject) {
+      if (!projectContainsPath(directoryProject, sessionRecord.cwd)) {
+        throw new Error(
+          `session ${sessionName} does not belong to Project ${projectId}`,
+        );
+      }
+      directoryNode = (
+        await upsertNode({
+          runtimeKind: "codex",
+          nativeId: sessionRecord.threadId,
+          displayName: sessionName,
+          projectId: directoryProject.projectId,
+          endpoint: {
+            transport: "codex-app-server",
+            endpointId: `app-server:${sessionRecord.threadId}`,
+            generation: Date.parse(sessionRecord.createdAt || "") || 0,
+            status: "unknown",
+            sessionName,
+          },
+        })
+      ).record;
+    }
     const binding = writeRouteBinding({
       sessionName,
       threadId: sessionRecord.threadId,
       projectId,
+      projectKey: directoryProject?.projectId || null,
+      nodeKey: directoryNode?.nodeKey || null,
       role,
     });
     process.stdout.write(
@@ -1757,6 +1799,162 @@ async function commandRoute(args) {
       jsonOutput
         ? `${JSON.stringify(bindings, null, 2)}\n`
         : `${bindings.map((binding) => `${binding.sessionName}\t${binding.projectId}\t${binding.role}`).join("\n")}${bindings.length ? "\n" : ""}`,
+    );
+    return;
+  }
+  usage(2);
+}
+
+function jsonOrLines(records, jsonOutput, render) {
+  process.stdout.write(
+    jsonOutput
+      ? `${JSON.stringify(records, null, 2)}\n`
+      : `${records.map(render).join("\n")}${records.length ? "\n" : ""}`,
+  );
+}
+
+function codexEndpoint(record) {
+  return {
+    transport: "codex-app-server",
+    endpointId: `app-server:${record.threadId}`,
+    generation: Date.parse(record.createdAt || "") || 0,
+    status: "unknown",
+    sessionName: record.name,
+  };
+}
+
+function claudeEndpoint(peer) {
+  const reachable = ["socket", "identity"].includes(peer.verification);
+  return {
+    transport: "claude-uds",
+    endpointId: `claude:${peer.sessionId}:${peer.pid}`,
+    generation: Number.isSafeInteger(peer.startedAt)
+      ? peer.startedAt
+      : 0,
+    status: reachable
+      ? "reachable"
+      : peer.status === "unreachable"
+        ? "unreachable"
+        : "unknown",
+    address: peer.address,
+  };
+}
+
+async function commandDirectory(args) {
+  const operation = args.shift();
+  if (operation === "project") {
+    if (args.shift() !== "ensure") usage(2);
+    const routingId = args.shift();
+    const root = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (!routingId || !root || args.some((value) => value !== "--json")) usage(2);
+    const project = await ensureProject({ routingId, root });
+    const output = publicProject(project, { includePaths: true });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `project ${output.routingId} ${output.projectId} (${output.discoveryKind})\n`,
+    );
+    return;
+  }
+  if (operation === "projects") {
+    const jsonOutput = args.includes("--json");
+    const includePaths = args.includes("--paths");
+    if (args.some((value) => !["--json", "--paths"].includes(value))) usage(2);
+    const projects = listProjects().map((record) =>
+      publicProject(record, { includePaths }),
+    );
+    jsonOrLines(
+      projects,
+      jsonOutput,
+      (project) => `${project.routingId}\t${project.projectId}\t${project.rootCount}`,
+    );
+    return;
+  }
+  if (operation === "nodes") {
+    const jsonOutput = args.includes("--json");
+    const includeEndpoints = args.includes("--endpoints");
+    if (args.some((value) => !["--json", "--endpoints"].includes(value))) usage(2);
+    const nodes = listNodes().map((record) =>
+      publicNode(record, { includeEndpoints }),
+    );
+    jsonOrLines(
+      nodes,
+      jsonOutput,
+      (node) => `${node.nodeKey}\t${node.projectId}\t${node.aliases.at(-1)?.value || "-"}`,
+    );
+    return;
+  }
+  if (operation === "node") {
+    if (args.shift() !== "show") usage(2);
+    const runtimeKind = args.shift();
+    const nativeId = args.shift();
+    const jsonOutput = args.includes("--json");
+    const includeEndpoints = args.includes("--endpoints");
+    if (
+      !runtimeKind ||
+      !nativeId ||
+      args.some((value) => !["--json", "--endpoints"].includes(value))
+    ) {
+      usage(2);
+    }
+    const record = readNode(runtimeKind, nativeId);
+    if (!record) throw new Error(`unknown Directory Node: ${runtimeKind}:${nativeId}`);
+    const node = publicNode(record, { includeEndpoints });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(node, null, 2)}\n`
+        : `${node.nodeKey}\t${node.projectId}\t${node.aliases.at(-1)?.value || "-"}\n`,
+    );
+    return;
+  }
+  if (operation === "sync") {
+    let routingId = null;
+    let includeCodex = true;
+    let includeClaude = true;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--project") routingId = args.shift();
+      else if (option === "--codex-only") includeClaude = false;
+      else if (option === "--claude-only") includeCodex = false;
+      else if (option === "--json") jsonOutput = true;
+      else throw new Error(`unknown directory sync option: ${option}`);
+    }
+    if (!routingId || (!includeCodex && !includeClaude)) usage(2);
+    const project = findProjectByRoutingId(routingId);
+    if (!project) throw new Error(`unknown Project routing id: ${routingId}`);
+    const synchronized = [];
+    if (includeCodex) {
+      for (const record of listSessionRecords()) {
+        if (!projectContainsPath(project, record.cwd)) continue;
+        const result = await upsertNode({
+          runtimeKind: "codex",
+          nativeId: record.threadId,
+          displayName: record.name,
+          projectId: project.projectId,
+          endpoint: codexEndpoint(record),
+        });
+        synchronized.push(publicNode(result.record));
+      }
+    }
+    if (includeClaude) {
+      for (const peer of await listClaudePeers()) {
+        if (!projectContainsPath(project, peer.cwd)) continue;
+        const result = await upsertNode({
+          runtimeKind: "claude",
+          nativeId: peer.sessionId,
+          displayName: peer.name,
+          projectId: project.projectId,
+          endpoint: claudeEndpoint(peer),
+        });
+        synchronized.push(publicNode(result.record));
+      }
+    }
+    jsonOrLines(
+      synchronized,
+      jsonOutput,
+      (node) => `${node.nodeKey}\t${node.projectId}\t${node.aliases.at(-1)?.value || "-"}`,
     );
     return;
   }
@@ -1909,6 +2107,9 @@ async function main() {
       break;
     case "quarantine":
       await commandQuarantine(args);
+      break;
+    case "directory":
+      await commandDirectory(args);
       break;
     case "message":
       await commandMessage(args);

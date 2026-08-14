@@ -102,6 +102,44 @@ Project, task, role, and payload-type identifiers are 1–128 ASCII safe
 characters and may contain letters, digits, `.`, `_`, `:`, or `-`. Codex
 session names remain the narrower 1–64 character namespace without `:`.
 
+## Stable Node and Project Directory
+
+Create one explicit local Project identity before synchronizing addressable
+sessions. The routing label remains human-readable, while cxmsg generates and
+retains a separate private UUID:
+
+```bash
+cxmsg directory project ensure hermes /path/to/hermes
+cxmsg directory sync --project hermes --codex-only
+cxmsg directory sync --project hermes --claude-only
+```
+
+Omit the runtime-only flag to synchronize both. Git repositories and their
+worktrees are matched by canonical Git common directory; non-Git projects use
+the explicitly declared canonical root. Equal basenames, remote URLs, or
+similar paths never cause an automatic merge.
+
+Inspect redacted identity metadata:
+
+```bash
+cxmsg directory projects --json
+cxmsg directory nodes --json
+cxmsg directory node show codex <thread-id> --json
+```
+
+Project paths are omitted by default. `directory projects --paths` and
+`directory node show ... --endpoints` are explicit local disclosure options.
+The stable Node key is `(runtime kind, native ID)`, encoded as
+`codex:<thread-id>` or `claude:<session-id>`; names are mutable aliases.
+Endpoint PID, UDS address, App Server presentation name, status, and generation
+remain volatile evidence and are not Node identity.
+
+When a Directory Project exists, `cxmsg route bind` also pins the binding to
+the private Project UUID and stable Codex Node key. Reusing the same routing
+label for another Project or replacing the registered thread cannot inherit
+that admission. Existing bindings created before Directory adoption remain
+supported until explicitly re-bound.
+
 Codex Peer Messages accept up to 256 KiB. Bodies through 16 KiB are delivered
 inline. Larger bodies are stored locally before transport and the receiver gets
 only a bounded preview plus an opaque Content Reference. Read only the range
@@ -181,7 +219,7 @@ cxmsg doctor --deep --target worker
 ```
 
 The default pass uses only passive process, registry, file, socket metadata,
-Job, grant, route-binding, Quarantine, bridge, and relay evidence. `--deep`
+Job, grant, Node Directory, route-binding, Quarantine, bridge, and relay evidence. `--deep`
 additionally performs
 non-mutating App Server, Claude bridge, and host relay handshakes; resolves
 registered threads with `thread/read(includeTurns:false)`; and checks stored

@@ -11,6 +11,10 @@ import {
 import path from "node:path";
 import { withFileLock } from "./file-lock.js";
 import { MAX_STORED_MESSAGE_BYTES } from "./message-bodies.js";
+import {
+  findProjectByRoutingId,
+  nodeKey as directoryNodeKey,
+} from "./node-directory.js";
 import { writeCoordinationEvent } from "./observability.js";
 import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
@@ -99,14 +103,27 @@ export function normalizeRoute(route, logicalMessageId = route?.logical_message_
   return normalized;
 }
 
-export function writeRouteBinding({ sessionName, threadId, projectId, role }) {
+export function writeRouteBinding({
+  sessionName,
+  threadId,
+  projectId,
+  projectKey = null,
+  nodeKey = null,
+  role,
+}) {
   const now = new Date().toISOString();
   const previous = readRouteBinding(sessionName);
+  const expectedNodeKey = directoryNodeKey("codex", threadId);
+  if (nodeKey && nodeKey !== expectedNodeKey) {
+    throw new Error("Node key does not match the bound Codex thread");
+  }
   return atomicWrite(ROUTE_BINDINGS_DIR, sessionFilename(sessionName), {
     version: 1,
     sessionName,
     threadId: validateUuid("thread id", threadId),
     projectId: validateName("project id", projectId),
+    ...(projectKey ? { projectKey: validateUuid("Project key", projectKey) } : {}),
+    ...(nodeKey ? { nodeKey } : {}),
     role: validateName("role", role),
     boundAt: previous?.boundAt || now,
     updatedAt: now,
@@ -119,6 +136,9 @@ export function readRouteBinding(sessionName) {
     record.sessionName === sessionName &&
     UUID_PATTERN.test(record.threadId || "") &&
     NAME_PATTERN.test(record.projectId || "") &&
+    (record.projectKey === undefined || UUID_PATTERN.test(record.projectKey)) &&
+    (record.nodeKey === undefined ||
+      record.nodeKey === directoryNodeKey("codex", record.threadId)) &&
     NAME_PATTERN.test(record.role || "")
     ? record
     : null;
@@ -136,6 +156,9 @@ export function listRouteBindings() {
         SESSION_PATTERN.test(record.sessionName || "") &&
         UUID_PATTERN.test(record.threadId || "") &&
         NAME_PATTERN.test(record.projectId || "") &&
+        (record.projectKey === undefined || UUID_PATTERN.test(record.projectKey)) &&
+        (record.nodeKey === undefined ||
+          record.nodeKey === directoryNodeKey("codex", record.threadId)) &&
         NAME_PATTERN.test(record.role || ""),
     );
 }
@@ -155,6 +178,15 @@ function admission(
     if (!senderRecord || senderBinding.threadId !== senderRecord.threadId) {
       return { state: "quarantined", reason: "sender_identity_mismatch" };
     }
+    if (
+      senderBinding.nodeKey &&
+      senderBinding.nodeKey !== directoryNodeKey("codex", senderRecord.threadId)
+    ) {
+      return { state: "quarantined", reason: "sender_node_mismatch" };
+    }
+    if (senderBinding.projectId !== route.project_id) {
+      return { state: "quarantined", reason: "sender_project_mismatch" };
+    }
     if (route.sender_role !== senderBinding.role) {
       return { state: "quarantined", reason: "sender_role_mismatch" };
     }
@@ -163,12 +195,26 @@ function admission(
   if (targetRecord && binding.threadId !== targetRecord.threadId) {
     return { state: "quarantined", reason: "target_identity_mismatch" };
   }
+  if (
+    targetRecord &&
+    binding.nodeKey &&
+    binding.nodeKey !== directoryNodeKey("codex", targetRecord.threadId)
+  ) {
+    return { state: "quarantined", reason: "target_node_mismatch" };
+  }
   if (!route) return { state: "quarantined", reason: "missing_route" };
   if (route.project_id !== binding.projectId) {
     return { state: "quarantined", reason: "project_mismatch" };
   }
   if (route.target_role !== binding.role) {
     return { state: "quarantined", reason: "role_mismatch" };
+  }
+  if (binding.projectKey) {
+    const project = findProjectByRoutingId(route.project_id);
+    if (!project) return { state: "quarantined", reason: "project_identity_missing" };
+    if (project.projectId !== binding.projectKey) {
+      return { state: "quarantined", reason: "project_identity_mismatch" };
+    }
   }
   if (route.expiry && Date.parse(route.expiry) <= now) {
     return { state: "quarantined", reason: "expired" };

@@ -32,6 +32,7 @@ const ids = {
   expired: "51345678-1234-4234-8234-123456789abc",
   senderMismatch: "61345678-1234-4234-8234-123456789abc",
   senderUnbound: "b2345678-1234-4234-8234-123456789abc",
+  senderProjectMismatch: "c3345678-1234-4234-8234-123456789abc",
   targetMismatch: "a1345678-1234-4234-8234-123456789abc",
 };
 
@@ -216,6 +217,28 @@ test("a bound sender cannot claim a different sender role", async () => {
     },
   );
   assert.equal(outcome.reason, "sender_role_mismatch");
+  assert.equal(dispatches, 0);
+});
+
+test("a bound sender role cannot be asserted across a different Project route", async () => {
+  let dispatches = 0;
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "coordinator",
+      target: "worker",
+      message: "cross-project sender claim",
+      route: route(ids.senderProjectMismatch, {
+        project_id: "stock",
+        sender_role: "coordinator",
+      }),
+      logicalMessageId: ids.senderProjectMismatch,
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+  );
+  assert.equal(outcome.reason, "sender_project_mismatch");
   assert.equal(dispatches, 0);
 });
 

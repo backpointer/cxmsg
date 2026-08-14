@@ -69,6 +69,23 @@ grant, and the bridge's internal correlated terminal-ACK wake are distinct
 paths with their own authorization or correlation checks. Their bypass of
 ordinary Route Admission does not make routing metadata authoritative.
 
+Node Directory state is owner-only and may contain canonical Project roots,
+native Codex thread or Claude session identifiers, mutable aliases, and current
+Endpoint addresses. Default list and Doctor output omit Project paths and
+Endpoint details; local CLI callers must explicitly request `--paths` or
+`--endpoints`. These records must never be committed, published, copied into
+web snapshots, or treated as authentication. A private Project UUID prevents a
+routing label from silently changing identity, but it remains cooperative
+same-user state rather than a boundary against another malicious same-user
+process.
+
+Project creation is explicit. Discovery reuses an identity only for the exact
+canonical Git common directory or declared non-Git root. cxmsg does not merge
+Projects by basename, remote URL, or path similarity and does not infer Node
+successors. Endpoint selection accepts a newer generation or refresh of the
+same generation and exact Endpoint identity; conflicting equal generations do
+not overwrite the selected Endpoint.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

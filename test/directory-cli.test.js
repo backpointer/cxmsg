@@ -1,0 +1,99 @@
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+const stateDir = mkdtempSync(path.join(os.tmpdir(), "cxmsg-directory-cli-state-"));
+const projectRoot = mkdtempSync(path.join(os.tmpdir(), "cxmsg-directory-cli-root-"));
+const canonicalProjectRoot = realpathSync(projectRoot);
+process.env.CXMSG_STATE_DIR = stateDir;
+const registry = await import(`../src/registry.js?directory-cli=${Date.now()}`);
+const threadId = "42345678-1234-4234-8234-123456789abc";
+registry.writeSessionRecord({
+  name: "worker",
+  threadId,
+  cwd: projectRoot,
+  createdAt: "2026-08-14T00:00:00.000Z",
+});
+
+test.after(() => {
+  rmSync(stateDir, { recursive: true, force: true });
+  rmSync(projectRoot, { recursive: true, force: true });
+  delete process.env.CXMSG_STATE_DIR;
+});
+
+function cxmsg(...args) {
+  return spawnSync(process.execPath, ["bin/cxmsg.js", ...args], {
+    cwd: path.resolve("."),
+    env: { ...process.env, CXMSG_STATE_DIR: stateDir },
+    encoding: "utf8",
+  });
+}
+
+test("Directory CLI creates an explicit Project and synchronizes Codex Nodes", () => {
+  const ensured = cxmsg(
+    "directory",
+    "project",
+    "ensure",
+    "hermes",
+    projectRoot,
+    "--json",
+  );
+  assert.equal(ensured.status, 0, ensured.stderr);
+  const project = JSON.parse(ensured.stdout);
+  assert.equal(project.routingId, "hermes");
+  assert.equal(project.discoveryKind, "canonical-root");
+  assert.deepEqual(project.rootAliases.map((alias) => alias.path), [canonicalProjectRoot]);
+
+  const synchronized = cxmsg(
+    "directory",
+    "sync",
+    "--project",
+    "hermes",
+    "--codex-only",
+    "--json",
+  );
+  assert.equal(synchronized.status, 0, synchronized.stderr);
+  const nodes = JSON.parse(synchronized.stdout);
+  assert.equal(nodes.length, 1);
+  assert.equal(nodes[0].nodeKey, `codex:${threadId}`);
+  assert.equal(nodes[0].projectId, project.projectId);
+  assert.equal("selectedEndpoints" in nodes[0], false);
+
+  const listed = cxmsg("directory", "projects", "--json");
+  assert.equal(listed.status, 0, listed.stderr);
+  const publicProject = JSON.parse(listed.stdout)[0];
+  assert.equal("rootAliases" in publicProject, false);
+  assert.equal(listed.stdout.includes(canonicalProjectRoot), false);
+});
+
+test("route binding adopts stable Directory Project and Node references", () => {
+  const bound = cxmsg(
+    "route",
+    "bind",
+    "worker",
+    "--project",
+    "hermes",
+    "--role",
+    "auditor",
+  );
+  assert.equal(bound.status, 0, bound.stderr);
+  const shown = cxmsg("route", "show", "worker", "--json");
+  assert.equal(shown.status, 0, shown.stderr);
+  const binding = JSON.parse(shown.stdout);
+  assert.match(binding.projectKey, /^[0-9a-f-]{36}$/);
+  assert.equal(binding.nodeKey, `codex:${threadId}`);
+
+  const node = cxmsg(
+    "directory",
+    "node",
+    "show",
+    "codex",
+    threadId,
+    "--json",
+  );
+  assert.equal(node.status, 0, node.stderr);
+  assert.equal(JSON.parse(node.stdout).nodeKey, binding.nodeKey);
+});

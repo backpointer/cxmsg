@@ -5,6 +5,7 @@ import {
   inspectBridges,
   inspectJobs,
   inspectMessageBodies,
+  inspectNodeDirectory,
   inspectPermissions,
   inspectRegisteredThreads,
   inspectRelay,
@@ -45,6 +46,12 @@ export async function runDoctor({
   checks.push(...state.checks);
   checks.push(
     ...(adapters.inspectMessageBodies || inspectMessageBodies)({ stateDir }),
+  );
+  checks.push(
+    ...(adapters.inspectNodeDirectory || inspectNodeDirectory)({
+      stateDir,
+      sessions: state.allSessions || state.sessions,
+    }),
   );
   checks.push(
     ...(adapters.inspectRouteState || inspectRouteState)({

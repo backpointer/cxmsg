@@ -18,6 +18,7 @@ import {
   inspectBridges,
   inspectJobs,
   inspectMessageBodies,
+  inspectNodeDirectory,
   inspectRouteState,
   inspectState,
 } from "../src/inspectors.js";
@@ -264,6 +265,64 @@ test("Route Inspector checks binding identity and redacts quarantined bodies", a
       "warn",
     );
     assert.doesNotMatch(JSON.stringify(checks), /private quarantined body/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Node Directory Inspector validates private identity references without paths", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-directory-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const projects = path.join(root, "directory", "projects");
+    const nodes = path.join(root, "directory", "nodes");
+    await fs.mkdir(projects, { recursive: true, mode: 0o700 });
+    await fs.mkdir(nodes, { mode: 0o700 });
+    const projectId = "a2345678-1234-4234-8234-123456789abc";
+    await writeJson(path.join(projects, `${projectId}.json`), {
+      version: 1,
+      projectId,
+      routingId: "hermes",
+      discovery: {
+        kind: "canonical-root",
+        key: "/private/project-that-must-not-be-rendered",
+      },
+      rootAliases: [
+        {
+          path: "/private/project-that-must-not-be-rendered",
+          firstSeenAt: "2026-08-14T00:00:00.000Z",
+          lastSeenAt: "2026-08-14T00:00:00.000Z",
+        },
+      ],
+    });
+    await writeJson(path.join(nodes, `codex--${THREAD_ID}.json`), {
+      version: 1,
+      nodeKey: `codex:${THREAD_ID}`,
+      runtimeKind: "codex",
+      nativeId: THREAD_ID,
+      projectId,
+      aliases: [{ value: "worker" }],
+      selectedEndpoints: {},
+    });
+
+    const checks = inspectNodeDirectory({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+    });
+    assert.equal(
+      checks.find((check) => check.id.startsWith("directory-projects.identity"))
+        .status,
+      "pass",
+    );
+    assert.equal(
+      checks.find((check) => check.id.startsWith("directory-nodes.project"))
+        .status,
+      "pass",
+    );
+    assert.doesNotMatch(
+      JSON.stringify(checks),
+      /project-that-must-not-be-rendered/,
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

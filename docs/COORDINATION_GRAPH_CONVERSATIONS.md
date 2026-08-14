@@ -550,6 +550,20 @@ separate authorization and correlation paths.
 - map Git worktrees through their common directory;
 - add Endpoint history, Tombstones, Clusters, and explicit successor edges.
 
+Initial implementation status: explicit Project creation now assigns a private
+random UUID to one exact canonical Git common directory or declared non-Git
+root. Codex threads and Claude sessions synchronize as distinct composite Node
+keys with mutable aliases and one generation-checked selected Endpoint per
+transport. Default CLI and Doctor projections redact Project paths and Endpoint
+addresses. Directory-aware Route Bindings pin the private Project UUID and
+stable Codex Node key in addition to the routing label and thread ID.
+
+This first slice deliberately has no automatic Project merge or move, Node
+successor inference, Endpoint history retention, Tombstone mutation, Cluster,
+or web projection. An older Endpoint generation is rejected and an equal
+generation with conflicting identity fails closed. Those omitted lifecycle
+transitions require explicit records and tests in the remaining Phase 3 work.
+
 ### Phase 4: Delivery Ledger and scheduling
 
 - record every ordinary Peer Message before dispatch;

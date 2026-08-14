@@ -319,6 +319,7 @@ test("Claude peer discovery uses live owner-only session sockets", async () => {
         sessionId: SESSION_ID,
         cwd: process.cwd(),
         status: "idle",
+        startedAt: 123456,
         kind: "interactive",
         peerProtocol: 1,
         messagingSocketPath: canonicalSocket,
@@ -328,6 +329,7 @@ test("Claude peer discovery uses live owner-only session sockets", async () => {
     const peers = await listClaudePeers({ sessionsDir });
     assert.equal(peers.length, 1);
     assert.equal(peers[0].name, "claude-test");
+    assert.equal(peers[0].startedAt, 123456);
     assert.equal(peers[0].address, `uds:${canonicalSocket}`);
 
     const restrictedPeers = await listClaudePeers({

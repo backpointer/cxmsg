@@ -335,6 +335,9 @@ function validRouteBinding(record, stem) {
         SESSION_PATTERN.test(record.sessionName || "") &&
         UUID_PATTERN.test(record.threadId || "") &&
         /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.projectId || "") &&
+        (record.projectKey === undefined || UUID_PATTERN.test(record.projectKey)) &&
+        (record.nodeKey === undefined ||
+          record.nodeKey === `codex:${record.threadId}`) &&
         /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.role || ""),
     ),
     errorCode: "EROUTEBINDINGSCHEMA",
@@ -383,6 +386,135 @@ function validQuarantine(record, stem) {
     ),
     errorCode: "EQUARANTINESCHEMA",
   };
+}
+
+function validDirectoryProject(record, stem) {
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        record.projectId === stem &&
+        UUID_PATTERN.test(record.projectId || "") &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.routingId || "") &&
+        ["git-common-dir", "canonical-root"].includes(record.discovery?.kind) &&
+        typeof record.discovery?.key === "string" &&
+        path.isAbsolute(record.discovery.key) &&
+        Array.isArray(record.rootAliases) &&
+        record.rootAliases.every(
+          (alias) => typeof alias?.path === "string" && path.isAbsolute(alias.path),
+        ),
+    ),
+    errorCode: "EPROJECTSCHEMA",
+  };
+}
+
+function validDirectoryNode(record, stem) {
+  const expectedStem = `${record?.runtimeKind || ""}--${record?.nativeId || ""}`;
+  const endpoints = Object.entries(record?.selectedEndpoints || {});
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        expectedStem === stem &&
+        ["codex", "claude"].includes(record.runtimeKind) &&
+        UUID_PATTERN.test(record.nativeId || "") &&
+        record.nodeKey === `${record.runtimeKind}:${record.nativeId}` &&
+        UUID_PATTERN.test(record.projectId || "") &&
+        Array.isArray(record.aliases) &&
+        record.aliases.every(
+          (alias) =>
+            typeof alias?.value === "string" &&
+            alias.value.length > 0 &&
+            alias.value.length <= 128,
+        ) &&
+        endpoints.every(
+          ([transport, endpoint]) =>
+            endpoint?.transport === transport &&
+            endpoint.nodeKey === record.nodeKey &&
+            Number.isSafeInteger(endpoint.generation) &&
+            endpoint.generation >= 0 &&
+            [
+              "reachable",
+              "external-writer",
+              "unreachable",
+              "stale",
+              "unknown",
+              "mismatched",
+            ].includes(endpoint.status),
+        ),
+    ),
+    errorCode: "ENODESCHEMA",
+  };
+}
+
+export function inspectNodeDirectory({ stateDir, sessions = [] } = {}) {
+  const projects = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/projects",
+    scope: "directory-projects",
+    validate: validDirectoryProject,
+  });
+  const nodes = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/nodes",
+    scope: "directory-nodes",
+    validate: validDirectoryNode,
+  });
+  const checks = [...projects.checks, ...nodes.checks];
+  const projectIds = new Set(projects.records.map((record) => record.projectId));
+  const seenRoutingIds = new Set();
+  const seenDiscoveries = new Set();
+  for (const project of projects.records) {
+    const discovery = `${project.discovery.kind}:${project.discovery.key}`;
+    const duplicateRouting = seenRoutingIds.has(project.routingId);
+    const duplicateDiscovery = seenDiscoveries.has(discovery);
+    checks.push(
+      diagnosticCheck({
+        id: `directory-projects.identity.${project.projectId.slice(0, 8)}`,
+        scope: "directory-projects",
+        status: duplicateRouting || duplicateDiscovery ? "fail" : "pass",
+        summary:
+          duplicateRouting || duplicateDiscovery
+            ? "Project has a duplicate routing or discovery identity"
+            : `Project ${project.routingId} has unique routing and discovery identity`,
+        verification: "records",
+        errorCode:
+          duplicateRouting || duplicateDiscovery ? "EPROJECTIDENTITY" : null,
+      }),
+    );
+    seenRoutingIds.add(project.routingId);
+    seenDiscoveries.add(discovery);
+  }
+  const sessionThreadIds = new Set(sessions.map((record) => record.threadId));
+  for (const node of nodes.records) {
+    const projectExists = projectIds.has(node.projectId);
+    checks.push(
+      diagnosticCheck({
+        id: `directory-nodes.project.${safeLabel(node.nodeKey)}`,
+        scope: "directory-nodes",
+        status: projectExists ? "pass" : "fail",
+        summary: projectExists
+          ? "Node references an existing private Project identity"
+          : "Node references a missing private Project identity",
+        verification: "records",
+        errorCode: projectExists ? null : "ENODEPROJECT",
+      }),
+    );
+    if (node.runtimeKind === "codex" && !sessionThreadIds.has(node.nativeId)) {
+      checks.push(
+        diagnosticCheck({
+          id: `directory-nodes.registration.${safeLabel(node.nodeKey)}`,
+          scope: "directory-nodes",
+          status: "warn",
+          summary: "Codex Node no longer has a registered addressable session",
+          verification: "registry",
+          errorCode: "ENODEUNREGISTERED",
+          remediation:
+            "Retain the Node until explicit Tombstone lifecycle support is implemented",
+          required: false,
+        }),
+      );
+    }
+  }
+  return checks;
 }
 
 export function inspectRouteState({ stateDir, sessions = [] } = {}) {
