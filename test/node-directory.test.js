@@ -29,6 +29,10 @@ const successorNodeId = "52345678-1234-4234-8234-123456789abc";
 const finalNodeId = "62345678-1234-4234-8234-123456789abc";
 const executionThreadId = "a2345678-1234-4234-8234-123456789abc";
 const executionJobId = "b2345678-1234-4234-8234-123456789abc";
+const otherProjectId = "72345678-1234-4234-8234-123456789abc";
+const otherNodeId = "82345678-1234-4234-8234-123456789abc";
+const reviewClusterId = "d3345678-1234-4234-8234-123456789abc";
+const releaseClusterId = "e3345678-1234-4234-8234-123456789abc";
 const discovery = (root) => ({
   kind: "canonical-root",
   key: path.resolve(root),
@@ -484,8 +488,6 @@ test("successor links are explicit, same-Project, single-predecessor, and acycli
 
   const otherRoot = mkdtempSync(path.join(os.tmpdir(), "cxmsg-other-project-"));
   try {
-    const otherProjectId = "72345678-1234-4234-8234-123456789abc";
-    const otherNodeId = "82345678-1234-4234-8234-123456789abc";
     await directory.ensureProject({
       routingId: "other",
       root: otherRoot,
@@ -508,6 +510,125 @@ test("successor links are explicit, same-Project, single-predecessor, and acycli
   } finally {
     rmSync(otherRoot, { recursive: true, force: true });
   }
+});
+
+test("Clusters retain explicit versioned membership without creating authority", async () => {
+  const created = await directory.ensureCluster({
+    routingId: "release-reviewers",
+    clusterId: reviewClusterId,
+  });
+  const repeated = await directory.ensureCluster({
+    routingId: "release-reviewers",
+    clusterId: "f4345678-1234-4234-8234-123456789abc",
+  });
+  assert.deepEqual(repeated, created);
+  assert.equal(created.membershipVersion, 1);
+
+  const first = await directory.addClusterMember({
+    cluster: "release-reviewers",
+    memberNodeKey: `codex:${nodeId}`,
+  });
+  const duplicate = await directory.addClusterMember({
+    cluster: reviewClusterId,
+    memberNodeKey: `codex:${nodeId}`,
+  });
+  assert.deepEqual(duplicate, first);
+  await directory.addClusterMember({
+    cluster: reviewClusterId,
+    memberNodeKey: `claude:${nodeId}`,
+  });
+  const spanning = await directory.addClusterMember({
+    cluster: reviewClusterId,
+    memberNodeKey: `codex:${otherNodeId}`,
+  });
+
+  assert.equal(spanning.membershipVersion, 4);
+  assert.deepEqual(spanning.members, [
+    `claude:${nodeId}`,
+    `codex:${nodeId}`,
+    `codex:${otherNodeId}`,
+  ]);
+  assert.equal(directory.listClusterMemberships(reviewClusterId).length, 4);
+  assert.equal(
+    directory.readClusterMembership(reviewClusterId, 1).changeKind,
+    "created",
+  );
+  assert.equal(
+    directory.readClusterMembership(reviewClusterId, 4).changeKind,
+    "member-added",
+  );
+  assert.equal(
+    "members" in directory.publicCluster(spanning),
+    false,
+  );
+  assert.deepEqual(
+    directory.publicCluster(spanning, { includeMembers: true }).members,
+    spanning.members,
+  );
+  assert.equal("permissions" in spanning, false);
+  assert.equal("conversationId" in spanning, false);
+  assert.equal("wakePolicy" in spanning, false);
+
+  const removedMember = await directory.removeClusterMember({
+    cluster: "release-reviewers",
+    memberNodeKey: `claude:${nodeId}`,
+  });
+  const repeatedRemoval = await directory.removeClusterMember({
+    cluster: reviewClusterId,
+    memberNodeKey: `claude:${nodeId}`,
+  });
+  assert.deepEqual(repeatedRemoval, removedMember);
+  assert.equal(removedMember.membershipVersion, 5);
+  assert.equal(directory.listClusterMemberships(reviewClusterId).length, 5);
+
+  await directory.ensureCluster({
+    routingId: "release-gate",
+    clusterId: releaseClusterId,
+  });
+  await directory.addClusterMember({
+    cluster: releaseClusterId,
+    memberNodeKey: `codex:${successorNodeId}`,
+  });
+  await directory.addClusterMember({
+    cluster: releaseClusterId,
+    memberNodeKey: `codex:${nodeId}`,
+  });
+  const releaseHead = directory.readClusterMembership(releaseClusterId, 3);
+  const releaseHeadPath = path.join(
+    directory.CLUSTER_MEMBERSHIPS_DIR,
+    `${releaseClusterId}--0000000003.json`,
+  );
+  writeFileSync(
+    releaseHeadPath,
+    `${JSON.stringify({ ...releaseHead, members: [] }, null, 2)}\n`,
+  );
+  await assert.rejects(
+    directory.removeClusterMember({
+      cluster: releaseClusterId,
+      memberNodeKey: `codex:${nodeId}`,
+    }),
+    /immutable snapshot history/,
+  );
+  writeFileSync(releaseHeadPath, `${JSON.stringify(releaseHead, null, 2)}\n`);
+  const retired = await directory.tombstoneCluster("release-gate", {
+    reason: "group-retired",
+  });
+  assert.equal(retired.lastMembershipVersion, 3);
+  assert.equal("members" in retired, false);
+  assert.equal("permissions" in retired, false);
+  assert.equal(directory.readCluster(releaseClusterId), null);
+  assert.equal(directory.listClusterMemberships(releaseClusterId).length, 3);
+  assert.equal(statSync(directory.CLUSTERS_DIR).mode & 0o777, 0o700);
+  assert.equal(statSync(directory.CLUSTER_MEMBERSHIPS_DIR).mode & 0o777, 0o700);
+  assert.equal(statSync(directory.CLUSTER_TOMBSTONES_DIR).mode & 0o777, 0o700);
+
+  await assert.rejects(
+    directory.ensureCluster({
+      routingId: "release-gate",
+      clusterId: "f5345678-1234-4234-8234-123456789abc",
+    }),
+    /automatic reactivation is forbidden/,
+  );
 });
 
 test("Node Tombstones retain minimal identity and prevent automatic resurrection", async () => {
@@ -535,6 +656,9 @@ test("Node Tombstones retain minimal identity and prevent automatic resurrection
     directory.readSuccessor(`codex:${successorNodeId}`).predecessorNodeKey,
     `codex:${nodeId}`,
   );
+  assert.ok(
+    directory.readCluster(reviewClusterId).members.includes(`codex:${nodeId}`),
+  );
 
   await assert.rejects(
     directory.upsertNode({
@@ -544,5 +668,12 @@ test("Node Tombstones retain minimal identity and prevent automatic resurrection
       projectId,
     }),
     /automatic reactivation is forbidden/,
+  );
+  await assert.rejects(
+    directory.addClusterMember({
+      cluster: reviewClusterId,
+      memberNodeKey: `codex:${nodeId}`,
+    }),
+    /tombstoned/,
   );
 });

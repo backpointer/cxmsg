@@ -37,6 +37,7 @@ const PENDING_JOB_STATES = new Set([
 ]);
 const ENDPOINT_HISTORY_LIMIT = 64;
 const ENDPOINT_TRANSPORT_LIMIT = 16;
+const CLUSTER_MEMBER_LIMIT = 256;
 const ENDPOINT_STATUSES = new Set([
   "reachable",
   "external-writer",
@@ -624,6 +625,107 @@ function validDirectoryExecutionThread(record, stem) {
   };
 }
 
+function validClusterMembers(members) {
+  const nodeKeyPattern = /^(?:codex|claude):[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  return Boolean(
+    Array.isArray(members) &&
+      members.length <= CLUSTER_MEMBER_LIMIT &&
+      members.every((member) => nodeKeyPattern.test(member)) &&
+      members.every((member, index) => index === 0 || members[index - 1] < member),
+  );
+}
+
+function validDirectoryCluster(record, stem) {
+  const allowedFields = new Set([
+    "version",
+    "clusterId",
+    "routingId",
+    "membershipVersion",
+    "members",
+    "createdAt",
+    "updatedAt",
+  ]);
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        record.clusterId === stem &&
+        UUID_PATTERN.test(record.clusterId || "") &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.routingId || "") &&
+        Number.isSafeInteger(record.membershipVersion) &&
+        record.membershipVersion >= 1 &&
+        validClusterMembers(record.members) &&
+        Number.isFinite(Date.parse(record.createdAt || "")) &&
+        Number.isFinite(Date.parse(record.updatedAt || "")) &&
+        Date.parse(record.createdAt) <= Date.parse(record.updatedAt) &&
+        Object.keys(record).every((field) => allowedFields.has(field)),
+    ),
+    errorCode: "ECLUSTERSCHEMA",
+  };
+}
+
+function validDirectoryClusterMembership(record, stem) {
+  const match = /^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})--([0-9]{10})$/i.exec(
+    stem,
+  );
+  const allowedFields = new Set([
+    "version",
+    "clusterId",
+    "membershipVersion",
+    "members",
+    "changeKind",
+    "changedNodeKey",
+    "createdAt",
+  ]);
+  const changedNodePattern = /^(?:codex|claude):[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+  const filenameVersion = match ? Number(match[2]) : null;
+  const created = record?.changeKind === "created";
+  return {
+    valid: Boolean(
+      match &&
+        record?.version === 1 &&
+        record.clusterId === match[1].toLowerCase() &&
+        record.membershipVersion === filenameVersion &&
+        Number.isSafeInteger(record.membershipVersion) &&
+        record.membershipVersion >= 1 &&
+        validClusterMembers(record.members) &&
+        ["created", "member-added", "member-removed"].includes(
+          record.changeKind,
+        ) &&
+        (created
+          ? record.membershipVersion === 1 && record.changedNodeKey === undefined
+          : changedNodePattern.test(record.changedNodeKey || "")) &&
+        Number.isFinite(Date.parse(record.createdAt || "")) &&
+        Object.keys(record).every((field) => allowedFields.has(field)),
+    ),
+    errorCode: "ECLUSTERMEMBERSHIPSCHEMA",
+  };
+}
+
+function validDirectoryClusterTombstone(record, stem) {
+  const allowedFields = new Set([
+    "version",
+    "clusterId",
+    "routingId",
+    "lastMembershipVersion",
+    "removedAt",
+    "reason",
+  ]);
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        record.clusterId === stem &&
+        UUID_PATTERN.test(record.clusterId || "") &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.routingId || "") &&
+        Number.isSafeInteger(record.lastMembershipVersion) &&
+        record.lastMembershipVersion >= 1 &&
+        Number.isFinite(Date.parse(record.removedAt || "")) &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.reason || "") &&
+        Object.keys(record).every((field) => allowedFields.has(field)),
+    ),
+    errorCode: "ECLUSTERTOMBSTONESCHEMA",
+  };
+}
+
 export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}) {
   const projects = scanJsonDirectory({
     stateDir,
@@ -655,12 +757,33 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
     scope: "directory-execution-threads",
     validate: validDirectoryExecutionThread,
   });
+  const clusters = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/clusters",
+    scope: "directory-clusters",
+    validate: validDirectoryCluster,
+  });
+  const clusterMemberships = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/cluster-memberships",
+    scope: "directory-cluster-memberships",
+    validate: validDirectoryClusterMembership,
+  });
+  const clusterTombstones = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/tombstones/clusters",
+    scope: "directory-cluster-tombstones",
+    validate: validDirectoryClusterTombstone,
+  });
   const checks = [
     ...projects.checks,
     ...nodes.checks,
     ...tombstones.checks,
     ...successors.checks,
     ...executionThreads.checks,
+    ...clusters.checks,
+    ...clusterMemberships.checks,
+    ...clusterTombstones.checks,
   ];
   const projectIds = new Set(projects.records.map((record) => record.projectId));
   const seenRoutingIds = new Set();
@@ -848,6 +971,155 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
     );
   }
   const identities = new Map([...liveNodes, ...retiredNodes]);
+  const liveClusters = new Map(
+    clusters.records.map((record) => [record.clusterId, record]),
+  );
+  const retiredClusters = new Map(
+    clusterTombstones.records.map((record) => [record.clusterId, record]),
+  );
+  const allClusterIds = new Set([
+    ...liveClusters.keys(),
+    ...retiredClusters.keys(),
+  ]);
+  const seenClusterRoutingIds = new Set();
+  for (const cluster of [...clusters.records, ...clusterTombstones.records]) {
+    const lifecycleConflict =
+      liveClusters.has(cluster.clusterId) && retiredClusters.has(cluster.clusterId);
+    const duplicateRouting = seenClusterRoutingIds.has(cluster.routingId);
+    const crossNamespace =
+      allClusterIds.has(cluster.routingId) && cluster.routingId !== cluster.clusterId;
+    seenClusterRoutingIds.add(cluster.routingId);
+    checks.push(
+      diagnosticCheck({
+        id: `directory-clusters.identity.${safeLabel(cluster.clusterId)}`,
+        scope: liveClusters.has(cluster.clusterId)
+          ? "directory-clusters"
+          : "directory-cluster-tombstones",
+        status:
+          lifecycleConflict || duplicateRouting || crossNamespace ? "fail" : "pass",
+        summary: lifecycleConflict
+          ? "Cluster identity exists as both live and tombstoned"
+          : duplicateRouting
+            ? "Cluster routing identity is duplicated"
+            : crossNamespace
+              ? "Cluster routing identity collides with another stable Cluster identity"
+            : "Cluster has unique stable and routing identity",
+        verification: "records",
+        errorCode: lifecycleConflict
+          ? "ECLUSTERLIFECYCLE"
+          : duplicateRouting
+            ? "ECLUSTERIDENTITY"
+            : crossNamespace
+              ? "ECLUSTERIDENTITY"
+            : null,
+        remediation:
+          lifecycleConflict || duplicateRouting || crossNamespace
+            ? "Inspect the owner-only Cluster records; Doctor will not choose, merge, or delete them"
+            : null,
+      }),
+    );
+  }
+
+  const membershipsByCluster = new Map();
+  for (const snapshot of clusterMemberships.records) {
+    const history = membershipsByCluster.get(snapshot.clusterId) || [];
+    history.push(snapshot);
+    membershipsByCluster.set(snapshot.clusterId, history);
+  }
+  const allClusters = new Map([...liveClusters, ...retiredClusters]);
+  for (const [clusterId, history] of membershipsByCluster) {
+    if (!allClusters.has(clusterId)) {
+      checks.push(
+        diagnosticCheck({
+          id: `directory-cluster-memberships.owner.${safeLabel(clusterId)}`,
+          scope: "directory-cluster-memberships",
+          status: "fail",
+          summary: "Cluster membership history references no live or Tombstoned Cluster",
+          verification: "records",
+          errorCode: "ECLUSTERMEMBERSHIPORPHAN",
+        }),
+      );
+    }
+    history.sort((left, right) => left.membershipVersion - right.membershipVersion);
+  }
+  for (const [clusterId, cluster] of allClusters) {
+    const history = membershipsByCluster.get(clusterId) || [];
+    const lastVersion = liveClusters.has(clusterId)
+      ? cluster.membershipVersion
+      : cluster.lastMembershipVersion;
+    let consistent = history.length === lastVersion;
+    let previous = null;
+    let previousTime = -Infinity;
+    for (let index = 0; index < history.length; index += 1) {
+      const snapshot = history[index];
+      if (snapshot.membershipVersion !== index + 1) consistent = false;
+      const snapshotTime = Date.parse(snapshot.createdAt);
+      if (snapshotTime < previousTime) consistent = false;
+      previousTime = snapshotTime;
+      if (!previous) {
+        if (
+          snapshot.changeKind !== "created" ||
+          snapshot.members.length !== 0
+        ) {
+          consistent = false;
+        }
+      } else {
+        const before = new Set(previous.members);
+        const after = new Set(snapshot.members);
+        const added = snapshot.members.filter((member) => !before.has(member));
+        const removed = previous.members.filter((member) => !after.has(member));
+        if (
+          snapshot.changeKind === "member-added"
+            ? added.length !== 1 ||
+              removed.length !== 0 ||
+              added[0] !== snapshot.changedNodeKey
+            : snapshot.changeKind === "member-removed"
+              ? removed.length !== 1 ||
+                added.length !== 0 ||
+                removed[0] !== snapshot.changedNodeKey
+              : true
+        ) {
+          consistent = false;
+        }
+      }
+      if (snapshot.members.some((member) => !identities.has(member))) {
+        consistent = false;
+      }
+      previous = snapshot;
+    }
+    if (
+      liveClusters.has(clusterId) &&
+      (!previous ||
+        previous.membershipVersion !== cluster.membershipVersion ||
+        JSON.stringify(previous.members) !== JSON.stringify(cluster.members) ||
+        history[0]?.createdAt !== cluster.createdAt ||
+        previous.createdAt !== cluster.updatedAt)
+    ) {
+      consistent = false;
+    }
+    if (
+      retiredClusters.has(clusterId) &&
+      previous &&
+      Date.parse(previous.createdAt) > Date.parse(cluster.removedAt)
+    ) {
+      consistent = false;
+    }
+    checks.push(
+      diagnosticCheck({
+        id: `directory-cluster-memberships.history.${safeLabel(clusterId)}`,
+        scope: "directory-cluster-memberships",
+        status: consistent ? "pass" : "fail",
+        summary: consistent
+          ? "Cluster membership history is complete, ordered, and identity-resolved"
+          : "Cluster membership history conflicts with version, transition, or Node reference invariants",
+        verification: "records",
+        errorCode: consistent ? null : "ECLUSTERMEMBERSHIP",
+        remediation: consistent
+          ? null
+          : "Inspect the owner-only immutable snapshots; Doctor will not synthesize or rewrite membership history",
+      }),
+    );
+  }
   const predecessorBySuccessor = new Map();
   for (const relation of successors.records) {
     const predecessor = identities.get(relation.predecessorNodeKey);

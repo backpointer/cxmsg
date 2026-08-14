@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { existsSync, promises as fs } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -279,15 +279,20 @@ test("Node Directory Inspector validates private identity references without pat
     const tombstones = path.join(root, "directory", "tombstones", "nodes");
     const successors = path.join(root, "directory", "successors");
     const executionThreads = path.join(root, "directory", "execution-threads");
+    const clusters = path.join(root, "directory", "clusters");
+    const clusterMemberships = path.join(root, "directory", "cluster-memberships");
     await fs.mkdir(projects, { recursive: true, mode: 0o700 });
     await fs.mkdir(nodes, { mode: 0o700 });
     await fs.mkdir(tombstones, { recursive: true, mode: 0o700 });
     await fs.mkdir(successors, { mode: 0o700 });
     await fs.mkdir(executionThreads, { mode: 0o700 });
+    await fs.mkdir(clusters, { mode: 0o700 });
+    await fs.mkdir(clusterMemberships, { mode: 0o700 });
     const projectId = "a2345678-1234-4234-8234-123456789abc";
     const predecessorId = "b2345678-1234-4234-8234-123456789abc";
     const executionThreadId = "c2345678-1234-4234-8234-123456789abc";
     const executionJobId = "d2345678-1234-4234-8234-123456789abc";
+    const clusterId = "e2345678-1234-4234-8234-123456789abc";
     await writeJson(path.join(projects, `${projectId}.json`), {
       version: 1,
       projectId,
@@ -365,6 +370,50 @@ test("Node Directory Inspector validates private identity references without pat
       creationMode: "fork",
       classifiedAt: "2026-08-14T00:03:00.000Z",
     });
+    await writeJson(path.join(clusters, `${clusterId}.json`), {
+      version: 1,
+      clusterId,
+      routingId: "release-reviewers",
+      membershipVersion: 3,
+      members: [`claude:${predecessorId}`, `codex:${THREAD_ID}`],
+      createdAt: "2026-08-14T00:04:00.000Z",
+      updatedAt: "2026-08-14T00:06:00.000Z",
+    });
+    await writeJson(
+      path.join(clusterMemberships, `${clusterId}--0000000001.json`),
+      {
+        version: 1,
+        clusterId,
+        membershipVersion: 1,
+        members: [],
+        changeKind: "created",
+        createdAt: "2026-08-14T00:04:00.000Z",
+      },
+    );
+    await writeJson(
+      path.join(clusterMemberships, `${clusterId}--0000000002.json`),
+      {
+        version: 1,
+        clusterId,
+        membershipVersion: 2,
+        members: [`codex:${THREAD_ID}`],
+        changeKind: "member-added",
+        changedNodeKey: `codex:${THREAD_ID}`,
+        createdAt: "2026-08-14T00:05:00.000Z",
+      },
+    );
+    await writeJson(
+      path.join(clusterMemberships, `${clusterId}--0000000003.json`),
+      {
+        version: 1,
+        clusterId,
+        membershipVersion: 3,
+        members: [`claude:${predecessorId}`, `codex:${THREAD_ID}`],
+        changeKind: "member-added",
+        changedNodeKey: `claude:${predecessorId}`,
+        createdAt: "2026-08-14T00:06:00.000Z",
+      },
+    );
 
     const checks = inspectNodeDirectory({
       stateDir: root,
@@ -419,9 +468,100 @@ test("Node Directory Inspector validates private identity references without pat
         .filter((check) => check.scope === "directory-execution-threads")
         .every((check) => !["fail", "unknown"].includes(check.status)),
     );
+    assert.equal(
+      checks.find((check) =>
+        check.id.startsWith("directory-cluster-memberships.history"),
+      ).status,
+      "pass",
+    );
     assert.doesNotMatch(
       JSON.stringify(checks),
       /project-that-must-not-be-rendered|endpoint-that-must-not-be-rendered/,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Node Directory Inspector reports Cluster lifecycle and membership gaps without repair", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-clusters-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const clusters = path.join(root, "directory", "clusters");
+    const memberships = path.join(root, "directory", "cluster-memberships");
+    const tombstones = path.join(root, "directory", "tombstones", "clusters");
+    for (const directory of [clusters, memberships, tombstones]) {
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    }
+    const clusterId = "f2345678-1234-4234-8234-123456789abc";
+    const orphanId = "a3345678-1234-4234-8234-123456789abc";
+    await writeJson(path.join(clusters, `${clusterId}.json`), {
+      version: 1,
+      clusterId,
+      routingId: "conflicted-cluster",
+      membershipVersion: 2,
+      members: [],
+      createdAt: "2026-08-14T00:00:00.000Z",
+      updatedAt: "2026-08-14T00:01:00.000Z",
+    });
+    await writeJson(path.join(tombstones, `${clusterId}.json`), {
+      version: 1,
+      clusterId,
+      routingId: "conflicted-cluster",
+      lastMembershipVersion: 1,
+      removedAt: "2026-08-14T00:02:00.000Z",
+      reason: "interrupted",
+    });
+    await writeJson(
+      path.join(memberships, `${clusterId}--0000000001.json`),
+      {
+        version: 1,
+        clusterId,
+        membershipVersion: 1,
+        members: [],
+        changeKind: "created",
+        createdAt: "2026-08-14T00:00:00.000Z",
+      },
+    );
+    await writeJson(
+      path.join(memberships, `${orphanId}--0000000001.json`),
+      {
+        version: 1,
+        clusterId: orphanId,
+        membershipVersion: 1,
+        members: [],
+        changeKind: "created",
+        createdAt: "2026-08-14T00:00:00.000Z",
+      },
+    );
+
+    const checks = inspectNodeDirectory({ stateDir: root });
+    assert.ok(
+      checks.some(
+        (check) =>
+          check.errorCode === "ECLUSTERLIFECYCLE" && check.status === "fail",
+      ),
+    );
+    assert.ok(
+      checks.some(
+        (check) =>
+          check.errorCode === "ECLUSTERMEMBERSHIP" && check.status === "fail",
+      ),
+    );
+    assert.ok(
+      checks.some(
+        (check) =>
+          check.errorCode === "ECLUSTERMEMBERSHIPORPHAN" &&
+          check.status === "fail",
+      ),
+    );
+    assert.equal(
+      existsSync(path.join(clusters, `${clusterId}.json`)),
+      true,
+    );
+    assert.equal(
+      existsSync(path.join(tombstones, `${clusterId}.json`)),
+      true,
     );
   } finally {
     await fs.rm(root, { recursive: true, force: true });

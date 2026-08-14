@@ -101,6 +101,72 @@ test("route binding adopts stable Directory Project and Node references", () => 
   assert.equal(JSON.parse(node.stdout).nodeKey, binding.nodeKey);
 });
 
+test("Directory CLI manages explicit Cluster membership and private history", () => {
+  const ensured = cxmsg(
+    "directory",
+    "cluster",
+    "ensure",
+    "hermes-auditors",
+    "--json",
+  );
+  assert.equal(ensured.status, 0, ensured.stderr);
+  const cluster = JSON.parse(ensured.stdout);
+  assert.equal(cluster.routingId, "hermes-auditors");
+  assert.equal(cluster.memberCount, 0);
+  assert.equal("members" in cluster, false);
+
+  const added = cxmsg(
+    "directory",
+    "cluster",
+    "member",
+    "add",
+    "hermes-auditors",
+    "codex",
+    threadId,
+    "--json",
+    "--members",
+  );
+  assert.equal(added.status, 0, added.stderr);
+  assert.deepEqual(JSON.parse(added.stdout).members, [`codex:${threadId}`]);
+
+  const hidden = cxmsg(
+    "directory",
+    "cluster",
+    "show",
+    "hermes-auditors",
+    "--json",
+    "--history",
+  );
+  assert.equal(hidden.status, 0, hidden.stderr);
+  const hiddenRecord = JSON.parse(hidden.stdout);
+  assert.equal("members" in hiddenRecord, false);
+  assert.equal("members" in hiddenRecord.membershipHistory[1], false);
+  assert.equal("changedNodeKey" in hiddenRecord.membershipHistory[1], false);
+  assert.doesNotMatch(hidden.stdout, new RegExp(threadId));
+  assert.equal(hiddenRecord.membershipHistory[1].memberCount, 1);
+
+  const listed = cxmsg("directory", "clusters", "--json");
+  assert.equal(listed.status, 0, listed.stderr);
+  assert.equal(JSON.parse(listed.stdout)[0].routingId, "hermes-auditors");
+  assert.equal("members" in JSON.parse(listed.stdout)[0], false);
+
+  const retired = cxmsg(
+    "directory",
+    "cluster",
+    "tombstone",
+    "hermes-auditors",
+    "--reason",
+    "test-complete",
+    "--json",
+  );
+  assert.equal(retired.status, 0, retired.stderr);
+  assert.equal(JSON.parse(retired.stdout).lastMembershipVersion, 2);
+  assert.equal("members" in JSON.parse(retired.stdout), false);
+  const tombstones = cxmsg("directory", "cluster-tombstones", "--json");
+  assert.equal(tombstones.status, 0, tombstones.stderr);
+  assert.equal(JSON.parse(tombstones.stdout).length, 1);
+});
+
 test("Directory CLI exposes explicit Tombstone and successor lifecycle", async () => {
   const project = directory.findProjectByRoutingId("hermes");
   await directory.upsertNode({

@@ -140,6 +140,12 @@ cxmsg directory execution sync --json
 cxmsg directory execution-threads --json
 cxmsg directory execution-thread show <thread-id> --json
 cxmsg directory node show codex <thread-id> --history --json
+cxmsg directory cluster ensure release-reviewers --json
+cxmsg directory cluster member add release-reviewers codex <thread-id>
+cxmsg directory cluster show release-reviewers --history --json
+cxmsg directory clusters --json
+cxmsg directory cluster tombstone release-reviewers --reason group-retired
+cxmsg directory cluster-tombstones --json
 ```
 
 Project paths are omitted by default. `directory projects --paths`,
@@ -189,6 +195,20 @@ threads, a retained turn ID, and a non-startup Job state. Ambiguous historical
 Jobs are skipped, existing classifications are reused, and Job records are not
 rewritten. cxmsg never infers an Execution Thread from an arbitrary unregistered
 App Server thread.
+
+A Cluster has its own private UUID and a human routing label. Membership is an
+explicit many-to-many relation: one Node may join several Clusters and one
+Cluster may span Projects. Each real change appends an immutable, ordered
+membership snapshot; duplicate add/remove operations are idempotent and do not
+advance the version. A live Cluster can add only live Nodes, while existing
+history may continue to reference Node Tombstones. Removing a Cluster creates
+a reduced Tombstone and retains its membership snapshots for later graph
+history.
+
+Cluster membership is organizational metadata only. It does not create a
+Conversation, route, transport reachability, wake, grant, permission, approval,
+or fan-out. Default CLI output exposes only member counts; `--members` is an
+explicit local disclosure option, and `--history` reads retained versions.
 
 When a Directory Project exists, `cxmsg route bind` also pins the binding to
 the private Project UUID and stable Codex Node key. Reusing the same routing

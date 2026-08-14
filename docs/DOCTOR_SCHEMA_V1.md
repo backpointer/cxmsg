@@ -49,7 +49,9 @@ Every check contains:
   `permissions`, `app-server`, `attachments`, `bridges`, `relay`,
   `message-bodies`, `route-bindings`, `route-deliveries`, `quarantine`,
   `directory-projects`, `directory-nodes`, `directory-node-tombstones`,
-  `directory-successors`, `directory-execution-threads`, or `schedules`.
+  `directory-successors`, `directory-execution-threads`, `directory-clusters`,
+  `directory-cluster-memberships`, `directory-cluster-tombstones`, or
+  `schedules`.
 - `status` is `pass`, `warn`, `fail`, `unknown`, or `skipped`.
 - `summary` is bounded operator text with no private body data.
 - `verification` is bounded evidence such as `metadata`, `registry`,
@@ -111,6 +113,16 @@ another Execution Thread. Its retained fork Job must identify the same source
 and execution thread. Optional source Node and Project references must resolve
 together. Doctor reports inconsistencies but never registers, deletes, resumes,
 or converts an Execution Thread.
+
+Cluster findings validate unique stable and routing identities, mutually
+exclusive live/Tombstone lifecycle, bounded sorted Node membership, and a
+complete immutable sequence of membership snapshots. Every transition changes
+exactly the recorded Node and current membership must match the latest version.
+Clusters may intentionally span Projects. Retained snapshots may reference a
+live or Tombstoned Node, but an orphaned Cluster snapshot or missing Node
+identity fails inspection. Cluster Tombstones contain no members, paths,
+endpoints, Conversation state, wake policy, or authority. Doctor never fills a
+version gap, changes membership, resurrects a Cluster, or deletes history.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.

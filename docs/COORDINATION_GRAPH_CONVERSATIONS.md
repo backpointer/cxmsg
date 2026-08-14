@@ -200,6 +200,16 @@ A Cluster is a named many-to-many logical grouping, such as `stock-qa` or
 Keeping Cluster and Conversation separate allows a group to organize the graph
 without causing fan-out or model wake-ups.
 
+The Phase 3 Directory foundation now implements this boundary. A Cluster owns a
+private UUID, an independent human routing label, a sorted bounded current member set,
+and immutable membership snapshots. Only explicit operations change membership;
+idempotent repetition does not create a new version. New membership requires a
+live Node, while retained snapshots may reference a Node Tombstone. A reduced
+Cluster Tombstone preserves identity and the last membership version without
+copying members. Doctor validates lifecycle conflicts, missing or orphaned
+versions, exact one-member transitions, and Node references without repairing
+records. Conversation fan-out and graph projection remain later modules.
+
 ## Delivery Ledger
 
 ### One truth for scheduling and delivery

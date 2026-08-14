@@ -99,10 +99,16 @@ import {
   readMessageBody,
 } from "../src/message-bodies.js";
 import {
+  addClusterMember,
   addSuccessor,
   classifyExecutionThread,
+  ensureCluster,
   ensureProject,
+  findClusterByRoutingId,
   findProjectByRoutingId,
+  listClusterMemberships,
+  listClusterTombstones,
+  listClusters,
   listExecutionThreads,
   listNodeTombstones,
   listNodes,
@@ -110,13 +116,19 @@ import {
   listSuccessors,
   nodeKey,
   projectContainsPath,
+  publicCluster,
+  publicClusterMembership,
+  publicClusterTombstone,
   publicNode,
   publicNodeTombstone,
   publicProject,
   publicExecutionThread,
   publicSuccessor,
   readExecutionThread,
+  readCluster,
   readNode,
+  removeClusterMember,
+  tombstoneCluster,
   tombstoneNode,
   upsertNode,
 } from "../src/node-directory.js";
@@ -172,6 +184,12 @@ function usage(exitCode = 0) {
   cxmsg directory project ensure <routing-id> <root> [--json]
   cxmsg directory sync --project <routing-id> [--codex-only|--claude-only] [--json]
   cxmsg directory projects [--json] [--paths]
+  cxmsg directory cluster ensure <routing-id> [--json]
+  cxmsg directory cluster show <routing-id|cluster-id> [--json] [--members] [--history]
+  cxmsg directory cluster member <add|remove> <routing-id|cluster-id> <codex|claude> <native-id> [--json] [--members]
+  cxmsg directory cluster tombstone <routing-id|cluster-id> [--reason <id>] [--json]
+  cxmsg directory clusters [--json] [--members]
+  cxmsg directory cluster-tombstones [--json]
   cxmsg directory nodes [--json] [--endpoints] [--history]
   cxmsg directory node show <codex|claude> <native-id> [--json] [--endpoints] [--history]
   cxmsg directory node tombstone <codex|claude> <native-id> [--reason <id>] [--json]
@@ -1900,6 +1918,143 @@ async function commandDirectory(args) {
       (project) => `${project.routingId}\t${project.projectId}\t${project.rootCount}`,
     );
     return;
+  }
+  if (operation === "clusters") {
+    const jsonOutput = args.includes("--json");
+    const includeMembers = args.includes("--members");
+    if (args.some((value) => !["--json", "--members"].includes(value))) {
+      usage(2);
+    }
+    const clusters = listClusters().map((record) =>
+      publicCluster(record, { includeMembers }),
+    );
+    jsonOrLines(
+      clusters,
+      jsonOutput,
+      (cluster) =>
+        `${cluster.routingId}\t${cluster.clusterId}\t${cluster.membershipVersion}\t${cluster.memberCount}`,
+    );
+    return;
+  }
+  if (operation === "cluster-tombstones") {
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const tombstones = listClusterTombstones().map(publicClusterTombstone);
+    jsonOrLines(
+      tombstones,
+      jsonOutput,
+      (record) =>
+        `${record.routingId}\t${record.clusterId}\t${record.lastMembershipVersion}\t${record.reason}`,
+    );
+    return;
+  }
+  if (operation === "cluster") {
+    const clusterOperation = args.shift();
+    if (clusterOperation === "ensure") {
+      const routingId = args.shift();
+      const jsonOutput = args.includes("--json");
+      if (!routingId || args.some((value) => value !== "--json")) usage(2);
+      const output = publicCluster(await ensureCluster({ routingId }));
+      process.stdout.write(
+        jsonOutput
+          ? `${JSON.stringify(output, null, 2)}\n`
+          : `cluster ${output.routingId} ${output.clusterId} v${output.membershipVersion}\n`,
+      );
+      return;
+    }
+    if (clusterOperation === "show") {
+      const identity = args.shift();
+      const jsonOutput = args.includes("--json");
+      const includeMembers = args.includes("--members");
+      const includeHistory = args.includes("--history");
+      if (
+        !identity ||
+        args.some(
+          (value) => !["--json", "--members", "--history"].includes(value),
+        )
+      ) {
+        usage(2);
+      }
+      const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+      const byId = uuidPattern.test(identity) ? readCluster(identity) : null;
+      const byRouting = findClusterByRoutingId(identity);
+      if (byId && byRouting && byId.clusterId !== byRouting.clusterId) {
+        throw new Error(`ambiguous Cluster identity: ${identity}`);
+      }
+      const record = byId || byRouting;
+      if (!record) throw new Error(`unknown Cluster: ${identity}`);
+      const output = {
+        ...publicCluster(record, { includeMembers }),
+        ...(includeHistory
+          ? {
+              membershipHistory: listClusterMemberships(record.clusterId).map(
+                (snapshot) =>
+                  publicClusterMembership(snapshot, { includeMembers }),
+              ),
+            }
+          : {}),
+      };
+      process.stdout.write(
+        jsonOutput
+          ? `${JSON.stringify(output, null, 2)}\n`
+          : `${output.routingId}\t${output.clusterId}\t${output.membershipVersion}\t${output.memberCount}\n`,
+      );
+      return;
+    }
+    if (clusterOperation === "member") {
+      const memberOperation = args.shift();
+      const cluster = args.shift();
+      const runtimeKind = args.shift();
+      const nativeId = args.shift();
+      const jsonOutput = args.includes("--json");
+      const includeMembers = args.includes("--members");
+      if (
+        !["add", "remove"].includes(memberOperation) ||
+        !cluster ||
+        !runtimeKind ||
+        !nativeId ||
+        args.some((value) => !["--json", "--members"].includes(value))
+      ) {
+        usage(2);
+      }
+      const mutate =
+        memberOperation === "add" ? addClusterMember : removeClusterMember;
+      const output = publicCluster(
+        await mutate({
+          cluster,
+          memberNodeKey: nodeKey(runtimeKind, nativeId),
+        }),
+        { includeMembers },
+      );
+      process.stdout.write(
+        jsonOutput
+          ? `${JSON.stringify(output, null, 2)}\n`
+          : `cluster ${output.routingId} v${output.membershipVersion} members=${output.memberCount}\n`,
+      );
+      return;
+    }
+    if (clusterOperation === "tombstone") {
+      const identity = args.shift();
+      const jsonOutput = args.includes("--json");
+      let reason = "explicit";
+      const remaining = [];
+      while (args.length) {
+        const option = args.shift();
+        if (option === "--reason") reason = args.shift();
+        else if (option !== "--json") remaining.push(option);
+      }
+      if (!identity || !reason || remaining.length) usage(2);
+      const output = publicClusterTombstone(
+        await tombstoneCluster(identity, { reason }),
+      );
+      process.stdout.write(
+        jsonOutput
+          ? `${JSON.stringify(output, null, 2)}\n`
+          : `cluster-tombstone ${output.routingId} ${output.clusterId} v${output.lastMembershipVersion}\n`,
+      );
+      return;
+    }
+    usage(2);
   }
   if (operation === "nodes") {
     const jsonOutput = args.includes("--json");
