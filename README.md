@@ -64,6 +64,7 @@ For an explicitly isolated target, bind its current registered thread to one
 Project and role, then use a typed routed send:
 
 ```bash
+cxmsg route bind coordinator --project hermes --role coordinator
 cxmsg route bind worker --project hermes --role auditor
 cxmsg send \
   --from coordinator \
@@ -91,6 +92,15 @@ sender, target, route, and body is a no-op after its first dispatch attempt;
 reusing it with different content fails as an idempotency conflict. Targets
 without an explicit binding retain legacy unscoped-send compatibility during
 migration.
+
+Supplying `--sender-role` is an assertion that must match a binding for the
+currently registered sender thread. An unbound, missing, or replacement sender
+is quarantined rather than trusted. Use `--` after send options when an
+operator wants an explicit end-of-options delimiter.
+
+Project, task, role, and payload-type identifiers are 1–128 ASCII safe
+characters and may contain letters, digits, `.`, `_`, `:`, or `-`. Codex
+session names remain the narrower 1–64 character namespace without `:`.
 
 Codex Peer Messages accept up to 256 KiB. Bodies through 16 KiB are delivered
 inline. Larger bodies are stored locally before transport and the receiver gets
@@ -319,7 +329,6 @@ context injection. The Claude message body is JSON in this form:
   "schema_version": 1,
   "project_id": "hermes",
   "target_role": "coordinator",
-  "sender_role": "auditor",
   "logical_message_id": "<uuid>",
   "payload_type": "coordination",
   "wake_policy": "immediate",
@@ -330,7 +339,9 @@ context injection. The Claude message body is JSON in this form:
 The bridge checks this envelope only for ordinary peer context. A validated
 Claude grant request and an internal terminal-delivery wake keep their separate
 authorization and correlation paths; routing fields cannot manufacture either
-one.
+one. Until Claude Nodes join the Phase 3 Directory, an ordinary Claude envelope
+must omit `sender_role` because no thread-pinned Codex sender binding can verify
+that claim.
 
 If a managed sandbox can read the registry but cannot connect to local Unix
 sockets, start the authenticated host relay from an ordinary host terminal:

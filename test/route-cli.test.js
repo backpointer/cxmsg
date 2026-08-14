@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -69,4 +69,31 @@ test("a bound target quarantines an unscoped CLI send before App Server access",
   assert.equal(records[0].reason, "missing_route");
   assert.equal("message" in records[0], false);
   assert.ok(records[0].messageSha256);
+  const events = readFileSync(path.join(stateDir, "events.jsonl"), "utf8");
+  assert.match(events, /"kind":"route-admission"/);
+  assert.match(events, /"outcome":"quarantined"/);
+  assert.doesNotMatch(events, /unscoped body/);
+});
+
+test("routed CLI send supports an option delimiter and rejects an unbound claimed role", () => {
+  const messageId = "c2345678-1234-4234-8234-123456789abc";
+  const sent = cxmsg(
+    "send",
+    "--from",
+    "unbound-coordinator",
+    "--project",
+    "hermes",
+    "--target-role",
+    "auditor",
+    "--sender-role",
+    "coordinator",
+    "--logical-message-id",
+    messageId,
+    "--",
+    "worker",
+    "--prefixed body",
+  );
+  assert.equal(sent.status, 1);
+  assert.match(sent.stderr, new RegExp(`quarantined ${messageId}.*sender_unbound`));
+  assert.doesNotMatch(sent.stderr, /App Server/);
 });

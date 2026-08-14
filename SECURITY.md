@@ -54,6 +54,21 @@ authority path. Logical-message deduplication prevents a second automatic wake
 after an attempt is durably marked, including when the first outcome is
 uncertain.
 
+Migration compatibility is explicitly fail-open only for a target with no
+Route Admission binding: it accepts legacy unscoped Peer Messages as untrusted
+context. Removing a binding restores that compatibility behavior, so a Hermes
+or other isolated deployment must inventory and monitor its expected bindings;
+Doctor cannot infer a binding that no longer exists. This is not a boundary
+against another malicious process running as the same OS user. If a routed
+message supplies `sender_role`, the sender must have a matching binding pinned
+to its current registered thread or the message is quarantined.
+
+Route Admission covers ordinary Codex Peer Messages and ordinary Claude bridge
+ingress. User-authorized Delegation, a Claude request validated by a capability
+grant, and the bridge's internal correlated terminal-ACK wake are distinct
+paths with their own authorization or correlation checks. Their bypass of
+ordinary Route Admission does not make routing metadata authoritative.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

@@ -534,6 +534,13 @@ legacy-compatible for migration. Scheduled admission, release, retention,
 purge, and uncertain-attempt reconciliation remain in later phases; no
 quarantined record is replayed automatically.
 
+If `sender_role` is present, the sender must also have a binding pinned to its
+current registered Codex thread; an unbound or stale sender is quarantined.
+Admission and deduplication decisions emit only bounded redacted coordination
+events. Ordinary Peer Messages are the scope of this gate. Delegation,
+grant-validated Claude requests, and internal terminal-ACK wakes retain their
+separate authorization and correlation paths.
+
 ### Phase 3: Node Directory and Project identity
 
 - strengthen bridge registry ownership and identity-checked Endpoint selection
@@ -590,6 +597,7 @@ than silently raising that ceiling.
 - segment size, append durability, index checkpoint, and rebuild limits;
 - hash-shard count, shard-key version, and reshard migration behavior;
 - partial-segment quarantine and operator recovery behavior;
+- Route Admission Quarantine body retention, discard, expiry, and audit rules;
 - purge selection, dry-run, backup, and audit behavior;
 - Scheduler ownership, claim lease, renewal, and shutdown behavior;
 - per-Node and per-Conversation queue depth;
@@ -599,6 +607,11 @@ than silently raising that ceiling.
 - mention syntax and explicit wake-all confirmation behavior;
 - hop budget and forwarding provenance retention;
 - migration treatment for existing Job history and absent ordinary send history.
+
+For `dispatching` or `unknown` Route Delivery records, Phase 4 reconciliation
+must first prove whether App Server accepted the stable client message ID.
+Neither automatic nor operator-triggered retry may replay an uncertain wake
+until that evidence contract and its crash tests exist.
 
 No Implementation may silently choose these values.
 

@@ -141,7 +141,7 @@ function usage(exitCode = 0) {
   cxmsg send [--from <name>] [--project <id>] [--target-role <role>]
              [--sender-role <role>] [--task <id>] [--logical-message-id <uuid>]
              [--payload-type <type>] [--expiry <timestamp>]
-             [--wake-policy immediate] <target> <message...>
+             [--wake-policy immediate] [--] <target> <message...>
   cxmsg route bind <session> --project <id> --role <role>
   cxmsg route show <session> [--json]
   cxmsg route list [--json]
@@ -1627,6 +1627,7 @@ async function commandSend(args) {
   let logicalMessageId = null;
   while (args[0]?.startsWith("--")) {
     const option = args.shift();
+    if (option === "--") break;
     const value = args.shift();
     if (!value) throw new Error(`${option} requires a value`);
     if (option === "--from") from = value;

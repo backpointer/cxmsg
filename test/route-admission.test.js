@@ -31,6 +31,7 @@ const ids = {
   mismatch: "41345678-1234-4234-8234-123456789abc",
   expired: "51345678-1234-4234-8234-123456789abc",
   senderMismatch: "61345678-1234-4234-8234-123456789abc",
+  senderUnbound: "b2345678-1234-4234-8234-123456789abc",
   targetMismatch: "a1345678-1234-4234-8234-123456789abc",
 };
 
@@ -159,6 +160,38 @@ test("missing, mismatched, and expired routes quarantine with zero dispatch", as
   assert.equal(quarantined.length, 3);
   assert.ok(quarantined.every((record) => !("message" in record)));
   assert.ok(quarantined.every((record) => record.messageSha256));
+});
+
+test("an unbound sender cannot claim a sender role and the decision is redacted", async () => {
+  let dispatches = 0;
+  const events = [];
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "unbound-coordinator",
+      target: "worker",
+      message: "private body that must not enter the event",
+      route: route(ids.senderUnbound, { sender_role: "coordinator" }),
+      logicalMessageId: ids.senderUnbound,
+    },
+    async () => {
+      dispatches += 1;
+      return { delivery: "started", turnId: "forbidden" };
+    },
+    { log: async (event) => events.push(event) },
+  );
+  assert.equal(outcome.reason, "sender_unbound");
+  assert.equal(dispatches, 0);
+  assert.deepEqual(events, [
+    {
+      kind: "route-admission",
+      phase: "decision",
+      correlationId: ids.senderUnbound,
+      target: "worker",
+      outcome: "quarantined",
+      errorCode: "sender_unbound",
+    },
+  ]);
+  assert.doesNotMatch(JSON.stringify(events), /private body/);
 });
 
 test("a bound sender cannot claim a different sender role", async () => {

@@ -11,6 +11,7 @@ import {
 import path from "node:path";
 import { withFileLock } from "./file-lock.js";
 import { MAX_STORED_MESSAGE_BYTES } from "./message-bodies.js";
+import { writeCoordinationEvent } from "./observability.js";
 import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
@@ -147,6 +148,17 @@ function admission(
   senderRecord,
   now = Date.now(),
 ) {
+  if (route?.sender_role) {
+    if (!senderBinding) {
+      return { state: "quarantined", reason: "sender_unbound" };
+    }
+    if (!senderRecord || senderBinding.threadId !== senderRecord.threadId) {
+      return { state: "quarantined", reason: "sender_identity_mismatch" };
+    }
+    if (route.sender_role !== senderBinding.role) {
+      return { state: "quarantined", reason: "sender_role_mismatch" };
+    }
+  }
   if (!binding) return { state: "admitted", reason: "legacy-unbound" };
   if (targetRecord && binding.threadId !== targetRecord.threadId) {
     return { state: "quarantined", reason: "target_identity_mismatch" };
@@ -157,21 +169,6 @@ function admission(
   }
   if (route.target_role !== binding.role) {
     return { state: "quarantined", reason: "role_mismatch" };
-  }
-  if (
-    route.sender_role &&
-    senderBinding &&
-    senderRecord &&
-    senderBinding.threadId !== senderRecord.threadId
-  ) {
-    return { state: "quarantined", reason: "sender_identity_mismatch" };
-  }
-  if (
-    route.sender_role &&
-    senderBinding &&
-    route.sender_role !== senderBinding.role
-  ) {
-    return { state: "quarantined", reason: "sender_role_mismatch" };
   }
   if (route.expiry && Date.parse(route.expiry) <= now) {
     return { state: "quarantined", reason: "expired" };
@@ -224,6 +221,7 @@ export async function routePeerMessage(
     logicalMessageId = route?.logical_message_id || randomUUID(),
   },
   dispatch,
+  { log = writeCoordinationEvent } = {},
 ) {
   validateName("sender", from);
   validateName("target", target);
@@ -301,8 +299,24 @@ export async function routePeerMessage(
   });
 
   if (prepared.existing) {
+    await log({
+      kind: "route-admission",
+      phase: "deduplication",
+      correlationId: logicalMessageId,
+      target,
+      outcome: "deduplicated",
+      errorCode: prepared.existing.status,
+    });
     return publicOutcome(prepared.existing, { deduplicated: true });
   }
+  await log({
+    kind: "route-admission",
+    phase: "decision",
+    correlationId: logicalMessageId,
+    target,
+    outcome: prepared.record.admissionState,
+    errorCode: prepared.record.admissionReason,
+  });
   if (prepared.record.admissionState === "quarantined") {
     return publicOutcome(prepared.record);
   }
