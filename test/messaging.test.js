@@ -55,13 +55,26 @@ test("only cxmsg threads are discoverable as peers", () => {
 });
 
 test("peer input is explicitly untrusted", () => {
+  const route = {
+    schema_version: 1,
+    project_id: "hermes",
+    target_role: "auditor",
+    logical_message_id: "11345678-1234-4234-8234-123456789abc",
+    payload_type: "coordination",
+    wake_policy: "immediate",
+  };
   const result = peerMessageInput({
     from: "alpha",
     message: "tests passed",
     messageId: "message-1",
+    route,
   });
   assert.equal(result.additionalContext["cxmsg:message-1"].kind, "untrusted");
   assert.match(result.additionalContext["cxmsg:message-1"].value, /tests passed/);
+  assert.deepEqual(
+    JSON.parse(result.additionalContext["cxmsg:message-1"].value).route,
+    route,
+  );
   assert.match(result.input[0].text, /not user consent/);
 });
 

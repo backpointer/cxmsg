@@ -525,6 +525,15 @@ This is a required deployment gate before the Hermes pilot and before Phases 3
 and 4. It is not implemented by the Message Body Store slice. A Content
 Reference proves body integrity only; it does not admit a route.
 
+Implementation status: the immediate-only Phase 2.5 slice is now implemented.
+It provides thread-pinned external route bindings, exact Project/role
+admission, optional bound-sender role checking, pre-injection owner-only
+Quarantine, redacted quarantine listing, and durable logical-message
+idempotency with at most one automatic dispatch attempt. Unbound targets stay
+legacy-compatible for migration. Scheduled admission, release, retention,
+purge, and uncertain-attempt reconciliation remain in later phases; no
+quarantined record is replayed automatically.
+
 ### Phase 3: Node Directory and Project identity
 
 - strengthen bridge registry ownership and identity-checked Endpoint selection

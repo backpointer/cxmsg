@@ -8,6 +8,7 @@ import {
   inspectPermissions,
   inspectRegisteredThreads,
   inspectRelay,
+  inspectRouteState,
   inspectRuntime,
   inspectState,
 } from "./inspectors.js";
@@ -44,6 +45,12 @@ export async function runDoctor({
   checks.push(...state.checks);
   checks.push(
     ...(adapters.inspectMessageBodies || inspectMessageBodies)({ stateDir }),
+  );
+  checks.push(
+    ...(adapters.inspectRouteState || inspectRouteState)({
+      stateDir,
+      sessions: state.allSessions || state.sessions,
+    }),
   );
   checks.push(...(adapters.inspectJobs || inspectJobs)(state.jobs));
   checks.push(...(adapters.inspectAttachments || inspectAttachments)(state.attachments));

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -17,6 +18,7 @@ import {
   inspectBridges,
   inspectJobs,
   inspectMessageBodies,
+  inspectRouteState,
   inspectState,
 } from "../src/inspectors.js";
 import { CLAUDE_BRIDGE_IMPLEMENTATION_REVISION } from "../src/claude-bridge.js";
@@ -216,6 +218,52 @@ test("Message Body Store Inspector reports private metadata, quarantine, and quo
           check.verification === "broad-mode",
       ),
     );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Route Inspector checks binding identity and redacts quarantined bodies", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-routes-"));
+  try {
+    await fs.chmod(root, 0o700);
+    for (const directory of ["route-bindings", "route-deliveries", "quarantine"]) {
+      await fs.mkdir(path.join(root, directory), { mode: 0o700 });
+    }
+    await writeJson(path.join(root, "route-bindings", "worker.json"), {
+      version: 1,
+      sessionName: "worker",
+      threadId: THREAD_ID,
+      projectId: "hermes",
+      role: "auditor",
+    });
+    const messageId = "7ddaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const message = "private quarantined body";
+    const digest = createHash("sha256").update(message).digest("hex");
+    await writeJson(path.join(root, "quarantine", `${messageId}.json`), {
+      version: 1,
+      logicalMessageId: messageId,
+      from: "coordinator",
+      target: "worker",
+      reason: "project_mismatch",
+      message,
+      messageBytes: Buffer.byteLength(message, "utf8"),
+      messageSha256: digest,
+    });
+
+    const checks = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+    });
+    assert.equal(
+      checks.find((check) => check.id === "route-bindings.session.worker").status,
+      "pass",
+    );
+    assert.equal(
+      checks.find((check) => check.id === "quarantine.records.count").status,
+      "warn",
+    );
+    assert.doesNotMatch(JSON.stringify(checks), /private quarantined body/);
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

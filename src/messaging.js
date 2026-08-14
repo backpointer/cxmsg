@@ -97,6 +97,7 @@ export function peerMessageInput({
   message,
   messageId = randomUUID(),
   bodyReference = null,
+  route = null,
 }) {
   validateSessionName(from);
   validateStoredMessage(message);
@@ -107,6 +108,7 @@ export function peerMessageInput({
     from,
     sentAt: new Date().toISOString(),
     authority: "untrusted-peer",
+    ...(route ? { route } : {}),
   };
   const messageBytes = Buffer.byteLength(message, "utf8");
   const messageSha256 = createHash("sha256").update(message).digest("hex");

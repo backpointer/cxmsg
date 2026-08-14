@@ -16,6 +16,7 @@ import { hostRelayRequest } from "./host-relay.js";
 import {
   MESSAGE_BODY_SEGMENT_BYTES,
   MESSAGE_BODY_STORE_QUOTA_BYTES,
+  MAX_STORED_MESSAGE_BYTES,
 } from "./message-bodies.js";
 import { processIdentity, processState, serviceEvidence } from "./process-state.js";
 import { EVENT_LOG_ARCHIVES, EVENT_LOG_MAX_BYTES } from "./runtime.js";
@@ -137,6 +138,7 @@ function scanJsonDirectory({
   directoryName,
   scope,
   validate,
+  maxRecordBytes = MAX_RECORD_BYTES,
 }) {
   const directory = path.join(stateDir, directoryName);
   const checks = [];
@@ -186,7 +188,7 @@ function scanJsonDirectory({
       checks.push(metadataFinding(`${scope}.record.${label}.metadata`, scope, `${scope} record ${label}`, evidence));
       continue;
     }
-    if (evidence.metadata.size > MAX_RECORD_BYTES) {
+    if (evidence.metadata.size > maxRecordBytes) {
       checks.push(diagnosticCheck({
         id: `${scope}.record.${label}.size`,
         scope,
@@ -323,6 +325,130 @@ function validBridge(record, stem) {
     ),
     errorCode: "EBRIDGESCHEMA",
   };
+}
+
+function validRouteBinding(record, stem) {
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        record.sessionName === stem &&
+        SESSION_PATTERN.test(record.sessionName || "") &&
+        UUID_PATTERN.test(record.threadId || "") &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.projectId || "") &&
+        /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.role || ""),
+    ),
+    errorCode: "EROUTEBINDINGSCHEMA",
+  };
+}
+
+function validRouteDelivery(record, stem) {
+  const expectedFingerprint = createHash("sha256")
+    .update(JSON.stringify(record?.route ?? null))
+    .digest("hex");
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        record.logicalMessageId === stem &&
+        UUID_PATTERN.test(record.logicalMessageId || "") &&
+        SESSION_PATTERN.test(record.from || "") &&
+        SESSION_PATTERN.test(record.target || "") &&
+        /^[0-9a-f]{64}$/.test(record.messageSha256 || "") &&
+        record.routeFingerprint === expectedFingerprint &&
+        ["admitted", "quarantined"].includes(record.admissionState) &&
+        ["dispatching", "turn_started", "unknown", "quarantined"].includes(
+          record.status,
+        ),
+    ),
+    errorCode: "EROUTEDELIVERYSCHEMA",
+  };
+}
+
+function validQuarantine(record, stem) {
+  const messageBytes = Buffer.byteLength(record?.message || "", "utf8");
+  const expectedDigest = createHash("sha256")
+    .update(record?.message || "")
+    .digest("hex");
+  return {
+    valid: Boolean(
+      record?.version === 1 &&
+        record.logicalMessageId === stem &&
+        UUID_PATTERN.test(record.logicalMessageId || "") &&
+        SESSION_PATTERN.test(record.from || "") &&
+        SESSION_PATTERN.test(record.target || "") &&
+        typeof record.reason === "string" &&
+        typeof record.message === "string" &&
+        messageBytes <= MAX_STORED_MESSAGE_BYTES &&
+        record.messageBytes === messageBytes &&
+        record.messageSha256 === expectedDigest,
+    ),
+    errorCode: "EQUARANTINESCHEMA",
+  };
+}
+
+export function inspectRouteState({ stateDir, sessions = [] } = {}) {
+  const bindings = scanJsonDirectory({
+    stateDir,
+    directoryName: "route-bindings",
+    scope: "route-bindings",
+    validate: validRouteBinding,
+  });
+  const deliveries = scanJsonDirectory({
+    stateDir,
+    directoryName: "route-deliveries",
+    scope: "route-deliveries",
+    validate: validRouteDelivery,
+  });
+  const quarantine = scanJsonDirectory({
+    stateDir,
+    directoryName: "quarantine",
+    scope: "quarantine",
+    validate: validQuarantine,
+    maxRecordBytes: MAX_STORED_MESSAGE_BYTES + 16 * 1024,
+  });
+  const checks = [
+    ...bindings.checks,
+    ...deliveries.checks,
+    ...quarantine.checks,
+  ];
+  const sessionsByName = new Map(sessions.map((record) => [record.name, record]));
+  for (const binding of bindings.records) {
+    const current = sessionsByName.get(binding.sessionName);
+    const matches = current?.threadId === binding.threadId;
+    checks.push(
+      diagnosticCheck({
+        id: `route-bindings.session.${safeLabel(binding.sessionName)}`,
+        scope: "route-bindings",
+        status: matches ? "pass" : "fail",
+        summary: matches
+          ? `Route binding for ${binding.sessionName} matches its registered thread`
+          : `Route binding for ${binding.sessionName} does not match a registered thread`,
+        verification: "registry",
+        errorCode: matches ? null : "EROUTEIDENTITY",
+        remediation: matches
+          ? null
+          : "Re-bind the intended registered session; do not release quarantined messages automatically",
+      }),
+    );
+  }
+  checks.push(
+    diagnosticCheck({
+      id: "quarantine.records.count",
+      scope: "quarantine",
+      status: quarantine.records.length > 0 ? "warn" : "pass",
+      summary:
+        quarantine.records.length > 0
+          ? `${quarantine.records.length} quarantined route message(s) require operator review`
+          : "No routed peer messages are quarantined",
+      verification: "records",
+      errorCode: quarantine.records.length > 0 ? "EQUARANTINED" : null,
+      remediation:
+        quarantine.records.length > 0
+          ? "Inspect metadata with cxmsg quarantine list; this release intentionally has no automatic release"
+          : null,
+      required: false,
+    }),
+  );
+  return checks;
 }
 
 export function inspectRuntime({ codexBin = process.env.CODEX_BIN || "codex", run = spawnSync } = {}) {

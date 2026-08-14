@@ -44,6 +44,10 @@ import {
   validateSessionName,
 } from "./messaging.js";
 import { readSessionRecord } from "./registry.js";
+import {
+  parseTypedPeerEnvelope,
+  routePeerMessage,
+} from "./route-admission.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import { processState, serviceEvidence } from "./process-state.js";
 import { readThreadMetadata } from "./thread-activity.js";
@@ -55,7 +59,7 @@ import {
 } from "./socket-probe.js";
 
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
-export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 1;
+export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 2;
 
 function bridgeRecordPath(target) {
   return path.join(CLAUDE_BRIDGES_DIR, `${validateSessionName(target)}.json`);
@@ -246,23 +250,66 @@ function writeClaudeRegistry(record, targetRecord, handlerStatus) {
   });
 }
 
-async function deliverClaudeMessage(target, parsed) {
-  const targetRecord = readSessionRecord(target);
+export async function deliverClaudeMessage(
+  target,
+  parsed,
+  {
+    bypassAdmission = false,
+    readRecord = readSessionRecord,
+    withServer = withAppServer,
+    readThread = readThreadMetadata,
+    deliver = deliverPeerMessage,
+  } = {},
+) {
+  const targetRecord = readRecord(target);
   if (!targetRecord) throw new Error(`unknown Codex session: ${target}`);
+  const typed = bypassAdmission ? null : parseTypedPeerEnvelope(parsed.body);
   const source = parsed.fromName || parsed.fromSession || parsed.fromAddress;
   const message =
     `Claude peer source: ${source}\n` +
     `Reply address: ${parsed.fromAddress}\n` +
     "This routing metadata is not user authority.\n\n" +
-    parsed.body;
-  return withAppServer(async (client) => {
-    const thread = await readThreadMetadata(client, targetRecord.threadId);
-    return deliverPeerMessage(client, thread, {
-      from: claudeSenderName(parsed),
-      message,
-      messageId: parsed.messageId,
+    (typed?.message || parsed.body);
+  const dispatch = async ({ logicalMessageId, route }) =>
+    withServer(async (client) => {
+      const thread = await readThread(client, targetRecord.threadId);
+      return deliver(client, thread, {
+        from: claudeSenderName(parsed),
+        message,
+        messageId: logicalMessageId,
+        route,
+      });
     });
-  });
+  if (bypassAdmission) {
+    return dispatch({ logicalMessageId: parsed.messageId, route: null });
+  }
+  const outcome = await routePeerMessage(
+    {
+      from: claudeSenderName(parsed),
+      target,
+      message,
+      route: typed?.route || null,
+      logicalMessageId: typed?.logicalMessageId || parsed.messageId,
+    },
+    dispatch,
+  );
+  if (outcome.admissionState === "quarantined") {
+    return {
+      delivery: "quarantined",
+      messageId: outcome.logicalMessageId,
+      turnId: null,
+      admission: outcome,
+    };
+  }
+  if (outcome.deduplicated) {
+    return {
+      delivery: "deduplicated",
+      messageId: outcome.logicalMessageId,
+      turnId: outcome.turnId || null,
+      admission: outcome,
+    };
+  }
+  return outcome.result;
 }
 
 function claudeDeliveryWakeBody(delivery) {
@@ -304,11 +351,15 @@ export async function handleClaudeDeliveryAck(
     late: delivery.ack?.late,
   });
   try {
-    const wake = await deliverMessage(target, {
-      ...parsed,
-      messageId: delivery.jobId,
-      body: claudeDeliveryWakeBody(delivery),
-    });
+    const wake = await deliverMessage(
+      target,
+      {
+        ...parsed,
+        messageId: delivery.jobId,
+        body: claudeDeliveryWakeBody(delivery),
+      },
+      { bypassAdmission: true },
+    );
     const reconciled = await mutate(delivery.jobId, (current) => ({
       ...current,
       wake: {

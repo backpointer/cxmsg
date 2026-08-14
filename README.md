@@ -60,6 +60,38 @@ different shell, specify it explicitly:
 cxmsg send --from coordinator worker "ping"
 ```
 
+For an explicitly isolated target, bind its current registered thread to one
+Project and role, then use a typed routed send:
+
+```bash
+cxmsg route bind worker --project hermes --role auditor
+cxmsg send \
+  --from coordinator \
+  --project hermes \
+  --target-role auditor \
+  --sender-role coordinator \
+  --logical-message-id <uuid> \
+  worker \
+  "Review handoff <id> at commit <sha>."
+```
+
+Once a target is bound, an untyped, expired, wrong-Project, wrong-role, or
+stale-thread message is stored in owner-only Quarantine before any App Server
+turn is started or steered. Inspect redacted metadata only with:
+
+```bash
+cxmsg route show worker --json
+cxmsg route list --json
+cxmsg quarantine list --json
+```
+
+There is intentionally no automatic quarantine release, retry, reroute, or
+permission effect. Reusing the same `logical_message_id` with identical
+sender, target, route, and body is a no-op after its first dispatch attempt;
+reusing it with different content fails as an idempotency conflict. Targets
+without an explicit binding retain legacy unscoped-send compatibility during
+migration.
+
 Codex Peer Messages accept up to 256 KiB. Bodies through 16 KiB are delivered
 inline. Larger bodies are stored locally before transport and the receiver gets
 only a bounded preview plus an opaque Content Reference. Read only the range
@@ -139,7 +171,8 @@ cxmsg doctor --deep --target worker
 ```
 
 The default pass uses only passive process, registry, file, socket metadata,
-Job, grant, bridge, and relay evidence. `--deep` additionally performs
+Job, grant, route-binding, Quarantine, bridge, and relay evidence. `--deep`
+additionally performs
 non-mutating App Server, Claude bridge, and host relay handshakes; resolves
 registered threads with `thread/read(includeTurns:false)`; and checks stored
 permission profile references. Neither mode sends a peer message, starts or
@@ -275,6 +308,29 @@ replies:
 cxmsg claude bridge start coordinator
 cxmsg claude bridge status coordinator
 ```
+
+If that Codex target has a Route Admission binding, an ordinary Claude message
+must carry the same versioned routing envelope or it is quarantined before
+context injection. The Claude message body is JSON in this form:
+
+```json
+{
+  "protocol": "cxmsg-route/1",
+  "schema_version": 1,
+  "project_id": "hermes",
+  "target_role": "coordinator",
+  "sender_role": "auditor",
+  "logical_message_id": "<uuid>",
+  "payload_type": "coordination",
+  "wake_policy": "immediate",
+  "message": "Review result is available at commit <sha>."
+}
+```
+
+The bridge checks this envelope only for ordinary peer context. A validated
+Claude grant request and an internal terminal-delivery wake keep their separate
+authorization and correlation paths; routing fields cannot manufacture either
+one.
 
 If a managed sandbox can read the registry but cannot connect to local Unix
 sockets, start the authenticated host relay from an ordinary host terminal:

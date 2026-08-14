@@ -47,7 +47,8 @@ Every check contains:
 - `id` is a stable machine-oriented check identifier.
 - `scope` groups checks such as `runtime`, `state`, `sessions`, `jobs`,
   `permissions`, `app-server`, `attachments`, `bridges`, `relay`,
-  `message-bodies`, or `schedules`.
+  `message-bodies`, `route-bindings`, `route-deliveries`, `quarantine`, or
+  `schedules`.
 - `status` is `pass`, `warn`, `fail`, `unknown`, or `skipped`.
 - `summary` is bounded operator text with no private body data.
 - `verification` is bounded evidence such as `metadata`, `registry`,
@@ -74,6 +75,12 @@ Message Body Store findings inspect owner, mode, type, segment size,
 Quarantine count, and write-quota usage without parsing Message Body text.
 `EMESSAGEBODYPARTIAL` and `EMESSAGEBODYQUOTA` are retained operational
 warnings, not permission for Doctor to purge or rewrite a segment.
+
+Route findings validate owner-only metadata, bounded JSON schemas, the binding
+filename and registered-thread identity, delivery records, and Quarantine
+records. They never emit a quarantined body in the report. `EROUTEIDENTITY`
+requires an explicit re-bind of the intended session; `EQUARANTINED` is an
+operator-review warning and never authorizes automatic release.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.

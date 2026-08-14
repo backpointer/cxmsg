@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawn, spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -96,6 +97,13 @@ import {
   messageBodyInfo,
   readMessageBody,
 } from "../src/message-bodies.js";
+import {
+  listQuarantine,
+  listRouteBindings,
+  readRouteBinding,
+  routePeerMessage,
+  writeRouteBinding,
+} from "../src/route-admission.js";
 import { readThreadMetadata } from "../src/thread-activity.js";
 import {
   listSessionRecords,
@@ -130,7 +138,14 @@ function usage(exitCode = 0) {
   cxmsg register <name> <thread-id>
   cxmsg remove <name>
   cxmsg peers [--json]
-  cxmsg send [--from <name>] <target> <message...>
+  cxmsg send [--from <name>] [--project <id>] [--target-role <role>]
+             [--sender-role <role>] [--task <id>] [--logical-message-id <uuid>]
+             [--payload-type <type>] [--expiry <timestamp>]
+             [--wake-policy immediate] <target> <message...>
+  cxmsg route bind <session> --project <id> --role <role>
+  cxmsg route show <session> [--json]
+  cxmsg route list [--json]
+  cxmsg quarantine list [--json]
   cxmsg message info <message-id|content-ref> [--json]
   cxmsg message show <message-id|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -1608,26 +1623,157 @@ async function commandWait(args) {
 
 async function commandSend(args) {
   let from = process.env.CODEX_SESSION_NAME || "";
-  if (args[0] === "--from") {
-    from = args[1] || "";
-    args = args.slice(2);
+  const routeOptions = {};
+  let logicalMessageId = null;
+  while (args[0]?.startsWith("--")) {
+    const option = args.shift();
+    const value = args.shift();
+    if (!value) throw new Error(`${option} requires a value`);
+    if (option === "--from") from = value;
+    else if (option === "--project") routeOptions.project_id = value;
+    else if (option === "--target-role") routeOptions.target_role = value;
+    else if (option === "--sender-role") routeOptions.sender_role = value;
+    else if (option === "--task") routeOptions.task_id = value;
+    else if (option === "--logical-message-id") logicalMessageId = value;
+    else if (option === "--payload-type") routeOptions.payload_type = value;
+    else if (option === "--expiry") routeOptions.expiry = value;
+    else if (option === "--wake-policy") routeOptions.wake_policy = value;
+    else throw new Error(`unknown send option: ${option}`);
   }
   validateSessionName(from);
 
   const target = validateSessionName(args[0]);
   const message = validateStoredMessage(args.slice(1).join(" "));
   if (from === target) throw new Error("cannot send a peer message to the same session");
+  const targetRecord = readSessionRecord(target);
+  if (!targetRecord) throw new Error(`unknown Codex session: ${target}`);
 
-  await ensureServer();
-  const delivery = await withAppServer(async (client) => {
-    const targetRecord = readSessionRecord(target);
-    if (!targetRecord) throw new Error(`unknown Codex session: ${target}`);
-    const thread = await readThreadMetadata(client, targetRecord.threadId);
-    return deliverPeerMessage(client, thread, { from, message });
-  });
+  const routed = Object.keys(routeOptions).length > 0;
+  if (routed && (!routeOptions.project_id || !routeOptions.target_role)) {
+    throw new Error("routed send requires both --project and --target-role");
+  }
+  if (routed && !logicalMessageId) logicalMessageId = randomUUID();
+  const route = routed
+    ? {
+        schema_version: 1,
+        logical_message_id: logicalMessageId,
+        ...routeOptions,
+      }
+    : null;
 
+  const outcome = await routePeerMessage(
+    { from, target, message, route, ...(logicalMessageId ? { logicalMessageId } : {}) },
+    async ({ logicalMessageId: messageId, route: admittedRoute }) => {
+      await ensureServer();
+      return withAppServer(async (client) => {
+        const thread = await readThreadMetadata(client, targetRecord.threadId);
+        return deliverPeerMessage(client, thread, {
+          from,
+          message,
+          messageId,
+          route: admittedRoute,
+        });
+      });
+    },
+  );
+
+  if (outcome.admissionState === "quarantined") {
+    process.stderr.write(
+      `cxmsg: quarantined ${outcome.logicalMessageId} for ${target}: ${outcome.reason}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (outcome.deduplicated) {
+    process.stdout.write(
+      `deduplicated ${outcome.logicalMessageId} for ${target} (${outcome.status})\n`,
+    );
+    return;
+  }
+
+  const delivery = outcome.result;
   process.stdout.write(
     `delivered ${delivery.messageId} to ${target} (${delivery.delivery}, turn ${delivery.turnId})\n`,
+  );
+}
+
+async function commandRoute(args) {
+  const operation = args.shift();
+  if (operation === "bind") {
+    const sessionName = validateSessionName(args.shift());
+    const sessionRecord = readSessionRecord(sessionName);
+    if (!sessionRecord) {
+      throw new Error(`unknown Codex session: ${sessionName}`);
+    }
+    let projectId = null;
+    let role = null;
+    while (args.length) {
+      const option = args.shift();
+      const value = args.shift();
+      if (!value || value.startsWith("--")) {
+        throw new Error(`${option} requires a value`);
+      }
+      if (option === "--project") projectId = value;
+      else if (option === "--role") role = value;
+      else throw new Error(`unknown route bind option: ${option}`);
+    }
+    if (!projectId || !role) {
+      throw new Error("route bind requires --project and --role");
+    }
+    const binding = writeRouteBinding({
+      sessionName,
+      threadId: sessionRecord.threadId,
+      projectId,
+      role,
+    });
+    process.stdout.write(
+      `bound ${binding.sessionName} to ${binding.projectId}/${binding.role}\n`,
+    );
+    return;
+  }
+  if (operation === "show") {
+    const sessionName = validateSessionName(args.shift());
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) {
+      throw new Error("route show contains an unknown option");
+    }
+    const binding = readRouteBinding(sessionName);
+    if (!binding) throw new Error(`no route binding for session: ${sessionName}`);
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(binding, null, 2)}\n`
+        : `${binding.sessionName}\t${binding.projectId}\t${binding.role}\n`,
+    );
+    return;
+  }
+  if (operation === "list") {
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) {
+      throw new Error("route list contains an unknown option");
+    }
+    const bindings = listRouteBindings();
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(bindings, null, 2)}\n`
+        : `${bindings.map((binding) => `${binding.sessionName}\t${binding.projectId}\t${binding.role}`).join("\n")}${bindings.length ? "\n" : ""}`,
+    );
+    return;
+  }
+  usage(2);
+}
+
+async function commandQuarantine(args) {
+  const operation = args.shift();
+  if (operation !== "list") usage(2);
+  const jsonOutput = args.includes("--json");
+  if (args.some((value) => value !== "--json")) {
+    throw new Error("quarantine list contains an unknown option");
+  }
+  const records = listQuarantine();
+  process.stdout.write(
+    jsonOutput
+      ? `${JSON.stringify(records, null, 2)}\n`
+      : `${records.map((record) => `${record.logicalMessageId}\t${record.target}\t${record.reason}`).join("\n")}${records.length ? "\n" : ""}`,
   );
 }
 
@@ -1756,6 +1902,12 @@ async function main() {
       break;
     case "send":
       await commandSend(args);
+      break;
+    case "route":
+      await commandRoute(args);
+      break;
+    case "quarantine":
+      await commandQuarantine(args);
       break;
     case "message":
       await commandMessage(args);

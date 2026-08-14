@@ -44,6 +44,16 @@ segment metadata, quarantine counts, and quota usage; it never parses Message
 Bodies. Store segments may contain private coordination text and must never be
 committed, published, exposed in web snapshots, or treated as authority.
 
+Route Admission bindings and records are also owner-only runtime state. A
+binding is pinned to the currently registered Codex thread and compares a
+typed Project and role before context injection; it is routing policy, never a
+delegation grant or user approval. Rejected messages retain their full body in
+owner-only Quarantine, while CLI and Doctor output expose metadata and digest
+only. Quarantine has no automatic release, retry, reroute, wake, cleanup, or
+authority path. Logical-message deduplication prevents a second automatic wake
+after an attempt is durably marked, including when the first outcome is
+uncertain.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.
