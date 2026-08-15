@@ -277,7 +277,10 @@ export async function probeAppServerSocket(
         )),
       ),
     ]);
-    return healthyProbe();
+    return {
+      ...healthyProbe(),
+      appServerVersion: appServerVersion(client.initializeResult?.userAgent),
+    };
   } catch (error) {
     return failedProbe(error);
   } finally {

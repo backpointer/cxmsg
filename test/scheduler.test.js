@@ -87,6 +87,11 @@ test("worker lifecycle writes a versioned heartbeat record and removes it on exi
   }
   const record = await scheduler.runSchedulerWorker({ Client, once: true });
   assert.equal(observed.version, 2);
+  assert.equal(observed.cxmsgVersion, (await import("../src/version.js")).CXMSG_VERSION);
+  assert.equal(
+    observed.implementationRevision,
+    scheduler.SCHEDULER_IMPLEMENTATION_REVISION,
+  );
   assert.equal(observed.pid, process.pid);
   assert.equal(observed.workerId, record.workerId);
   assert.ok(Number.isFinite(Date.parse(observed.heartbeatAt)));

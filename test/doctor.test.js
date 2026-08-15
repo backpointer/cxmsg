@@ -20,6 +20,7 @@ import {
   inspectJobs,
   inspectMessageBodies,
   inspectNodeDirectory,
+  inspectRelay,
   inspectRouteState,
   inspectState,
 } from "../src/inspectors.js";
@@ -27,6 +28,10 @@ import { directConversationId } from "../src/conversations.js";
 import { CLAUDE_BRIDGE_IMPLEMENTATION_REVISION } from "../src/claude-bridge.js";
 import { failedProbe } from "../src/socket-probe.js";
 import { rebuildDeliveryLedgerRecords } from "../src/delivery-ledger.js";
+import {
+  CXMSG_IMPLEMENTATION_REVISIONS,
+  CXMSG_VERSION,
+} from "../src/version.js";
 
 const THREAD_ID = "019ff02a-ee3b-7072-8a79-e5ffd491529d";
 const JOB_ID = "6ddaa4e0-fa31-454e-a37e-a37f8807f0e7";
@@ -391,6 +396,46 @@ test("deep App Server inspection preserves sandbox-denied UDS evidence", async (
     assert.equal(connection.verification, "sandbox-denied");
     assert.equal(connection.errorCode, "EPERM");
     assert.doesNotMatch(connection.summary, /stopped/i);
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("deep App Server inspection compares the external Codex service version", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-app-version-"));
+  const socket = path.join(root, "app-server.sock");
+  const pidPath = path.join(root, "app-server.pid");
+  const server = net.createServer();
+  try {
+    await fs.chmod(root, 0o700);
+    await fs.writeFile(pidPath, `${process.pid}\n`, { mode: 0o600 });
+    await new Promise((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(socket, resolve);
+    });
+    await fs.chmod(socket, 0o600);
+    const inspect = async (cliVersion) =>
+      (await inspectAppServer({
+        pidPath,
+        socketPath: socket,
+        deep: true,
+        processStateFn: () => "alive",
+        processIdentityFn: () => ({ state: "matched", command: "app-server" }),
+        probe: async () => ({
+          state: "healthy",
+          errorCode: null,
+          error: null,
+          appServerVersion: "0.147.0",
+        }),
+        run: () => ({ status: 0, stdout: `codex-cli ${cliVersion}\n` }),
+      })).find((check) => check.id === "app-server.version.compatibility");
+
+    assert.equal((await inspect("0.147.0")).status, "pass");
+    assert.equal(
+      (await inspect("0.148.0")).errorCode,
+      "EAPPSERVERVERSIONMISMATCH",
+    );
   } finally {
     await new Promise((resolve) => server.close(resolve));
     await fs.rm(root, { recursive: true, force: true });
@@ -918,6 +963,8 @@ test("Route Inspector distinguishes healthy, stalled, and legacy scheduler recor
     const workerId = "6edaa4e0-fa31-454e-a37e-a37f8807f0e7";
     const base = {
       version: 2,
+      cxmsgVersion: CXMSG_VERSION,
+      implementationRevision: CXMSG_IMPLEMENTATION_REVISIONS.scheduler,
       pid: process.pid,
       workerId,
       startedAt: "2026-08-14T00:00:00.000Z",
@@ -933,8 +980,26 @@ test("Route Inspector distinguishes healthy, stalled, and legacy scheduler recor
         now: Date.parse("2026-08-14T00:00:20.000Z"),
         processStateFn: () => "alive",
       }).find((check) => check.id === "schedules.worker.process");
+    const inspectImplementation = () =>
+      inspectRouteState({
+        stateDir: root,
+        now: Date.parse("2026-08-14T00:00:20.000Z"),
+        processStateFn: () => "alive",
+      }).find((check) => check.id === "schedules.worker.implementation");
 
     assert.equal(inspect().status, "pass");
+    assert.equal(inspectImplementation().status, "pass");
+    await writeJson(schedulerPath, {
+      ...base,
+      implementationRevision: CXMSG_IMPLEMENTATION_REVISIONS.scheduler + 1,
+    });
+    assert.equal(inspectImplementation().errorCode, "ESCHEDULERSTALECODE");
+    const { implementationRevision, ...legacyImplementation } = base;
+    await writeJson(schedulerPath, legacyImplementation);
+    assert.equal(
+      inspectImplementation().errorCode,
+      "ESCHEDULERVERSIONUNKNOWN",
+    );
     await writeJson(schedulerPath, {
       ...base,
       heartbeatAt: "2026-08-14T00:00:00.000Z",
@@ -967,6 +1032,42 @@ test("Route Inspector distinguishes healthy, stalled, and legacy scheduler recor
       changedAt: "2026-08-14T00:00:11.000Z",
     });
     assert.equal(inspectMissing().errorCode, "ESCHEDULERSTOPPED");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Relay Inspector distinguishes current, unknown, and stale implementations", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-relay-version-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const recordPath = path.join(root, "host-relay.json");
+    const base = {
+      version: 1,
+      cxmsgVersion: CXMSG_VERSION,
+      implementationRevision: CXMSG_IMPLEMENTATION_REVISIONS.hostRelay,
+      pid: process.pid,
+      port: 4174,
+      token: "12345678-2234-4234-8234-123456789abc",
+      startedAt: 1,
+    };
+    const inspect = async () =>
+      (await inspectRelay({
+        recordPath,
+        processStateFn: () => "alive",
+        processIdentityFn: () => ({ state: "matched", command: "relay" }),
+      })).find((check) => check.id === "relay.implementation");
+
+    await writeJson(recordPath, base);
+    assert.equal((await inspect()).status, "pass");
+    await writeJson(recordPath, {
+      ...base,
+      implementationRevision: CXMSG_IMPLEMENTATION_REVISIONS.hostRelay + 1,
+    });
+    assert.equal((await inspect()).errorCode, "ERELAYSTALECODE");
+    const { implementationRevision, ...legacyImplementation } = base;
+    await writeJson(recordPath, legacyImplementation);
+    assert.equal((await inspect()).errorCode, "ERELAYVERSIONUNKNOWN");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

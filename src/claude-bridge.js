@@ -59,7 +59,10 @@ import {
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import { processState, serviceEvidence } from "./process-state.js";
 import { readThreadMetadata } from "./thread-activity.js";
-import { CXMSG_VERSION } from "./version.js";
+import {
+  CXMSG_IMPLEMENTATION_REVISIONS,
+  CXMSG_VERSION,
+} from "./version.js";
 import {
   failedProbe,
   healthyProbe,
@@ -67,7 +70,8 @@ import {
 } from "./socket-probe.js";
 
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
-export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 25;
+export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION =
+  CXMSG_IMPLEMENTATION_REVISIONS.claudeBridge;
 
 function bridgeRecordPath(target) {
   return path.join(CLAUDE_BRIDGES_DIR, `${validateSessionName(target)}.json`);

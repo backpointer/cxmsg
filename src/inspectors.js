@@ -42,7 +42,10 @@ import {
   validTeamCastSelectionRecord,
 } from "./team-cast.js";
 import { validTurnLifecycleState } from "./turn-lifecycle.js";
-import { CXMSG_VERSION } from "./version.js";
+import {
+  CXMSG_IMPLEMENTATION_REVISIONS,
+  CXMSG_VERSION,
+} from "./version.js";
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
@@ -139,6 +142,39 @@ export function diagnosticCheck({
   );
 }
 
+function implementationRevisionCheck({
+  id,
+  scope,
+  label,
+  recordedRevision,
+  currentRevision,
+  unknownCode,
+  staleCode,
+  remediation,
+}) {
+  const current = recordedRevision === currentRevision;
+  return diagnosticCheck({
+    id,
+    scope,
+    status: current ? "pass" : "warn",
+    summary:
+      recordedRevision === undefined
+        ? `${label} does not identify its running implementation revision`
+        : current
+          ? `${label} runs the current implementation revision`
+          : `${label} runs a different implementation revision`,
+    verification: recordedRevision === undefined ? "record-missing" : "record",
+    errorCode:
+      current
+        ? null
+        : recordedRevision === undefined
+          ? unknownCode
+          : staleCode,
+    remediation: current ? null : remediation,
+    required: false,
+  });
+}
+
 function safeLabel(value) {
   if (typeof value === "string" && UUID_PATTERN.test(value)) return value.slice(0, 8);
   if (typeof value === "string" && SESSION_PATTERN.test(value)) return value;
@@ -149,6 +185,12 @@ function errorCode(error, fallback = "EINSPECT") {
   return typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code)
     ? error.code
     : fallback;
+}
+
+function semanticVersion(value) {
+  return /(?:^|\s)(\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)(?:\s|$)/.exec(
+    value || "",
+  )?.[1] || null;
 }
 
 function secureMetadata(target, expectedType) {
@@ -2893,6 +2935,7 @@ export function inspectRouteState({
   reconcileGraceMs = ROUTE_RECONCILE_GRACE_MS,
   ledgerQuotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
   processStateFn = processState,
+  schedulerRevision = CXMSG_IMPLEMENTATION_REVISIONS.scheduler,
 } = {}) {
   const bindings = scanJsonDirectory({
     stateDir,
@@ -3291,7 +3334,14 @@ export function inspectRouteState({
         UUID_PATTERN.test(scheduler.workerId || "") &&
         Number.isFinite(Date.parse(scheduler.startedAt || "")) &&
         (scheduler.version === 1 ||
-          Number.isFinite(Date.parse(scheduler.heartbeatAt || ""))),
+          Number.isFinite(Date.parse(scheduler.heartbeatAt || ""))) &&
+        (scheduler.cxmsgVersion === undefined ||
+          (typeof scheduler.cxmsgVersion === "string" &&
+            scheduler.cxmsgVersion.length >= 1 &&
+            scheduler.cxmsgVersion.length <= 64)) &&
+        (scheduler.implementationRevision === undefined ||
+          (Number.isSafeInteger(scheduler.implementationRevision) &&
+            scheduler.implementationRevision >= 1)),
     );
     if (!valid) {
       checks.push(
@@ -3305,6 +3355,19 @@ export function inspectRouteState({
         }),
       );
     } else {
+      checks.push(
+        implementationRevisionCheck({
+          id: "schedules.worker.implementation",
+          scope: "schedules",
+          label: "Scheduler worker",
+          recordedRevision: scheduler.implementationRevision,
+          currentRevision: schedulerRevision,
+          unknownCode: "ESCHEDULERVERSIONUNKNOWN",
+          staleCode: "ESCHEDULERSTALECODE",
+          remediation:
+            "Restart the Scheduler from an allowed host context, then rerun Doctor; Doctor will not restart it",
+        }),
+      );
       const workerState = processStateFn(scheduler.pid);
       const heartbeatStale =
         scheduler.version === 2 &&
@@ -3990,6 +4053,8 @@ export async function inspectAppServer({
   processStateFn = processState,
   processIdentityFn = processIdentity,
   probe = probeAppServerSocket,
+  codexBin = process.env.CODEX_BIN || "codex",
+  run = spawnSync,
 } = {}) {
   const checks = [];
   const managed = readManagedPid(pidPath);
@@ -4049,6 +4114,38 @@ export async function inspectAppServer({
     errorCode: code,
     remediation: status === "unknown" ? "Run doctor --deep from an allowed host context" : null,
   }));
+  if (deep && evidence.status === "running") {
+    const cliResult = run(codexBin, ["--version"], { encoding: "utf8" });
+    const cliVersion =
+      cliResult.status === 0 ? semanticVersion(cliResult.stdout) : null;
+    const serverVersion = probeResult.appServerVersion || null;
+    const versionsKnown = Boolean(cliVersion && serverVersion);
+    const versionsMatch = versionsKnown && cliVersion === serverVersion;
+    checks.push(
+      diagnosticCheck({
+        id: "app-server.version.compatibility",
+        scope: "app-server",
+        status: versionsMatch ? "pass" : "warn",
+        summary: !versionsKnown
+          ? "App Server and configured Codex CLI versions could not both be identified"
+          : versionsMatch
+            ? "App Server and configured Codex CLI versions match"
+            : "App Server and configured Codex CLI versions differ",
+        verification: versionsKnown ? "handshake" : "unavailable",
+        errorCode: versionsMatch
+          ? null
+          : versionsKnown
+            ? "EAPPSERVERVERSIONMISMATCH"
+            : "EAPPSERVERVERSIONUNKNOWN",
+        remediation: versionsMatch
+          ? null
+          : versionsKnown
+            ? "Restart the App Server from the intended Codex installation, then rerun Doctor; Doctor will not restart it"
+            : "Run doctor --deep where the configured Codex executable and App Server handshake are both available",
+        required: false,
+      }),
+    );
+  }
   return checks;
 }
 
@@ -4079,35 +4176,19 @@ export async function inspectBridges(
   for (const record of bridges) {
     const label = safeLabel(record.target);
     const recordedRevision = record.implementationRevision;
-    checks.push(diagnosticCheck({
-      id: `bridges.${label}.implementation`,
-      scope: "bridges",
-      status:
-        recordedRevision === currentRevision
-          ? "pass"
-          : "warn",
-      summary:
-        recordedRevision === undefined
-          ? `Claude bridge ${record.target} does not identify its running implementation revision`
-          : recordedRevision === currentRevision
-            ? `Claude bridge ${record.target} runs the current implementation revision`
-            : `Claude bridge ${record.target} runs a different implementation revision`,
-      verification:
-        recordedRevision === undefined
-          ? "record-missing"
-          : "record",
-      errorCode:
-        recordedRevision === currentRevision
-          ? null
-          : recordedRevision === undefined
-            ? "EBRIDGEVERSIONUNKNOWN"
-            : "EBRIDGESTALECODE",
-      remediation:
-        recordedRevision === currentRevision
-          ? null
-          : "Restart this bridge from an allowed host context, then rerun doctor; Doctor will not restart it",
-      required: false,
-    }));
+    checks.push(
+      implementationRevisionCheck({
+        id: `bridges.${label}.implementation`,
+        scope: "bridges",
+        label: `Claude bridge ${record.target}`,
+        recordedRevision,
+        currentRevision,
+        unknownCode: "EBRIDGEVERSIONUNKNOWN",
+        staleCode: "EBRIDGESTALECODE",
+        remediation:
+          "Restart this bridge from an allowed host context, then rerun doctor; Doctor will not restart it",
+      }),
+    );
     const session = sessionsByName.get(record.target);
     if (!session || session.threadId !== record.targetThreadId) {
       checks.push(diagnosticCheck({
@@ -4162,6 +4243,7 @@ export async function inspectRelay({
   processIdentityFn = processIdentity,
   request = hostRelayRequest,
   workerFragment = "host-relay-worker.js",
+  currentRevision = CXMSG_IMPLEMENTATION_REVISIONS.hostRelay,
 } = {}) {
   const evidence = secureMetadata(recordPath, "file");
   if (evidence.status === "missing") {
@@ -4176,11 +4258,41 @@ export async function inspectRelay({
     checks.push(diagnosticCheck({ id: "relay.record.schema", scope: "relay", status: "fail", summary: "Host relay record is invalid bounded JSON", verification: "parse", errorCode: "EJSON" }));
     return checks;
   }
-  const valid = Boolean(record?.version === 1 && Number.isSafeInteger(record.pid) && record.pid > 1 && Number.isInteger(record.port) && record.port > 0 && record.port <= 65_535 && typeof record.token === "string" && record.token.length >= 16 && Number.isSafeInteger(record.startedAt));
+  const valid = Boolean(
+    record?.version === 1 &&
+      Number.isSafeInteger(record.pid) &&
+      record.pid > 1 &&
+      Number.isInteger(record.port) &&
+      record.port > 0 &&
+      record.port <= 65_535 &&
+      typeof record.token === "string" &&
+      record.token.length >= 16 &&
+      Number.isSafeInteger(record.startedAt) &&
+      (record.cxmsgVersion === undefined ||
+        (typeof record.cxmsgVersion === "string" &&
+          record.cxmsgVersion.length >= 1 &&
+          record.cxmsgVersion.length <= 64)) &&
+      (record.implementationRevision === undefined ||
+        (Number.isSafeInteger(record.implementationRevision) &&
+          record.implementationRevision >= 1)),
+  );
   if (!valid) {
     checks.push(diagnosticCheck({ id: "relay.record.schema", scope: "relay", status: "fail", summary: "Host relay record schema is invalid", verification: "schema", errorCode: "ERELAYSCHEMA" }));
     return checks;
   }
+  checks.push(
+    implementationRevisionCheck({
+      id: "relay.implementation",
+      scope: "relay",
+      label: "Host relay",
+      recordedRevision: record.implementationRevision,
+      currentRevision,
+      unknownCode: "ERELAYVERSIONUNKNOWN",
+      staleCode: "ERELAYSTALECODE",
+      remediation:
+        "Restart the host relay from an allowed host context, then rerun Doctor; Doctor will not restart it",
+    }),
+  );
   const state = processStateFn(record.pid);
   const identity = processIdentityFn(record.pid, [workerFragment, String(record.port)]).state;
   if (!deep) {
@@ -4197,7 +4309,14 @@ export async function inspectRelay({
   }
   try {
     const health = await request("/health", { record });
-    const matched = health.pid === record.pid && health.port === record.port && health.startedAt === record.startedAt;
+    const matched =
+      health.pid === record.pid &&
+      health.port === record.port &&
+      health.startedAt === record.startedAt &&
+      (record.cxmsgVersion === undefined ||
+        health.cxmsgVersion === record.cxmsgVersion) &&
+      (record.implementationRevision === undefined ||
+        health.implementationRevision === record.implementationRevision);
     checks.push(diagnosticCheck({
       id: "relay.health.connect",
       scope: "relay",

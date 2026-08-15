@@ -747,6 +747,21 @@ cxmsg server stop
 
 ## Read-only diagnostics
 
+Inspect the installed package and the expected revision of each cxmsg-loaded
+module without contacting a service:
+
+```bash
+cxmsg version
+cxmsg --version
+cxmsg version --json
+```
+
+The package version identifies the invoked installation. Implementation
+revisions are separate restart markers for long-running Scheduler, host relay,
+and Claude bridge workers. The App Server is owned by the configured Codex
+installation, so it is reported as `external-codex` rather than assigned a
+cxmsg implementation revision.
+
 Run the bounded Doctor before changing runtime state:
 
 ```bash
@@ -764,7 +779,11 @@ that every prepared Team Cast recipient matches its immutable plan and
 selection. `--deep` additionally performs
 non-mutating App Server, Claude bridge, and host relay handshakes; resolves
 registered threads with `thread/read(includeTurns:false)`; and checks stored
-permission profile references. Neither mode sends a peer message, starts or
+permission profile references. It also compares the App Server handshake
+version with the configured Codex CLI version. Passive Doctor checks compare
+the revision stamped by each Scheduler, host relay, and Claude bridge against
+the currently invoked cxmsg code. A package-version difference alone does not
+make an unchanged service implementation stale. Neither mode sends a peer message, starts or
 steers a model turn, answers an approval request, changes a grant, signals a
 process, removes a record, or repairs state.
 

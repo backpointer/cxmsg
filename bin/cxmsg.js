@@ -144,6 +144,10 @@ import {
   socketUrl,
 } from "../src/runtime.js";
 import {
+  CXMSG_IMPLEMENTATION_REVISIONS,
+  CXMSG_VERSION,
+} from "../src/version.js";
+import {
   processIdentity,
   processState,
   serviceEvidence,
@@ -265,6 +269,8 @@ const schedulerWorker = path.join(scriptDir, "scheduler-worker.js");
 
 function usage(exitCode = 0) {
   const output = `Usage:
+  cxmsg version [--json]
+  cxmsg --version
   cxmsg server start|status|stop
   cxmsg scheduler start|status|stop
   cxmsg deliveries list [--status <state>] [--json]
@@ -393,6 +399,36 @@ Environment:
 `;
   (exitCode === 0 ? process.stdout : process.stderr).write(output);
   process.exit(exitCode);
+}
+
+function commandVersion(args) {
+  const jsonOutput = args.includes("--json");
+  if (args.some((argument) => argument !== "--json")) {
+    const error = new Error(`unknown version option: ${args.find((argument) => argument !== "--json")}`);
+    error.exitCode = 2;
+    throw error;
+  }
+  const result = {
+    schemaVersion: 1,
+    packageVersion: CXMSG_VERSION,
+    implementationRevisions: CXMSG_IMPLEMENTATION_REVISIONS,
+    appServer: {
+      owner: "codex",
+      revision: null,
+    },
+  };
+  if (jsonOutput) {
+    process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(
+    `cxmsg ${result.packageVersion}\n` +
+      `implementations cli=${result.implementationRevisions.cli}` +
+      ` scheduler=${result.implementationRevisions.scheduler}` +
+      ` host-relay=${result.implementationRevisions.hostRelay}` +
+      ` claude-bridge=${result.implementationRevisions.claudeBridge}\n` +
+      "app-server external-codex\n",
+  );
 }
 
 function runCodex(
@@ -670,6 +706,8 @@ async function commandScheduler(action) {
   const state = schedulerState();
   process.stdout.write(
     `${state.status}\tpid=${state.record?.pid || "-"}\tverification=${state.identity}` +
+      `${state.record?.cxmsgVersion ? `\tcxmsg=${state.record.cxmsgVersion}` : ""}` +
+      `${state.record?.implementationRevision ? `\trevision=${state.record.implementationRevision}` : ""}` +
       `${state.record?.heartbeatAt ? `\theartbeat=${state.record.heartbeatAt}` : ""}` +
       `${state.record?.lastErrorCode ? `\terror=${state.record.lastErrorCode}` : ""}\n`,
   );
@@ -1073,7 +1111,11 @@ async function relayState() {
     const matched =
       health.pid === record.pid &&
       health.port === record.port &&
-      health.startedAt === record.startedAt;
+      health.startedAt === record.startedAt &&
+      (record.cxmsgVersion === undefined ||
+        health.cxmsgVersion === record.cxmsgVersion) &&
+      (record.implementationRevision === undefined ||
+        health.implementationRevision === record.implementationRevision);
     return {
       status: matched ? "running" : "mismatched",
       record,
@@ -1105,7 +1147,10 @@ async function commandRelay(args) {
   const state = await relayState();
   if (action === "status") {
     process.stdout.write(
-      `${state.status}\tpid=${state.record?.pid || "-"}\tport=${state.record?.port || "-"}${state.errorCode ? `\terror=${state.errorCode}` : ""}\n`,
+      `${state.status}\tpid=${state.record?.pid || "-"}\tport=${state.record?.port || "-"}` +
+        `${state.record?.cxmsgVersion ? `\tcxmsg=${state.record.cxmsgVersion}` : ""}` +
+        `${state.record?.implementationRevision ? `\trevision=${state.record.implementationRevision}` : ""}` +
+        `${state.errorCode ? `\terror=${state.errorCode}` : ""}\n`,
     );
     return;
   }
@@ -1689,7 +1734,10 @@ async function commandClaudeBridge(action, target) {
       ? `\terror=${state.socketProbe.errorCode}`
       : "";
     process.stdout.write(
-      `${state.status}\ttarget=${target}\tpid=${state.record?.pid || "-"}\tsocket=${state.record?.socketPath || "-"}\tverification=${verification}${error}\n`,
+      `${state.status}\ttarget=${target}\tpid=${state.record?.pid || "-"}\tsocket=${state.record?.socketPath || "-"}` +
+        `${state.record?.cxmsgVersion ? `\tcxmsg=${state.record.cxmsgVersion}` : ""}` +
+        `${state.record?.implementationRevision ? `\trevision=${state.record.implementationRevision}` : ""}` +
+        `\tverification=${verification}${error}\n`,
     );
     return;
   }
@@ -4559,6 +4607,12 @@ async function commandRetention(args) {
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
+    case "version":
+      commandVersion(args);
+      break;
+    case "--version":
+      commandVersion(args);
+      break;
     case "server":
       await commandServer(args[0]);
       break;

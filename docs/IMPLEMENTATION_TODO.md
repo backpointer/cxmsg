@@ -318,6 +318,20 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Preserve `unknown`, retain the Delivery, and grant zero retry or wake
       authority through the new diagnostic distinction.
 
+### Post-roadmap maintenance — Runtime version observability
+
+- Status: COMPLETE; package identity and restart markers remain separate
+
+- [x] Add `cxmsg version`, `cxmsg --version`, and a bounded JSON projection.
+- [x] Stamp Scheduler and host relay state with package version and a
+      module-specific implementation revision.
+- [x] Diagnose current, legacy, and stale Scheduler, host relay, and Claude
+      bridge implementations without restarting them.
+- [x] Compare the Codex-owned App Server handshake version with the configured
+      Codex CLI only during an explicit deep Doctor pass.
+- [x] Keep package-version skew informational when the loaded module revision
+      is still current.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.

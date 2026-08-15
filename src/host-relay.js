@@ -20,9 +20,15 @@ import { readJob } from "./jobs.js";
 import { validateMessage, validateSessionName } from "./messaging.js";
 import { readSessionRecord } from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
+import {
+  CXMSG_IMPLEMENTATION_REVISIONS,
+  CXMSG_VERSION,
+} from "./version.js";
 
 export const HOST_RELAY_RECORD_PATH = path.join(CXMSG_STATE_DIR, "host-relay.json");
 export const HOST_RELAY_LOG_PATH = path.join(CXMSG_STATE_DIR, "host-relay.log");
+export const HOST_RELAY_IMPLEMENTATION_REVISION =
+  CXMSG_IMPLEMENTATION_REVISIONS.hostRelay;
 const MAX_BODY_BYTES = 32 * 1024;
 
 function atomicWrite(destination, value) {
@@ -41,7 +47,14 @@ export function readHostRelayRecord() {
       record.port < 1 ||
       record.port > 65_535 ||
       typeof record.token !== "string" ||
-      typeof record.startedAt !== "number"
+      typeof record.startedAt !== "number" ||
+      (record.cxmsgVersion !== undefined &&
+        (typeof record.cxmsgVersion !== "string" ||
+          record.cxmsgVersion.length < 1 ||
+          record.cxmsgVersion.length > 64)) ||
+      (record.implementationRevision !== undefined &&
+        (!Number.isSafeInteger(record.implementationRevision) ||
+          record.implementationRevision < 1))
     ) {
       return null;
     }
@@ -84,6 +97,8 @@ export async function runHostRelay({
   chmodSync(CXMSG_STATE_DIR, 0o700);
   const record = {
     version: 1,
+    cxmsgVersion: CXMSG_VERSION,
+    implementationRevision: HOST_RELAY_IMPLEMENTATION_REVISION,
     pid: process.pid,
     port,
     token: randomUUID(),
@@ -101,6 +116,8 @@ export async function runHostRelay({
           pid: record.pid,
           port: record.port,
           startedAt: record.startedAt,
+          cxmsgVersion: record.cxmsgVersion,
+          implementationRevision: record.implementationRevision,
         });
         return;
       }

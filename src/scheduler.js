@@ -55,6 +55,10 @@ import {
 } from "./thread-activity.js";
 import { writeCoordinationEvent } from "./observability.js";
 import {
+  CXMSG_IMPLEMENTATION_REVISIONS,
+  CXMSG_VERSION,
+} from "./version.js";
+import {
   findNodeSuccessors,
   readNode,
   readNodeTombstone,
@@ -76,6 +80,8 @@ export const SCHEDULER_LIFECYCLE_LOCK_PATH = path.join(
   CXMSG_STATE_DIR,
   "scheduler.lifecycle.lock",
 );
+export const SCHEDULER_IMPLEMENTATION_REVISION =
+  CXMSG_IMPLEMENTATION_REVISIONS.scheduler;
 export {
   SCHEDULER_CLAIM_LEASE_MS,
   SCHEDULER_HEARTBEAT_MS,
@@ -119,7 +125,14 @@ export function readSchedulerRecord() {
       record.pid < 2 ||
       !UUID_PATTERN.test(record.workerId || "") ||
       !Number.isFinite(Date.parse(record.startedAt || "")) ||
-      (record.version === 2 && !Number.isFinite(Date.parse(record.heartbeatAt || "")))
+      (record.version === 2 && !Number.isFinite(Date.parse(record.heartbeatAt || ""))) ||
+      (record.cxmsgVersion !== undefined &&
+        (typeof record.cxmsgVersion !== "string" ||
+          record.cxmsgVersion.length < 1 ||
+          record.cxmsgVersion.length > 64)) ||
+      (record.implementationRevision !== undefined &&
+        (!Number.isSafeInteger(record.implementationRevision) ||
+          record.implementationRevision < 1))
     ) {
       return null;
     }
@@ -979,6 +992,8 @@ export async function runSchedulerWorker({
   const workerId = randomUUID();
   const record = {
     version: 2,
+    cxmsgVersion: CXMSG_VERSION,
+    implementationRevision: SCHEDULER_IMPLEMENTATION_REVISION,
     pid: process.pid,
     workerId,
     startedAt: new Date().toISOString(),
