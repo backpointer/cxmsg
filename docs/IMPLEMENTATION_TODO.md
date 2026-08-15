@@ -76,17 +76,17 @@ correlated, ambiguous, or authority-relevant evidence.
 ### T2 — Safe ordinary Peer Message retry
 
 - Priority: P0
-- Status: BLOCKED on negative-acceptance evidence
+- Status: COMPLETE
 - Canonical phase: Phase 4
 
-- [ ] Define the exact App Server evidence that proves an attempted input made
+- [x] Define the exact App Server evidence that proves an attempted input made
       zero mutation.
-- [ ] Keep connection loss, incomplete history, and protocol uncertainty as
+- [x] Keep connection loss, incomplete history, and protocol uncertainty as
       terminal `unknown` with zero automatic replay.
-- [ ] Add an explicit retry operation that reuses one Logical Message ID and
+- [x] Add an explicit retry operation that reuses one Logical Message ID and
       stable client message ID.
-- [ ] Bound attempts, backoff, and expiry without copying the Message Body.
-- [ ] Test Busy-turn replacement, reconnect, duplicate commands, and process
+- [x] Bound attempts, backoff, and expiry without copying the Message Body.
+- [x] Test Busy-turn replacement, reconnect, duplicate commands, and process
       crashes at every write/dispatch seam.
 
 Done when a rejected attempt may retry exactly once under proven
@@ -95,7 +95,7 @@ non-acceptance, while every ambiguous attempt produces zero replay.
 ### T3 — Durable Turn Lifecycle and Scheduler recovery
 
 - Priority: P0
-- Status: READY after T2
+- Status: NEXT
 - Canonical phases: Phase 2 and Phase 4
 
 - [ ] Persist App Server notification cursors and reconnect state.

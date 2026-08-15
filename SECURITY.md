@@ -138,6 +138,16 @@ causes a full bounded rebuild from the Ledger; malformed metadata, unsafe file
 identity, symlinks, or more than 4,096 projected messages fail closed. Doctor
 only compares the cache with Ledger truth and never repairs it implicitly.
 
+An ordinary Peer Message retry is allowed exactly once and only after a
+version-pinned App Server error proves the attempted `turn/steer` made no input
+queue mutation. The durable evidence records the bounded rejection code and
+contract identifier, not the raw server message. The retry reuses the same
+Logical Message ID, retained body digest, pinned recipient thread, and
+`clientUserMessageId`; it has a one-second minimum delay and expires after ten
+minutes. A second proven rejection becomes `failed`. Connection loss, timeout,
+unsupported versions, incomplete history, and all other uncertainty become
+`unknown`, for which both automatic and explicit retry fail closed.
+
 Scheduled delivery retains the full Message Body in the separate owner-only
 Body Store before the Delivery becomes claimable. `when-idle`, `after-turn`,
 and `after-job` routes require an explicit expiry no more than seven days away.

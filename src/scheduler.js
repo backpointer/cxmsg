@@ -23,10 +23,7 @@ import {
   SCHEDULER_CLAIM_LEASE_MS,
   SCHEDULER_POLL_MS,
 } from "./delivery-policy.js";
-import {
-  MAX_MESSAGE_READ_BYTES,
-  readMessageBody,
-} from "./message-bodies.js";
+import { readWholeMessageBody } from "./message-bodies.js";
 import {
   failJobIfWorkerExited,
   isPendingJob,
@@ -110,19 +107,6 @@ function boundedErrorCode(error) {
   return typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code)
     ? error.code
     : "ESCHEDULERUNKNOWN";
-}
-
-function wholeStoredBody(contentRef) {
-  if (!contentRef) throw new Error("scheduled Delivery has no retained body reference");
-  const parts = [];
-  let offset = 0;
-  let info = null;
-  do {
-    info = readMessageBody(contentRef, { offset, limit: MAX_MESSAGE_READ_BYTES });
-    parts.push(info.text);
-    offset = info.nextOffset;
-  } while (!info.complete);
-  return parts.join("");
 }
 
 export async function scheduledTriggerReadiness(
@@ -334,7 +318,10 @@ export async function dispatchScheduledDelivery(
     const current = await readThread(client, currentTarget.threadId);
     if (current.status?.type === "active") throw new TargetBusyError();
 
-    const message = wholeStoredBody(record.logicalMessage.body.contentRef);
+    if (!record.logicalMessage.body.contentRef) {
+      throw new Error("scheduled Delivery has no retained body reference");
+    }
+    const message = readWholeMessageBody(record.logicalMessage.body.contentRef);
     if (
       Buffer.byteLength(message, "utf8") !== record.logicalMessage.body.bytes ||
       createHash("sha256").update(message).digest("hex") !== record.logicalMessage.body.sha256

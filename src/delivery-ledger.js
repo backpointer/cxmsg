@@ -37,6 +37,7 @@ export const DELIVERY_LEDGER_QUOTA_BYTES = 64 * 1024 * 1024;
 export const DELIVERY_LEDGER_MAX_SCAN_BYTES = 256 * 1024 * 1024;
 export const DELIVERY_LEDGER_MAX_RECORD_BYTES = 256 * 1024;
 export const DELIVERY_LEDGER_EVENT_RESERVE_BYTES = 4 * 1024;
+export const MAX_ORDINARY_DELIVERY_ATTEMPTS = 2;
 export { SCHEDULED_DELIVERY_PER_TARGET_LIMIT };
 
 export const DELIVERY_LEDGER_DIR = path.join(CXMSG_STATE_DIR, "delivery-ledger");
@@ -231,6 +232,8 @@ function validAttempt(record) {
       UUID_PATTERN.test(record.messageId || "") &&
       UUID_PATTERN.test(record.deliveryId || "") &&
       UUID_PATTERN.test(record.attemptId || "") &&
+      (record.retryOfAttemptId === undefined ||
+        UUID_PATTERN.test(record.retryOfAttemptId || "")) &&
       (record.claimId === undefined ||
         record.claimId === null ||
         UUID_PATTERN.test(record.claimId || "")) &&
@@ -271,14 +274,20 @@ function validEvidence(record) {
       UUID_PATTERN.test(record.messageId || "") &&
       UUID_PATTERN.test(record.deliveryId || "") &&
       (record.attemptId === null || UUID_PATTERN.test(record.attemptId || "")) &&
-      ["turn_started", "unknown", "expired", "cancelled"].includes(record.state) &&
-      ["dispatch-result", "reconciliation", "scheduler"].includes(record.evidenceKind) &&
+      ["turn_started", "retryable", "failed", "unknown", "expired", "cancelled"].includes(record.state) &&
+      ["dispatch-result", "negative-acceptance", "reconciliation", "retry-policy", "scheduler"].includes(record.evidenceKind) &&
       (record.turnId === null || UUID_PATTERN.test(record.turnId || "")) &&
       (record.transportResult === null || typeof record.transportResult === "string") &&
       (record.errorCode === null || /^[A-Z0-9_]{1,32}$/.test(record.errorCode || "")) &&
       validTimestamp(record.observedAt)
   );
   if (!common) return false;
+  if (
+    record.evidenceKind !== "negative-acceptance" &&
+    record.negativeAcceptanceContract !== undefined
+  ) {
+    return false;
+  }
   if (record.evidenceKind === "scheduler") {
     return Boolean(
       ["unknown", "expired", "cancelled"].includes(record.state) &&
@@ -286,6 +295,27 @@ function validEvidence(record) {
         record.turnId === null &&
         record.transportResult === null &&
         record.errorCode,
+    );
+  }
+  if (record.evidenceKind === "retry-policy") {
+    return Boolean(
+      record.state === "expired" &&
+        record.attemptId === null &&
+        record.turnId === null &&
+        record.transportResult === null &&
+        record.errorCode === "ERETRYEXPIRED",
+    );
+  }
+  if (record.evidenceKind === "negative-acceptance") {
+    return Boolean(
+      ["retryable", "failed"].includes(record.state) &&
+        record.attemptId !== null &&
+        record.turnId === null &&
+        record.transportResult === null &&
+        record.errorCode &&
+        /^codex-app-server\/\d+\.\d+\.\d+$/.test(
+          record.negativeAcceptanceContract || "",
+        ),
     );
   }
   return ["turn_started", "unknown"].includes(record.state);
@@ -478,25 +508,28 @@ function validIndexProjection(projection, messageId) {
   };
   if (
     !validBatch(baseBatch) ||
-    !["created", "scheduled", "turn_started", "unknown", "expired", "cancelled"].includes(
+    !["created", "scheduled", "turn_started", "retryable", "failed", "unknown", "expired", "cancelled"].includes(
       delivery.state,
     ) ||
     !validTimestamp(delivery.updatedAt) ||
     !Number.isSafeInteger(delivery.claimCount) ||
     delivery.claimCount < 0 ||
     !Array.isArray(delivery.attempts) ||
-    delivery.attempts.length > 1 ||
+    delivery.attempts.length > MAX_ORDINARY_DELIVERY_ATTEMPTS ||
     !Array.isArray(delivery.evidence)
   ) {
     return false;
   }
   const attempts = new Set();
-  for (const attempt of delivery.attempts) {
+  for (const [index, attempt] of delivery.attempts.entries()) {
     if (
       !validAttempt(attempt) ||
       attempt.messageId !== messageId ||
       attempt.deliveryId !== delivery.deliveryId ||
-      attempts.has(attempt.attemptId)
+      attempts.has(attempt.attemptId) ||
+      (index === 0 && attempt.retryOfAttemptId !== undefined) ||
+      (index === 1 &&
+        attempt.retryOfAttemptId !== delivery.attempts[0].attemptId)
     ) {
       return false;
     }
@@ -521,6 +554,17 @@ function validIndexProjection(projection, messageId) {
     ) {
       return false;
     }
+  }
+  if (
+    delivery.attempts.length === 2 &&
+    !delivery.evidence.some(
+      (evidence) =>
+        evidence.attemptId === delivery.attempts[0].attemptId &&
+        evidence.state === "retryable" &&
+        evidence.evidenceKind === "negative-acceptance",
+    )
+  ) {
+    return false;
   }
   const lastEvidence = delivery.evidence.at(-1) || null;
   if (!lastEvidence) return delivery.state === initialState;
@@ -727,9 +771,17 @@ function reservedEvidenceBytes(messages) {
   for (const message of messages.values()) {
     const delivery = message.delivery;
     if (delivery.admissionState !== "admitted") continue;
-    if (["turn_started", "expired", "cancelled"].includes(delivery.state)) continue;
+    if (["turn_started", "failed", "expired", "cancelled"].includes(delivery.state)) continue;
     if (delivery.state === "unknown") {
       records += 1;
+      continue;
+    }
+    if (delivery.state === "created") {
+      records += delivery.attempts.length === 0 ? 4 : 3;
+      continue;
+    }
+    if (delivery.state === "retryable") {
+      records += delivery.attempts.length === 1 ? 2 : 1;
       continue;
     }
     records += delivery.attempts.length > 0 ? 2 : 3;
@@ -798,12 +850,23 @@ function applyDeliveryEvent(projected, record) {
     const immediate =
       projected.delivery.wakePolicy === "immediate" &&
       projected.delivery.state === "created" &&
-      (record.claimId === undefined || record.claimId === null);
+      (record.claimId === undefined || record.claimId === null) &&
+      record.retryOfAttemptId === undefined;
     const scheduled =
       SCHEDULED_WAKE_POLICIES.includes(projected.delivery.wakePolicy) &&
       projected.delivery.state === "scheduled" &&
-      projected.delivery.claim?.claimId === record.claimId;
-    if ((!immediate && !scheduled) || projected.delivery.attempts.length > 0) {
+      projected.delivery.claim?.claimId === record.claimId &&
+      record.retryOfAttemptId === undefined;
+    const retry =
+      projected.delivery.wakePolicy === "immediate" &&
+      projected.delivery.state === "retryable" &&
+      projected.delivery.attempts.length === 1 &&
+      record.retryOfAttemptId === projected.delivery.attempts[0].attemptId &&
+      (record.claimId === undefined || record.claimId === null);
+    if (
+      (!immediate && !scheduled && !retry) ||
+      projected.delivery.attempts.length >= MAX_ORDINARY_DELIVERY_ATTEMPTS
+    ) {
       throw new Error(`duplicate Delivery attempt: ${record.messageId}`);
     }
     projected.delivery.attempts.push(structuredClone(record));
@@ -819,7 +882,9 @@ function applyDeliveryEvent(projected, record) {
   const current = projected.delivery.state;
   if (
     !(
-      (["created", "scheduled"].includes(current) && ["turn_started", "unknown"].includes(record.state)) ||
+      (current === "created" && ["turn_started", "retryable", "unknown"].includes(record.state)) ||
+      (current === "scheduled" && ["turn_started", "unknown"].includes(record.state)) ||
+      (current === "retryable" && ["turn_started", "failed", "unknown", "expired"].includes(record.state)) ||
       (current === "scheduled" && ["expired", "cancelled"].includes(record.state)) ||
       (current === "unknown" && ["turn_started", "unknown"].includes(record.state)) ||
       (current === "turn_started" && record.state === "turn_started") ||
@@ -827,6 +892,14 @@ function applyDeliveryEvent(projected, record) {
     )
   ) {
     throw new Error(`invalid Delivery evidence transition: ${current}->${record.state}`);
+  }
+  if (
+    (record.state === "retryable" && projected.delivery.attempts.length !== 1) ||
+    (record.state === "failed" && projected.delivery.attempts.length !== 2) ||
+    (record.evidenceKind === "retry-policy" &&
+      projected.delivery.attempts.length !== 1)
+  ) {
+    throw new Error(`Delivery retry evidence has an invalid attempt count: ${record.messageId}`);
   }
   projected.delivery.state = record.state;
   projected.delivery.turnId = record.turnId;
@@ -988,7 +1061,7 @@ export async function createDeliveryDedupTombstones(
       if (!message) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
       const admittedTerminal =
         message.delivery.admissionState === "admitted" &&
-        ["turn_started", "expired", "cancelled"].includes(message.delivery.state);
+        ["turn_started", "failed", "expired", "cancelled"].includes(message.delivery.state);
       const quarantinedCoupled =
         message.delivery.admissionState === "quarantined" &&
         coupledQuarantine.has(messageId) &&
@@ -1195,6 +1268,48 @@ export async function beginImmediateDelivery(messageId, options = {}) {
       startedAt: options.now || new Date().toISOString(),
     };
     if (!validAttempt(event)) throw new Error("invalid Delivery attempt");
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
+    appendLedgerRecord(event, {
+      quotaBytes,
+      segmentBytes,
+      reserveBytes: reservedEvidenceBytes(after),
+    });
+    updateDeliveryIndexLocked(after, messageId);
+    return structuredClone(event);
+  });
+}
+
+export async function beginRetryDelivery(messageId, options = {}) {
+  const quotaBytes = options.quotaBytes ?? DELIVERY_LEDGER_QUOTA_BYTES;
+  const segmentBytes = options.segmentBytes ?? DELIVERY_LEDGER_SEGMENT_BYTES;
+  validateStorageOptions(quotaBytes, segmentBytes);
+  return withDeliveryLedgerMutation(async () => {
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
+    if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
+    if (
+      record.delivery.admissionState !== "admitted" ||
+      record.delivery.wakePolicy !== "immediate" ||
+      record.delivery.state !== "retryable" ||
+      record.delivery.attempts.length !== 1
+    ) {
+      throw new Error("Delivery is not eligible for its one explicit retry");
+    }
+    const event = {
+      schemaVersion: 1,
+      recordType: "delivery-attempt",
+      messageId,
+      deliveryId: record.delivery.deliveryId,
+      attemptId: randomUUID(),
+      retryOfAttemptId: record.delivery.attempts[0].attemptId,
+      claimId: null,
+      transport: "codex-app-server",
+      startedAt: options.now || new Date().toISOString(),
+    };
+    if (!validAttempt(event)) throw new Error("invalid Delivery retry attempt");
     const after = new Map(messages);
     const projected = structuredClone(record);
     after.set(messageId, projected);
@@ -1441,6 +1556,7 @@ export async function appendDeliveryEvidence(
     turnId = null,
     transportResult = null,
     errorCode = null,
+    negativeAcceptanceContract = undefined,
     observedAt = new Date().toISOString(),
   },
   options = {},
@@ -1463,6 +1579,7 @@ export async function appendDeliveryEvidence(
       turnId,
       transportResult,
       errorCode,
+      ...(negativeAcceptanceContract ? { negativeAcceptanceContract } : {}),
       observedAt,
     };
     if (!validEvidence(event)) throw new Error("invalid Delivery evidence");
@@ -1471,6 +1588,8 @@ export async function appendDeliveryEvidence(
       record.delivery.errorCode === errorCode &&
       record.delivery.turnId === turnId &&
       record.delivery.transportResult === transportResult &&
+      (record.delivery.evidence.at(-1)?.negativeAcceptanceContract || null) ===
+        (negativeAcceptanceContract || null) &&
       record.delivery.evidence.at(-1)?.evidenceKind === evidenceKind
     ) {
       return record;

@@ -6,6 +6,8 @@ import { failedProbe, healthyProbe } from "./socket-probe.js";
 import { UnixWebSocket } from "./unix-websocket.js";
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const NEGATIVE_ACCEPTANCE_CONTRACTS = new Set(["0.147.0"]);
+const APP_SERVER_VERSION_PATTERN = /^[^/\s]+\/(\d+\.\d+\.\d+)(?:[-+\s]|$)/;
 
 export function validateAppServerSocket(socketPath) {
   const metadata = lstatSync(socketPath);
@@ -35,6 +37,42 @@ export class AppServerError extends Error {
   }
 }
 
+export function appServerVersion(userAgent) {
+  return APP_SERVER_VERSION_PATTERN.exec(userAgent || "")?.[1] || null;
+}
+
+export function classifyAppServerNegativeAcceptance(error) {
+  if (!(error instanceof AppServerError) || error.details?.code !== -32600) {
+    return null;
+  }
+  const version = appServerVersion(error.appServerUserAgent);
+  if (!NEGATIVE_ACCEPTANCE_CONTRACTS.has(version)) return null;
+  const message = error.details?.message || "";
+  let reason = null;
+  let errorCode = null;
+  if (message === "no active turn to steer") {
+    reason = "no_active_turn";
+    errorCode = "ENOACTIVETURN";
+  } else if (
+    /^expected active turn id `[0-9a-f-]{36}` but found `[0-9a-f-]{36}`$/i.test(message)
+  ) {
+    reason = "expected_turn_mismatch";
+    errorCode = "EEXPECTEDTURNMISMATCH";
+  } else if (message === "cannot steer a review turn") {
+    reason = "non_steerable_review";
+    errorCode = "ENONSTEERABLEREVIEW";
+  } else if (message === "cannot steer a compact turn") {
+    reason = "non_steerable_compact";
+    errorCode = "ENONSTEERABLECOMPACT";
+  }
+  if (!reason) return null;
+  return {
+    reason,
+    errorCode,
+    contract: `codex-app-server/${version}`,
+  };
+}
+
 export class AppServerClient {
   constructor({
     socketPath = defaultSocketPath(),
@@ -50,6 +88,7 @@ export class AppServerClient {
     this.closed = false;
     this.onServerRequest = onServerRequest;
     this.transportFactory = transportFactory;
+    this.initializeResult = null;
   }
 
   async connect() {
@@ -70,7 +109,7 @@ export class AppServerClient {
     });
     await this.transport.connect();
 
-    await this.request("initialize", {
+    this.initializeResult = await this.request("initialize", {
       clientInfo: {
         name: "cxmsg",
         title: "Codex Session Messaging",
@@ -170,12 +209,12 @@ export class AppServerClient {
     this.pending.delete(message.id);
 
     if (message.error) {
-      pending.reject(
-        new AppServerError(
-          `${pending.method} failed: ${message.error.message || "unknown error"}`,
-          message.error,
-        ),
+      const error = new AppServerError(
+        `${pending.method} failed: ${message.error.message || "unknown error"}`,
+        message.error,
       );
+      error.appServerUserAgent = this.initializeResult?.userAgent || null;
+      pending.reject(error);
       return;
     }
     pending.resolve(message.result);

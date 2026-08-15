@@ -132,6 +132,7 @@ turn is started or steered. Inspect redacted metadata only with:
 cxmsg route show worker --json
 cxmsg route list --json
 cxmsg route reconcile <logical-message-id> --json
+cxmsg route retry <logical-message-id> --json
 cxmsg quarantine list --json
 ```
 
@@ -145,6 +146,24 @@ sender, target, route, and body is a no-op after its first dispatch attempt;
 reusing it with different content fails as an idempotency conflict. Targets
 without an explicit binding retain legacy unscoped-send compatibility during
 migration.
+
+One narrow explicit retry is available only when the pinned App Server
+contract proves that `turn/steer` rejected the input before queue mutation.
+cxmsg 0.27 recognizes the audited `codex-app-server/0.147.0` no-active-turn,
+expected-turn-mismatch, and non-steerable-turn rejections. It stores the first
+result as `retryable`, retains every admitted ordinary Message Body, enforces a
+one-second backoff and ten-minute retry window, and reuses the exact Logical
+Message ID and body. A second proven rejection is `failed`. A timeout,
+disconnect, unsupported App Server version, incomplete reconciliation, or any
+other ambiguous result is `unknown` and permits zero retry. Retry is never
+automatic:
+
+```bash
+cxmsg route retry <logical-message-id> --json
+```
+
+The complete fail-closed contract is documented in
+[`docs/PEER_RETRY_POLICY_V1.md`](docs/PEER_RETRY_POLICY_V1.md).
 
 New ordinary Codex Peer Messages are committed to the owner-only Delivery
 Ledger before App Server dispatch. One append record atomically contains the
@@ -226,7 +245,9 @@ This slice does not yet implement scheduled Delegation, automatic retry,
 group fan-out, or task-completion inference. The index is
 bounded to 4,096 Logical Messages and is not a retention mechanism. An ambiguous
 dispatch remains `unknown`, and only positive App Server acceptance evidence
-may strengthen it to `turn_started`. Storage uses private 8 MiB JSONL
+may strengthen it to `turn_started`. The sole explicit retry path requires
+version-pinned Negative Acceptance and never replays `unknown`. Storage uses
+private 8 MiB JSONL
 segments, a 64 MiB fail-closed quota with bounded terminal-evidence reserve,
 and a 256 MiB hard scan ceiling. Automatic retention remains disabled. Explicit
 purge requires an exact read-only plan digest and preserves a restorable backup.

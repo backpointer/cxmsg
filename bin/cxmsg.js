@@ -145,6 +145,7 @@ import {
   listQuarantine,
   listRouteBindings,
   reconcileRouteDelivery,
+  retryRouteDelivery,
   routeBindingState,
   planPeerReply,
   routePeerMessage,
@@ -229,6 +230,7 @@ function usage(exitCode = 0) {
   cxmsg route show <session> [--json]
   cxmsg route list [--json]
   cxmsg route reconcile <logical-message-id> [--json]
+  cxmsg route retry <logical-message-id> [--json]
   cxmsg quarantine list [--json]
   cxmsg directory project ensure <routing-id> <root> [--json]
   cxmsg directory sync --project <routing-id> [--codex-only|--claude-only] [--json]
@@ -555,7 +557,8 @@ function deliveryProjection(record) {
   const status =
     delivery.admissionState === "quarantined"
       ? "quarantined"
-      : ["created", "scheduled"].includes(delivery.state) && activeAttempt
+      : (["created", "scheduled"].includes(delivery.state) && activeAttempt) ||
+          (delivery.state === "retryable" && delivery.attempts.length === 2)
         ? "dispatching"
         : delivery.state;
   return {
@@ -2324,6 +2327,47 @@ async function commandRoute(args) {
         : `route ${outcome.logicalMessageId} ${outcome.status} (${outcome.reconciliation})\n`,
     );
     if (outcome.status === "unknown") process.exitCode = 1;
+    return;
+  }
+  if (operation === "retry") {
+    const logicalMessageId = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (!logicalMessageId || args.some((value) => value !== "--json")) {
+      throw new Error("route retry requires one logical message ID");
+    }
+    const outcome = await retryRouteDelivery(
+      logicalMessageId,
+      async (payload) => {
+        const targetRecord = readSessionRecord(payload.target);
+        if (!targetRecord || targetRecord.threadId !== payload.targetThreadId) {
+          const error = new Error("Route Delivery target identity changed during retry");
+          error.code = "ETARGETIDENTITY";
+          throw error;
+        }
+        await ensureServer();
+        return withAppServer(async (client) => {
+          const thread = await readThreadMetadata(client, payload.targetThreadId);
+          return deliverPeerMessage(
+            client,
+            thread,
+            {
+              from: payload.from,
+              message: payload.message,
+              messageId: payload.logicalMessageId,
+              replyHandle: payload.replyHandle,
+              route: payload.route,
+            },
+            { allowResume: sessionAllowsAppServerResume(targetRecord) },
+          );
+        });
+      },
+    );
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(outcome, null, 2)}\n`
+        : `route ${outcome.logicalMessageId} ${outcome.status} (retry attempt 2/2)\n`,
+    );
+    if (outcome.status !== "turn_started") process.exitCode = 1;
     return;
   }
   usage(2);

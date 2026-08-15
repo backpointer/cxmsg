@@ -1,4 +1,6 @@
 export const ROUTE_RECONCILE_GRACE_MS = 30_000;
+export const ORDINARY_RETRY_MIN_DELAY_MS = 1_000;
+export const ORDINARY_RETRY_WINDOW_MS = 10 * 60 * 1_000;
 export const MAX_WHEN_IDLE_DELAY_MS = 7 * 24 * 60 * 60 * 1_000;
 export const SCHEDULED_WAKE_POLICIES = Object.freeze([
   "when-idle",

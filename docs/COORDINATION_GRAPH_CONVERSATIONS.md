@@ -241,6 +241,7 @@ created
   -> transport_delivered
   -> turn_started
   -> replied
+  -> retryable
   -> failed
   -> expired
   -> cancelled
@@ -266,15 +267,15 @@ loss produces `unknown`, not a retry that may duplicate work.
 
 An immediate Peer Message is recorded before cxmsg observes Busy or Idle state.
 If `turn/steer` returns a deterministic expected-turn mismatch, cxmsg can
-reconcile once. It may dispatch to the newly Idle thread using the same message
-ID only when the pinned Codex version has a regression test proving that this
-exact mismatch means the rejected steer performed no mutation. Without that
-proof, the Delivery becomes `unknown` with bounded
-`unverified_expected_turn_mismatch` evidence and is not replayed. On a verified
-version, if bounded re-observation is Busy on a different turn, cxmsg does not
-steer a second turn; the Delivery fails with bounded `turn_changed` evidence
-and requires an explicit resend. If the transport closes before the result is
-known, the Delivery becomes `unknown` and is not replayed automatically.
+become `retryable` only when the exact App Server version has a regression test
+proving that the rejected steer performed no input-queue mutation. The current
+contract is `codex-app-server/0.147.0`; it also covers that version's exact
+no-active-turn and non-steerable-turn rejections. One explicit retry may then
+re-observe the pinned target and either start or steer using the same Logical
+Message ID and retained body. It has a one-second backoff, a ten-minute expiry,
+and a maximum of two total attempts. A second proven rejection is `failed`.
+Without the exact version and error contract, or if the transport closes before
+the result is known, the Delivery becomes `unknown` and is never replayed.
 
 `clientUserMessageId` carries the Logical Message ID. Cross-method App Server
 deduplication remains version-tested defense in depth, not the sole duplicate
@@ -625,14 +626,17 @@ Initial implementation status: new ordinary Codex Peer Messages now commit one
 Logical Message and one recipient Delivery atomically in an owner-only,
 append-only segmented Ledger before transport. A separate immutable attempt
 record precedes App Server access, and evidence records distinguish
-`turn_started` from `unknown`; positive reconciliation may strengthen the
-latter without replay. Long admitted bodies reference the Phase 2 Message Body
-Store by digest and opaque Content Reference. Legacy `route-deliveries` remain
+`turn_started`, `retryable`, `failed`, and `unknown`; positive reconciliation
+may strengthen uncertain evidence without replay. Every admitted body
+references the Phase 2 Message Body Store by digest and opaque Content
+Reference so an authorized explicit retry never copies payload text. Legacy `route-deliveries` remain
 readable but are not written for new sends.
 
 The initial slice supported immediate delivery only. The current Phase 4 slice
-adds `when-idle` for one recipient while retaining one dispatch attempt and no
-automatic retry, retention, or purge. A fail-closed 64 MiB metadata quota
+adds `when-idle` for one recipient. Automatic retry remains forbidden; the one
+explicit retry is separately evidence-gated. Explicit retention planning,
+recoverable purge, and generation-checked restore are now implemented while
+automatic deletion remains disabled. A fail-closed 64 MiB metadata quota
 reserves bounded space for the attempt and terminal evidence of every admitted
 batch. Full rebuild remains bounded by a 256 MiB hard scan ceiling. A persistent
 per-message index and digest-protected segment-manifest checkpoint now avoid a
@@ -680,9 +684,9 @@ reference checks expose no turn or message content. The current implementation
 uses bounded reconciliation polling; durable App Server notification cursors
 remain later Turn Lifecycle work.
 
-This slice still has no scheduled Delegation, automatic retry, retention,
-purge, or Conversation fan-out.
-Those remain separate Phase 4/6 gates rather than inferred capabilities.
+This slice still has no scheduled Delegation, automatic retry, or Conversation
+fan-out. Those remain separate Phase 4/6 gates rather than inferred
+capabilities.
 
 ### Phase 5: Direct Conversation
 
@@ -742,13 +746,14 @@ must first prove whether App Server accepted the stable client message ID.
 Neither automatic nor operator-triggered retry may replay an uncertain wake
 until that evidence contract and its crash tests exist.
 
-The current pre-Ledger `cxmsg route reconcile` implements positive evidence
-only. On the pinned Codex 0.147.0 protocol it searches a bounded summary window
-for a `userMessage.clientId` equal to the Logical Message ID and may strengthen
-the Delivery to `turn_started`. Absence, pagination exhaustion, legacy records
+`cxmsg route reconcile` implements positive evidence only. On the pinned Codex
+0.147.0 protocol it searches a bounded summary window for a
+`userMessage.clientId` equal to the Logical Message ID and may strengthen the
+Delivery to `turn_started`. Absence, pagination exhaustion, legacy records
 without a pinned target thread, and target replacement all authorize zero
-replays. Actual retry remains a Phase 4 operation after durable body and
-negative-acceptance evidence contracts exist.
+replays. `cxmsg route retry` is a separate explicit operation available only
+for durable `retryable` Negative Acceptance evidence; it never treats a
+negative history search as permission to resend.
 
 No Implementation may silently choose these values.
 

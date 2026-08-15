@@ -40,6 +40,14 @@ they carry different authority and delivery semantics.
 - **Delivery Ledger**: the durable evidence history for Logical Messages and
   their recipient-specific Deliveries. It records only states that cxmsg can
   prove.
+- **Negative Acceptance**: version-pinned App Server evidence proving that one
+  attempted input was rejected before any input-queue mutation. A timeout,
+  disconnect, incomplete history search, or unrecognized server version is not
+  Negative Acceptance.
+- **Explicit Retry**: the one operator-requested second transport attempt
+  allowed only after Negative Acceptance. It reuses the Logical Message ID,
+  retained Message Body, recipient, and App Server client message ID. It is
+  never automatic and never applies to `unknown` evidence.
 - **Delivery Dedup Tombstone**: owner-private immutable evidence that a
   terminal Logical Message was explicitly selected for Retention purge. It
   permanently reserves that Logical Message ID and its immutable fingerprint

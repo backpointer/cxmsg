@@ -40,6 +40,8 @@ const ids = {
   cancelledMessage: "d1345678-1234-4234-8234-123456789abc",
   handleMessage: "e1345678-1234-4234-8234-123456789abc",
   handleCollision: "f1345678-1234-4234-8234-123456789abc",
+  retryMessage: "02345678-1234-4234-8234-123456789abc",
+  retryTurn: "03345678-1234-4234-8234-123456789abc",
 };
 
 function logicalMessage(
@@ -198,6 +200,50 @@ test("attempt and evidence records rebuild the strongest proven state", async ()
   assert.equal(accepted.delivery.state, "turn_started");
   assert.equal(accepted.delivery.turnId, ids.turn);
   assert.equal(ledger.listDeliveryLedger().length, 3);
+});
+
+test("one explicit retry reuses the Delivery and records two ordered attempts", async () => {
+  await ledger.commitSingleRecipientDelivery({
+    logicalMessage: logicalMessage(ids.retryMessage),
+    target: "auditor",
+    targetThreadId: ids.targetThread,
+    admissionState: "admitted",
+    admissionReason: "binding_match",
+    now: "2026-08-14T00:10:00.000Z",
+  });
+  const first = await ledger.beginImmediateDelivery(ids.retryMessage, {
+    now: "2026-08-14T00:10:01.000Z",
+  });
+  await ledger.appendDeliveryEvidence(ids.retryMessage, {
+    attemptId: first.attemptId,
+    state: "retryable",
+    evidenceKind: "negative-acceptance",
+    errorCode: "EEXPECTEDTURNMISMATCH",
+    negativeAcceptanceContract: "codex-app-server/0.147.0",
+    observedAt: "2026-08-14T00:10:02.000Z",
+  });
+  const retry = await ledger.beginRetryDelivery(ids.retryMessage, {
+    now: "2026-08-14T00:10:03.000Z",
+  });
+  assert.equal(retry.retryOfAttemptId, first.attemptId);
+  await assert.rejects(
+    ledger.beginRetryDelivery(ids.retryMessage),
+    /not eligible|duplicate/,
+  );
+  const accepted = await ledger.appendDeliveryEvidence(ids.retryMessage, {
+    attemptId: retry.attemptId,
+    state: "turn_started",
+    evidenceKind: "dispatch-result",
+    turnId: ids.retryTurn,
+    transportResult: "started",
+    observedAt: "2026-08-14T00:10:04.000Z",
+  });
+  assert.equal(accepted.delivery.attempts.length, 2);
+  assert.equal(accepted.delivery.state, "turn_started");
+  assert.equal(
+    ledger.readDeliveryLedger(ids.retryMessage).delivery.attempts[1].retryOfAttemptId,
+    first.attemptId,
+  );
 });
 
 test("when-idle Delivery uses an expiring claim before one dispatch attempt", async () => {
@@ -404,7 +450,7 @@ test("an incomplete active tail is quarantined before a new batch is appended", 
   });
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_QUARANTINE_DIR).length, 1);
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_SEGMENTS_DIR).length, 1);
-  assert.equal(ledger.listDeliveryLedger().length, 8);
+  assert.equal(ledger.listDeliveryLedger().length, 9);
 });
 
 test("Ledger scans reject broad modes and symlink segments", () => {

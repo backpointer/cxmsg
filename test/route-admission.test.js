@@ -16,6 +16,8 @@ import test from "node:test";
 const stateDir = mkdtempSync(path.join(os.tmpdir(), "cxmsg-route-admission-"));
 process.env.CXMSG_STATE_DIR = stateDir;
 const routes = await import(`../src/route-admission.js?test=${Date.now()}`);
+const policy = await import(`../src/delivery-policy.js?test=${Date.now()}`);
+const ledger = await import(`../src/delivery-ledger.js?route-test=${Date.now()}`);
 const registry = await import(`../src/registry.js?route-test=${Date.now()}`);
 registry.writeSessionRecord({
   name: "worker",
@@ -87,6 +89,11 @@ const ids = {
   routedReply: "bc345678-1234-4234-8234-123456789abc",
   claudeReplyOriginal: "cc345678-1234-4234-8234-123456789abc",
   claudeReply: "dc345678-1234-4234-8234-123456789abc",
+  retryAccepted: "ed345678-1234-4234-8234-123456789abc",
+  retryFailed: "fd345678-1234-4234-8234-123456789abc",
+  retryUnknown: "0e345678-1234-4234-8234-123456789abc",
+  retryExpired: "2e345678-1234-4234-8234-123456789abc",
+  retryCrash: "3e345678-1234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -136,6 +143,174 @@ test("unbound targets remain compatible and logical messages wake at most once",
   assert.equal(duplicate.deduplicated, true);
   assert.equal(duplicate.status, "turn_started");
   assert.equal(dispatches, 1);
+});
+
+const negativeAcceptance = (error) =>
+  error?.code === "ESTALEACTIVE"
+    ? {
+        reason: "expected_turn_mismatch",
+        errorCode: "EEXPECTEDTURNMISMATCH",
+        contract: "codex-app-server/0.147.0",
+      }
+    : null;
+
+async function createRetryable(messageId, message) {
+  await assert.rejects(
+    routes.routePeerMessage(
+      {
+        from: "coordinator",
+        target: "worker",
+        message,
+        logicalMessageId: messageId,
+      },
+      async () => {
+        throw Object.assign(new Error("active turn changed"), {
+          code: "ESTALEACTIVE",
+        });
+      },
+      { classifyRejection: negativeAcceptance },
+    ),
+    /active turn changed/,
+  );
+  const record = routes.readRouteDelivery(messageId);
+  assert.equal(record.status, "retryable");
+  assert.equal(record.attemptCount, 1);
+  assert.equal(record.contentRef, `cxmsg-message:${messageId}`);
+}
+
+test("a proven rejection permits exactly one explicit retry with the retained body", async () => {
+  await createRetryable(ids.retryAccepted, "retry this exact body");
+  await assert.rejects(
+    routes.retryRouteDelivery(ids.retryAccepted, async () => ({}), {
+      classifyRejection: negativeAcceptance,
+      now: () => Date.parse(routes.readRouteDelivery(ids.retryAccepted).updatedAt),
+    }),
+    /backoff has not elapsed/,
+  );
+  assert.equal(routes.readRouteDelivery(ids.retryAccepted).attemptCount, 1);
+  let dispatches = 0;
+  const outcome = await routes.retryRouteDelivery(
+    ids.retryAccepted,
+    async (payload) => {
+      dispatches += 1;
+      assert.equal(payload.logicalMessageId, ids.retryAccepted);
+      assert.equal(payload.message, "retry this exact body");
+      assert.equal(payload.targetThreadId, "81345678-1234-4234-8234-123456789abc");
+      return {
+        delivery: "started",
+        turnId: "1e345678-1234-4234-8234-123456789abc",
+      };
+    },
+    {
+      classifyRejection: negativeAcceptance,
+      now: () =>
+        Date.parse(routes.readRouteDelivery(ids.retryAccepted).updatedAt) +
+        policy.ORDINARY_RETRY_MIN_DELAY_MS,
+    },
+  );
+  assert.equal(outcome.status, "turn_started");
+  assert.equal(outcome.attemptCount, 2);
+  assert.equal(dispatches, 1);
+  await assert.rejects(
+    routes.retryRouteDelivery(ids.retryAccepted, async () => ({})),
+    /not eligible/,
+  );
+});
+
+test("a second proven rejection is failed and an ambiguous retry is unknown", async () => {
+  await createRetryable(ids.retryFailed, "bounded rejection");
+  const failed = await routes.retryRouteDelivery(
+    ids.retryFailed,
+    async () => {
+      throw Object.assign(new Error("active turn changed again"), {
+        code: "ESTALEACTIVE",
+      });
+    },
+    {
+      classifyRejection: negativeAcceptance,
+      now: () =>
+        Date.parse(routes.readRouteDelivery(ids.retryFailed).updatedAt) +
+        policy.ORDINARY_RETRY_MIN_DELAY_MS,
+    },
+  );
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.errorCode, "EEXPECTEDTURNMISMATCH");
+
+  await createRetryable(ids.retryUnknown, "ambiguous retry");
+  const unknown = await routes.retryRouteDelivery(
+    ids.retryUnknown,
+    async () => {
+      throw Object.assign(new Error("socket closed after write"), { code: "EPIPE" });
+    },
+    {
+      classifyRejection: negativeAcceptance,
+      now: () =>
+        Date.parse(routes.readRouteDelivery(ids.retryUnknown).updatedAt) +
+        policy.ORDINARY_RETRY_MIN_DELAY_MS,
+    },
+  );
+  assert.equal(unknown.status, "unknown");
+  assert.equal(unknown.errorCode, "EPIPE");
+  await assert.rejects(
+    routes.retryRouteDelivery(ids.retryUnknown, async () => ({})),
+    /not eligible/,
+  );
+});
+
+test("an unused retry expires without another dispatch attempt", async () => {
+  await createRetryable(ids.retryExpired, "expire this retry");
+  const observedAt = Date.parse(routes.readRouteDelivery(ids.retryExpired).updatedAt);
+  let dispatches = 0;
+  const expired = await routes.retryRouteDelivery(
+    ids.retryExpired,
+    async () => {
+      dispatches += 1;
+    },
+    {
+      classifyRejection: negativeAcceptance,
+      now: () => observedAt + policy.ORDINARY_RETRY_WINDOW_MS + 1,
+    },
+  );
+  assert.equal(expired.status, "expired");
+  assert.equal(expired.retryAttempted, false);
+  assert.equal(expired.errorCode, "ERETRYEXPIRED");
+  assert.equal(dispatches, 0);
+});
+
+test("a crash after the retry attempt is reconciled without a third wake", async () => {
+  await createRetryable(ids.retryCrash, "recover this retry attempt");
+  const retry = await ledger.beginRetryDelivery(ids.retryCrash, {
+    now: new Date(
+      Date.parse(routes.readRouteDelivery(ids.retryCrash).updatedAt) +
+        policy.ORDINARY_RETRY_MIN_DELAY_MS,
+    ).toISOString(),
+  });
+  assert.equal(routes.readRouteDelivery(ids.retryCrash).status, "dispatching");
+  await assert.rejects(
+    routes.retryRouteDelivery(ids.retryCrash, async () => ({})),
+    /not eligible/,
+  );
+  const reconciled = await routes.reconcileRouteDelivery(
+    ids.retryCrash,
+    async ({ logicalMessageId, targetThreadId }) => {
+      assert.equal(logicalMessageId, ids.retryCrash);
+      assert.equal(targetThreadId, "81345678-1234-4234-8234-123456789abc");
+      return {
+        state: "accepted",
+        turnId: "4e345678-1234-4234-8234-123456789abc",
+        complete: true,
+        pagesInspected: 1,
+      };
+    },
+    { now: Date.now() + 60_000, dispatchingGraceMs: 0 },
+  );
+  assert.equal(reconciled.status, "turn_started");
+  assert.equal(reconciled.attemptCount, 2);
+  assert.equal(reconciled.turnId, "4e345678-1234-4234-8234-123456789abc");
+  assert.equal(
+    ledger.readDeliveryLedger(ids.retryCrash).delivery.attempts[1].attemptId,
+    retry.attemptId,
+  );
 });
 
 test("peer replies invert pinned thread identities and preserve correlation", async () => {

@@ -9,7 +9,12 @@ export const MESSAGE_BODY_RETENTION_MIN_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 export const QUARANTINE_RETENTION_MIN_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
 
 const SCOPES = new Set(["all", "ledger", "bodies", "quarantine"]);
-const TERMINAL_DELIVERY_STATES = new Set(["turn_started", "expired", "cancelled"]);
+const TERMINAL_DELIVERY_STATES = new Set([
+  "turn_started",
+  "failed",
+  "expired",
+  "cancelled",
+]);
 
 function timestamp(label, value) {
   const parsed = Date.parse(value || "");

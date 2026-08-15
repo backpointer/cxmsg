@@ -529,7 +529,8 @@ function inspectDeliveryLedger(
         status:
           delivery.admissionState === "quarantined"
             ? "quarantined"
-            : delivery.state === "created" && activeAttempt
+            : (delivery.state === "created" && activeAttempt) ||
+                (delivery.state === "retryable" && delivery.attempts.length === 2)
               ? "dispatching"
               : delivery.state,
       };

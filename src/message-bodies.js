@@ -314,6 +314,15 @@ export function listMessageBodies() {
   });
 }
 
+export function readWholeMessageBody(reference) {
+  assertRetentionReadable();
+  const messageId = parseMessageContentRef(reference);
+  ensureStore();
+  const record = listRecords().find((candidate) => candidate.messageId === messageId);
+  if (!record) throw new Error(`unknown message body: ${messageId}`);
+  return verifiedBody(record).toString("utf8");
+}
+
 export function readMessageBody(
   reference,
   { offset = 0, limit = DEFAULT_MESSAGE_READ_BYTES } = {},

@@ -10,9 +10,11 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { classifyAppServerNegativeAcceptance } from "./app-server-client.js";
 import {
   appendDeliveryEvidence,
   beginImmediateDelivery,
+  beginRetryDelivery,
   commitSingleRecipientDelivery,
   findDeliveryByReplyHandle,
   readDeliveryLedger,
@@ -20,15 +22,17 @@ import {
 } from "./delivery-ledger.js";
 import {
   MAX_WHEN_IDLE_DELAY_MS,
+  ORDINARY_RETRY_MIN_DELAY_MS,
+  ORDINARY_RETRY_WINDOW_MS,
   ROUTE_RECONCILE_GRACE_MS,
   SCHEDULED_WAKE_POLICIES,
 } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
 import {
   MAX_STORED_MESSAGE_BYTES,
+  readWholeMessageBody,
   storeMessageBody,
 } from "./message-bodies.js";
-import { MAX_MESSAGE_BYTES } from "./messaging.js";
 import {
   findProjectByRoutingId,
   nodeKey as directoryNodeKey,
@@ -545,7 +549,8 @@ function ledgerRouteDelivery(record) {
   const status =
     delivery.admissionState === "quarantined"
       ? "quarantined"
-      : ["created", "scheduled"].includes(delivery.state) && activeAttempt
+      : (["created", "scheduled"].includes(delivery.state) && activeAttempt) ||
+          (delivery.state === "retryable" && delivery.attempts.length === 2)
         ? "dispatching"
         : delivery.state;
   return {
@@ -664,6 +669,8 @@ function publicOutcome(record, extra = {}) {
     target: record.target,
     delivery: record.delivery,
     turnId: record.turnId,
+    errorCode: record.errorCode || null,
+    attemptCount: record.attemptCount || 0,
     deduplicated: false,
     ...extra,
   };
@@ -680,7 +687,11 @@ export async function routePeerMessage(
     senderNode = null,
   },
   dispatch,
-  { log = writeCoordinationEvent, validateTrigger = null } = {},
+  {
+    log = writeCoordinationEvent,
+    validateTrigger = null,
+    classifyRejection = classifyAppServerNegativeAcceptance,
+  } = {},
 ) {
   validateName("sender", from);
   validateName("target", target);
@@ -778,9 +789,7 @@ export async function routePeerMessage(
     const now = new Date().toISOString();
     const messageBytes = Buffer.byteLength(message, "utf8");
     const bodyReference =
-      decision.state === "admitted" &&
-      (messageBytes > MAX_MESSAGE_BYTES ||
-        SCHEDULED_WAKE_POLICIES.includes(normalizedRoute?.wake_policy))
+      decision.state === "admitted"
         ? await storeMessageBody({ messageId: logicalMessageId, body: message })
         : null;
     if (decision.state === "quarantined") {
@@ -870,13 +879,153 @@ export async function routePeerMessage(
     );
     return publicOutcome(completed, { result });
   } catch (error) {
+    const rejection = classifyRejection(error);
     await appendDeliveryEvidence(logicalMessageId, {
       attemptId: attempt.attemptId,
-      state: "unknown",
-      evidenceKind: "dispatch-result",
-      errorCode: boundedErrorCode(error),
+      state: rejection ? "retryable" : "unknown",
+      evidenceKind: rejection ? "negative-acceptance" : "dispatch-result",
+      errorCode: rejection?.errorCode || boundedErrorCode(error),
+      ...(rejection
+        ? { negativeAcceptanceContract: rejection.contract }
+        : {}),
     });
     throw error;
+  }
+}
+
+export async function retryRouteDelivery(
+  logicalMessageId,
+  dispatch,
+  {
+    log = writeCoordinationEvent,
+    classifyRejection = classifyAppServerNegativeAcceptance,
+    now = Date.now,
+  } = {},
+) {
+  validateUuid("logical message id", logicalMessageId);
+  if (typeof dispatch !== "function") throw new Error("retry dispatch must be a function");
+  let prepared;
+  await withRouteMutation(logicalMessageId, async () => {
+    const state = routeDeliveryState(logicalMessageId);
+    if (state.state !== "valid" || state.record.version !== 2) {
+      throw new Error(`Route Delivery is missing, legacy, or invalid: ${logicalMessageId}`);
+    }
+    const record = state.record;
+    if (
+      record.admissionState !== "admitted" ||
+      record.status !== "retryable" ||
+      record.attemptCount !== 1 ||
+      !record.targetThreadId ||
+      !record.contentRef
+    ) {
+      throw new Error("Route Delivery is not eligible for its one explicit retry");
+    }
+    const targetRecord = readSessionRecord(record.target);
+    if (!targetRecord || targetRecord.threadId !== record.targetThreadId) {
+      throw new Error("Route Delivery target identity changed; retry is forbidden");
+    }
+    const message = readWholeMessageBody(record.contentRef);
+    if (
+      Buffer.byteLength(message, "utf8") !== record.messageBytes ||
+      createHash("sha256").update(message).digest("hex") !== record.messageSha256
+    ) {
+      throw new Error("Route Delivery body does not match Ledger evidence");
+    }
+    const retryObservedAt = Date.parse(record.updatedAt);
+    const currentTime = now();
+    if (currentTime < retryObservedAt + ORDINARY_RETRY_MIN_DELAY_MS) {
+      throw new Error("Route Delivery retry backoff has not elapsed");
+    }
+    if (currentTime > retryObservedAt + ORDINARY_RETRY_WINDOW_MS) {
+      const expired = ledgerRouteDelivery(
+        await appendDeliveryEvidence(logicalMessageId, {
+          attemptId: null,
+          state: "expired",
+          evidenceKind: "retry-policy",
+          errorCode: "ERETRYEXPIRED",
+          observedAt: new Date(currentTime).toISOString(),
+        }),
+      );
+      prepared = { expired };
+      return;
+    }
+    const attempt = await beginRetryDelivery(logicalMessageId, {
+      now: new Date(currentTime).toISOString(),
+    });
+    prepared = { record, message, attempt };
+  });
+
+  if (prepared.expired) {
+    await log({
+      kind: "route-delivery",
+      phase: "retry-expiry",
+      correlationId: logicalMessageId,
+      target: prepared.expired.target,
+      outcome: "expired",
+      errorCode: "ERETRYEXPIRED",
+    });
+    return publicOutcome(prepared.expired, { retryAttempted: false });
+  }
+
+  await log({
+    kind: "route-delivery",
+    phase: "retry-attempt",
+    correlationId: logicalMessageId,
+    target: prepared.record.target,
+    outcome: "started",
+    errorCode: null,
+  });
+  try {
+    const result = await dispatch({
+      logicalMessageId,
+      from: prepared.record.from,
+      target: prepared.record.target,
+      targetThreadId: prepared.record.targetThreadId,
+      message: prepared.message,
+      route: prepared.record.route,
+      replyToMessageId: prepared.record.replyToMessageId || null,
+      replyHandle: prepared.record.replyHandle,
+    });
+    const completed = ledgerRouteDelivery(
+      await appendDeliveryEvidence(logicalMessageId, {
+        attemptId: prepared.attempt.attemptId,
+        state: "turn_started",
+        evidenceKind: "dispatch-result",
+        transportResult: result.delivery,
+        turnId: result.turnId,
+      }),
+    );
+    await log({
+      kind: "route-delivery",
+      phase: "retry-result",
+      correlationId: logicalMessageId,
+      target: completed.target,
+      outcome: "turn_started",
+      errorCode: null,
+    });
+    return publicOutcome(completed, { retryAttempted: true, result });
+  } catch (error) {
+    const rejection = classifyRejection(error);
+    const completed = ledgerRouteDelivery(
+      await appendDeliveryEvidence(logicalMessageId, {
+        attemptId: prepared.attempt.attemptId,
+        state: rejection ? "failed" : "unknown",
+        evidenceKind: rejection ? "negative-acceptance" : "dispatch-result",
+        errorCode: rejection?.errorCode || boundedErrorCode(error),
+        ...(rejection
+          ? { negativeAcceptanceContract: rejection.contract }
+          : {}),
+      }),
+    );
+    await log({
+      kind: "route-delivery",
+      phase: "retry-result",
+      correlationId: logicalMessageId,
+      target: completed.target,
+      outcome: completed.status,
+      errorCode: completed.errorCode,
+    });
+    return publicOutcome(completed, { retryAttempted: true });
   }
 }
 
