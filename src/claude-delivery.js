@@ -19,13 +19,29 @@ import { recordDirectMessageIfKnown } from "./conversations.js";
 const ACK_PATTERN =
   /^<cxmsg-ack in-reply-to="([0-9a-f-]{36})" status="(accepted|completed|retryable_error|failed)"(?: code="([^"]{1,32})")?(?: retry-after="(\d{1,5})")?>\n([\s\S]*)\n<\/cxmsg-ack>$/i;
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+export const DEFAULT_CLAUDE_ACK_TIMEOUT_SECONDS = 120;
+export const DEFAULT_CLAUDE_COMPLETION_TIMEOUT_SECONDS = 15 * 60;
+const MAX_CLAUDE_TIMEOUT_SECONDS = 24 * 60 * 60;
+
+function boundedTimeoutSeconds(label, value) {
+  if (
+    !Number.isSafeInteger(value) ||
+    value < 1 ||
+    value > MAX_CLAUDE_TIMEOUT_SECONDS
+  ) {
+    throw new Error(`${label} must be an integer from 1 to 86400 seconds`);
+  }
+  return value;
+}
 
 function deliveryBody(job) {
   return (
     `<cxmsg-delivery id="${job.jobId}">\n` +
     `${job.task}\n` +
     "</cxmsg-delivery>\n\n" +
-    "After processing this message, reply to its from address with exactly one correlated status envelope:\n" +
+    "After receiving this message, you may first reply with one correlated status=accepted envelope. " +
+    "If you do, later reply with exactly one correlated status=completed or status=failed envelope. " +
+    "Otherwise reply with exactly one terminal envelope after processing:\n" +
     `<cxmsg-ack in-reply-to="${job.jobId}" status="completed">\n` +
     "brief result\n" +
     "</cxmsg-ack>\n" +
@@ -226,10 +242,13 @@ export async function createClaudeDeliveryJob({
   peer,
   message,
   maxAttempts = 4,
-  ackTimeoutSeconds = 120,
+  ackTimeoutSeconds = DEFAULT_CLAUDE_ACK_TIMEOUT_SECONDS,
+  completionTimeoutSeconds = DEFAULT_CLAUDE_COMPLETION_TIMEOUT_SECONDS,
   logicalMessageId = null,
   replyToMessageId = null,
 }) {
+  boundedTimeoutSeconds("ACK timeout", ackTimeoutSeconds);
+  boundedTimeoutSeconds("completion timeout", completionTimeoutSeconds);
   if (replyToMessageId !== null && logicalMessageId === null) {
     throw new Error("Claude peer reply correlation requires a Logical Message ID");
   }
@@ -275,6 +294,8 @@ export async function createClaudeDeliveryJob({
       attemptedAt: null,
       deliveredAt: null,
       ackDeadlineAt: null,
+      acceptedAt: null,
+      completionDeadlineAt: null,
       nextAttemptAt: null,
       errorCode: null,
     },
@@ -294,6 +315,7 @@ export async function createClaudeDeliveryJob({
         }
       : null,
     ackTimeoutSeconds,
+    completionTimeoutSeconds,
   });
   let job;
   if (logicalMessageId) {
@@ -305,6 +327,11 @@ export async function createClaudeDeliveryJob({
         job.from !== from ||
         job.task !== message ||
         job.claudeTarget?.sessionId !== peer.sessionId ||
+        (job.ackTimeoutSeconds || DEFAULT_CLAUDE_ACK_TIMEOUT_SECONDS) !==
+          ackTimeoutSeconds ||
+        (job.completionTimeoutSeconds ||
+          DEFAULT_CLAUDE_COMPLETION_TIMEOUT_SECONDS) !==
+          completionTimeoutSeconds ||
         (replyToMessageId === null && job.correlation !== null) ||
         (replyToMessageId !== null &&
           (job.correlation?.kind !== "peer-reply" ||
@@ -409,7 +436,8 @@ export async function sendClaudeDeliveryJob(
     });
     await send(peer.socketPath, frame);
     const ackDeadlineAt = new Date(
-      Date.now() + (current.ackTimeoutSeconds || 120) * 1_000,
+      Date.now() +
+        (current.ackTimeoutSeconds || DEFAULT_CLAUDE_ACK_TIMEOUT_SECONDS) * 1_000,
     ).toISOString();
     const delivered = await updateJob(sending, {
       status: "transport_delivered",
@@ -481,6 +509,7 @@ export async function recordClaudeDeliveryAck(
   const now = new Date().toISOString();
   let ackTransitioned = false;
   let rejection = null;
+  let rejectionPhase = "ack-source-validation";
   let late = false;
   const updated = await mutateJob(job.jobId, (current) => {
     if (!deliverySourceMatches(current, parsed)) {
@@ -515,8 +544,28 @@ export async function recordClaudeDeliveryAck(
     }
     if (["completed", "failed"].includes(current.status)) {
       if (current.ack?.status === ack.status) return current;
-      rejection = new Error(
-        `Claude delivery is already ${current.status}: ${ack.jobId}`,
+      rejectionPhase = "ack-transition";
+      rejection = Object.assign(
+        new Error(`Claude delivery is already ${current.status}: ${ack.jobId}`),
+        { code: "EACKTRANSITION" },
+      );
+      return current;
+    }
+    if (
+      ack.status === "accepted" &&
+      ["acknowledged", "completion_timeout"].includes(current.status) &&
+      current.ack?.status === "accepted"
+    ) {
+      return current;
+    }
+    if (
+      current.delivery?.acceptedAt &&
+      ack.status === "retryable_error"
+    ) {
+      rejectionPhase = "ack-transition";
+      rejection = Object.assign(
+        new Error("An accepted Claude delivery requires a terminal ACK"),
+        { code: "EACKTRANSITION" },
       );
       return current;
     }
@@ -533,6 +582,15 @@ export async function recordClaudeDeliveryAck(
       retryable && !exhausted
         ? new Date(Date.now() + retryAfterSeconds * 1_000).toISOString()
         : null;
+    const accepted = ack.status === "accepted";
+    const completionDeadlineAt = accepted
+      ? new Date(
+          Date.now() +
+            (current.completionTimeoutSeconds ||
+              DEFAULT_CLAUDE_COMPLETION_TIMEOUT_SECONDS) *
+              1_000,
+        ).toISOString()
+      : current.delivery?.completionDeadlineAt || null;
     return {
       ...current,
       status:
@@ -559,6 +617,10 @@ export async function recordClaudeDeliveryAck(
       },
       delivery: {
         ...current.delivery,
+        acceptedAt: accepted
+          ? current.delivery?.acceptedAt || now
+          : current.delivery?.acceptedAt || null,
+        completionDeadlineAt,
         nextAttemptAt,
         errorCode: ack.code,
       },
@@ -577,7 +639,7 @@ export async function recordClaudeDeliveryAck(
   if (rejection) {
     await log({
       kind: "claude-delivery",
-      phase: "ack-source-validation",
+      phase: rejectionPhase,
       correlationId: job.jobId,
       target: job.target,
       attempt: job.delivery?.attempt,
@@ -602,26 +664,53 @@ export async function recordClaudeDeliveryAck(
 
 export async function refreshClaudeDelivery(
   job,
-  { log = writeCoordinationEvent } = {},
+  { log = writeCoordinationEvent, now = Date.now() } = {},
 ) {
-  if (
-    job?.kind === "claude-delivery" &&
-    job.status === "transport_delivered" &&
-    Date.parse(job.delivery?.ackDeadlineAt) <= Date.now()
-  ) {
-    const timedOut = await updateJob(job, {
-      status: "ack_timeout",
-      error: "Claude did not acknowledge the delivery before its deadline",
-    });
+  if (job?.kind !== "claude-delivery") return job;
+  const candidate =
+    (job.status === "transport_delivered" &&
+      Date.parse(job.delivery?.ackDeadlineAt) <= now) ||
+    (job.status === "acknowledged" &&
+      Date.parse(job.delivery?.completionDeadlineAt) <= now);
+  if (!candidate) return job;
+
+  let transition = null;
+  const timedOut = await mutateJob(job.jobId, (current) => {
+    if (
+      current.status === "transport_delivered" &&
+      Date.parse(current.delivery?.ackDeadlineAt) <= now
+    ) {
+      transition = {
+        status: "ack_timeout",
+        phase: "ack-deadline",
+        error: "Claude did not acknowledge the delivery before its deadline",
+      };
+    } else if (
+      current.status === "acknowledged" &&
+      Date.parse(current.delivery?.completionDeadlineAt) <= now
+    ) {
+      transition = {
+        status: "completion_timeout",
+        phase: "completion-deadline",
+        error: "Claude did not complete the accepted delivery before its deadline",
+      };
+    }
+    if (!transition) return current;
+    return {
+      ...current,
+      status: transition.status,
+      error: transition.error,
+    };
+  });
+  if (transition) {
     await log({
       kind: "claude-delivery",
-      phase: "ack-deadline",
+      phase: transition.phase,
       correlationId: timedOut.jobId,
       target: timedOut.target,
       attempt: timedOut.delivery?.attempt,
       outcome: "timeout",
     });
-    return timedOut;
   }
-  return job;
+  return timedOut;
 }

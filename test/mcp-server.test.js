@@ -94,6 +94,8 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
           attempt: 1,
           maxAttempts: 4,
           transportStatus: "delivered",
+          acceptedAt: "2026-08-16T00:00:00.000Z",
+          completionDeadlineAt: "2026-08-16T00:15:00.000Z",
           nativeReceipts: [
             { messageId: DELIVERY_ID, status: "delivered" },
           ],
@@ -103,6 +105,11 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
     },
   );
   assert.equal(status.status, "completed");
+  assert.equal(status.acceptedAt, "2026-08-16T00:00:00.000Z");
+  assert.equal(
+    status.completionDeadlineAt,
+    "2026-08-16T00:15:00.000Z",
+  );
   assert.equal(status.nativeReceipts[0].status, "delivered");
   assert.equal(status.replyEvidence.status, "correlated");
 });

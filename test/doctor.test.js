@@ -430,6 +430,35 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   ], { now: Date.parse("2026-08-14T00:01:00.000Z") });
   assert.equal(scheduled[0].status, "pass");
   assert.equal(scheduled[0].errorCode, undefined);
+
+  const overdueClaude = inspectJobs(
+    [
+      {
+        version: 1,
+        kind: "claude-delivery",
+        jobId: "62345678-1234-4234-8234-123456789abc",
+        status: "acknowledged",
+        delivery: {
+          completionDeadlineAt: "2026-08-14T00:00:30.000Z",
+        },
+      },
+    ],
+    { now: Date.parse("2026-08-14T00:01:00.000Z") },
+  );
+  assert.equal(overdueClaude[0].status, "warn");
+  assert.equal(overdueClaude[0].errorCode, "ECOMPLETIONOVERDUE");
+
+  const missingClaudeDeadline = inspectJobs([
+    {
+      version: 1,
+      kind: "claude-delivery",
+      jobId: "72345678-1234-4234-8234-123456789abc",
+      status: "acknowledged",
+      delivery: {},
+    },
+  ]);
+  assert.equal(missingClaudeDeadline[0].status, "fail");
+  assert.equal(missingClaudeDeadline[0].errorCode, "ECOMPLETIONDEADLINE");
 });
 
 test("Message Body Store Inspector reports private metadata, quarantine, and quota", async () => {

@@ -1010,6 +1010,14 @@ an ACK request. A cooperating Claude session replies to the message's `from`
 address with one of these envelopes:
 
 ```text
+<cxmsg-ack in-reply-to="<delivery-id>" status="accepted">
+queued or started
+</cxmsg-ack>
+```
+
+An optional `accepted` ACK is followed later by exactly one terminal ACK:
+
+```text
 <cxmsg-ack in-reply-to="<delivery-id>" status="completed">
 brief result
 </cxmsg-ack>
@@ -1024,11 +1032,18 @@ Overloaded
 ```
 
 Statuses are `transport_delivered`, `acknowledged`, `completed`,
-`retry_scheduled`, `retryable_error`, `failed`, `ack_rejected`,
-`transport_error`, `unreachable`, and `ack_timeout`. A `429` or `529` ACK
-schedules exponential backoff with a maximum delay and attempt budget. Retries
-preserve the delivery correlation ID and record each transport message ID so
-the receiver can avoid duplicating work.
+`retry_scheduled`, `failed`, `ack_rejected`, `transport_error`, `unreachable`,
+`ack_timeout`, and `completion_timeout`. An `accepted` ACK records
+`acknowledged`, `acceptedAt`, and a bounded `completionDeadlineAt`. It does not
+claim that a Claude model turn started because Claude may only have queued the
+request. If no terminal ACK arrives before that deadline, the delivery becomes
+`completion_timeout`; a later exact-source terminal ACK can still reconcile it.
+A `429` or `529` retryable ACK schedules exponential backoff with a maximum
+delay and attempt budget. Retries preserve the delivery correlation ID and
+record each transport message ID so the receiver can avoid duplicating work.
+After `accepted`, only `completed` or `failed` is valid; a later retryable ACK
+is rejected so cxmsg cannot automatically duplicate work Claude already
+accepted.
 
 Claude Code may also return a native `peer_message_status` control receipt for
 an individual transport message ID. Receipt emission is optional: a live
@@ -1073,7 +1088,8 @@ The first valid `completed` or `failed` ACK also starts or steers one untrusted
 turn on the originating Codex thread, waking it with the correlated result.
 Duplicate terminal ACKs reuse the delivery ID as the App Server client message
 ID and do not start another turn. `accepted` and retryable ACKs update delivery
-state without waking Codex.
+state without waking Codex. Repeating the same `accepted` ACK does not extend
+its original completion deadline.
 
 Claude Code's local session registry currently exposes liveness and activity,
 not the model API response code. If an API failure prevents Claude from running

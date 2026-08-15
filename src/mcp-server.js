@@ -114,6 +114,8 @@ function publicDelivery(job) {
     transportStatus: job.delivery?.transportStatus || null,
     deliveredAt: job.delivery?.deliveredAt || null,
     ackDeadlineAt: job.delivery?.ackDeadlineAt || null,
+    acceptedAt: job.delivery?.acceptedAt || null,
+    completionDeadlineAt: job.delivery?.completionDeadlineAt || null,
     nextAttemptAt: job.delivery?.nextAttemptAt || null,
     errorCode: job.delivery?.errorCode || null,
     nativeReceipts: job.delivery?.nativeReceipts || [],

@@ -279,9 +279,8 @@ explicit pre-implementation decision, not an Implementation detail.
 
 ## Claude delivery completion
 
-Codex-to-Claude delivery already distinguishes UDS acceptance from model
-completion, but `accepted` needs a complete lifecycle. The recommended contract
-is two-stage:
+Codex-to-Claude delivery distinguishes UDS acceptance from model completion.
+The implemented `accepted` lifecycle is two-stage:
 
 ```text
 transport_delivered
@@ -289,7 +288,7 @@ transport_delivered
   -> completed | failed
 ```
 
-Required changes:
+Implemented invariants:
 
 - delivery instructions explicitly permit an optional `accepted` envelope
   followed by exactly one terminal `completed` or `failed` envelope;

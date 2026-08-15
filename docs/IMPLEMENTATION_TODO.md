@@ -280,6 +280,13 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
       stable source validation; ignore correlation claims in Message Body text.
 - [x] Preserve formal ACK state, wake behavior, permission, and approval
       invariants for native receipts and ordinary structured replies.
+- [x] Give optional `accepted` ACKs a bounded completion lifecycle with
+      `acceptedAt`, `completionDeadlineAt`, and `completion_timeout`.
+- [x] Keep accepted/queued evidence distinct from `turn_started`, preserve the
+      first deadline on duplicate ACKs, and allow only exact-source terminal
+      reconciliation after timeout.
+- [x] Surface overdue or malformed completion deadlines through Doctor and
+      expose bounded lifecycle timestamps through CLI and MCP status.
 
 ## Explicit non-goals for this sequence
 

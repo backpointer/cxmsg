@@ -56,6 +56,13 @@ const PENDING_JOB_STATES = new Set([
   "running",
   "awaiting_approval",
 ]);
+const OBSERVABLE_CLAUDE_DELIVERY_STATES = new Set([
+  "transport_delivered",
+  "acknowledged",
+  "retry_scheduled",
+  "ack_timeout",
+  "completion_timeout",
+]);
 const ENDPOINT_HISTORY_LIMIT = 64;
 const ENDPOINT_TRANSPORT_LIMIT = 16;
 const CLUSTER_MEMBER_LIMIT = 256;
@@ -3657,7 +3664,13 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
   for (const job of jobs) {
     const kind = job.kind || "delegation";
     if (!job.kind) legacy += 1;
-    if (!PENDING_JOB_STATES.has(job.status)) continue;
+    if (
+      !PENDING_JOB_STATES.has(job.status) &&
+      !(kind === "claude-delivery" &&
+        OBSERVABLE_CLAUDE_DELIVERY_STATES.has(job.status))
+    ) {
+      continue;
+    }
     active += 1;
     const label = job.jobId.slice(0, 8);
     if (kind === "delegation") {
@@ -3731,6 +3744,30 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
         verification: "record",
         errorCode: "EACKOVERDUE",
       }));
+    }
+    if (kind === "claude-delivery" && job.status === "acknowledged") {
+      const completionDeadline = Date.parse(
+        job.delivery?.completionDeadlineAt || "",
+      );
+      if (!Number.isFinite(completionDeadline)) {
+        checks.push(diagnosticCheck({
+          id: `jobs.claude.${label}.completion-deadline`,
+          scope: "jobs",
+          status: "fail",
+          summary: `Acknowledged Claude Delivery ${label} has no valid completion deadline`,
+          verification: "record",
+          errorCode: "ECOMPLETIONDEADLINE",
+        }));
+      } else if (completionDeadline <= now) {
+        checks.push(diagnosticCheck({
+          id: `jobs.claude.${label}.completion-overdue`,
+          scope: "jobs",
+          status: "warn",
+          summary: `Acknowledged Claude Delivery ${label} is past its completion deadline`,
+          verification: "record",
+          errorCode: "ECOMPLETIONOVERDUE",
+        }));
+      }
     }
     if (
       kind === "claude-delivery" &&

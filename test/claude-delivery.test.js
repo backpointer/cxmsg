@@ -41,6 +41,16 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
       replyToMessageId: "27654321-4321-4321-4321-cba987654321",
     });
     assert.equal(job.jobId, job.correlation.logicalMessageId);
+    await assert.rejects(
+      createClaudeDeliveryJob({
+        from: "coordinator",
+        sourceRecord,
+        peer,
+        message: "invalid unbounded completion",
+        completionTimeoutSeconds: 86_401,
+      }),
+      /completion timeout must be an integer from 1 to 86400 seconds/,
+    );
     const duplicateReply = await createClaudeDeliveryJob({
       from: "coordinator",
       sourceRecord,
@@ -63,6 +73,40 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
       }),
       /idempotency conflict/,
     );
+    await assert.rejects(
+      createClaudeDeliveryJob({
+        from: "coordinator",
+        sourceRecord,
+        peer,
+        message: "review the change",
+        completionTimeoutSeconds: 901,
+        logicalMessageId: job.correlation.logicalMessageId,
+        replyToMessageId: job.correlation.replyToMessageId,
+      }),
+      /idempotency conflict/,
+    );
+    const legacyLogicalMessageId = "a7654321-4321-4321-4321-cba987654321";
+    const legacyReplyToMessageId = "b7654321-4321-4321-4321-cba987654321";
+    let legacyTimeoutJob = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "legacy timeout default",
+      logicalMessageId: legacyLogicalMessageId,
+      replyToMessageId: legacyReplyToMessageId,
+    });
+    legacyTimeoutJob = await updateJob(legacyTimeoutJob, {
+      completionTimeoutSeconds: undefined,
+    });
+    const legacyTimeoutDuplicate = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "legacy timeout default",
+      logicalMessageId: legacyLogicalMessageId,
+      replyToMessageId: legacyReplyToMessageId,
+    });
+    assert.equal(legacyTimeoutDuplicate.deduplicated, true);
     const concurrentCorrelation = {
       logicalMessageId: "37654321-4321-4321-4321-cba987654321",
       replyToMessageId: "47654321-4321-4321-4321-cba987654321",
@@ -98,6 +142,8 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.equal(job.status, "transport_delivered");
     assert.equal(job.delivery.attempt, 1);
     assert.match(frames[0].message.content, new RegExp(job.jobId));
+    assert.match(frames[0].message.content, /status=accepted/);
+    assert.match(frames[0].message.content, /status=completed/);
 
     job = await recordClaudeNativeDeliveryReceipt({
       messageId: frames[0].msg_id,
@@ -252,6 +298,42 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.equal(job.ack.code, "529");
     assert.ok(job.delivery.nextAttemptAt);
 
+    const acceptedAck = parseClaudeDeliveryAck(
+      `<cxmsg-ack in-reply-to="${job.jobId}" status="accepted">\nQueued for review\n</cxmsg-ack>`,
+    );
+    job = await recordClaudeDeliveryAck(
+      {
+        fromSession: peer.sessionId,
+        fromAddress: peer.address,
+      },
+      acceptedAck,
+    );
+    assert.equal(job.status, "acknowledged");
+    assert.ok(job.delivery.acceptedAt);
+    assert.ok(job.delivery.completionDeadlineAt);
+    assert.equal(job.delivery.nextAttemptAt, null);
+    const acceptedDeadline = job.delivery.completionDeadlineAt;
+    const duplicateAccepted = await recordClaudeDeliveryAck(
+      {
+        fromSession: peer.sessionId,
+        fromAddress: peer.address,
+      },
+      acceptedAck,
+    );
+    assert.equal(duplicateAccepted.ackTransitioned, false);
+    assert.equal(duplicateAccepted.delivery.completionDeadlineAt, acceptedDeadline);
+    await assert.rejects(
+      recordClaudeDeliveryAck(
+        {
+          fromSession: peer.sessionId,
+          fromAddress: peer.address,
+        },
+        retryAck,
+      ),
+      (error) => error.code === "EACKTRANSITION",
+    );
+    assert.equal(readJob(job.jobId).status, "acknowledged");
+
     const completedAck = parseClaudeDeliveryAck(
       `<cxmsg-ack in-reply-to="${job.jobId}" status="completed">\nDone\n</cxmsg-ack>`,
     );
@@ -265,6 +347,46 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.equal(job.status, "completed");
     assert.equal(job.result, "Done");
     assert.equal(readJob(job.jobId).status, "completed");
+
+    let completionTimedOut = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "check completion timeout",
+      completionTimeoutSeconds: 1,
+    });
+    completionTimedOut = await sendClaudeDeliveryJob(
+      { socketPath: "/tmp/cc-socks/99999.sock" },
+      sourceRecord,
+      completionTimedOut,
+      { peers: async () => [peer], send: async () => {} },
+    );
+    const completionAccepted = parseClaudeDeliveryAck(
+      `<cxmsg-ack in-reply-to="${completionTimedOut.jobId}" status="accepted">\nStarted\n</cxmsg-ack>`,
+    );
+    completionTimedOut = await recordClaudeDeliveryAck(
+      { fromSession: peer.sessionId, fromAddress: peer.address },
+      completionAccepted,
+    );
+    completionTimedOut = await updateJob(completionTimedOut, {
+      delivery: {
+        ...completionTimedOut.delivery,
+        completionDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
+      },
+    });
+    completionTimedOut = await refreshClaudeDelivery(completionTimedOut);
+    assert.equal(completionTimedOut.status, "completion_timeout");
+    assert.match(completionTimedOut.error, /did not complete/);
+    const lateCompletion = parseClaudeDeliveryAck(
+      `<cxmsg-ack in-reply-to="${completionTimedOut.jobId}" status="completed">\nLate completion\n</cxmsg-ack>`,
+    );
+    completionTimedOut = await recordClaudeDeliveryAck(
+      { fromSession: peer.sessionId, fromAddress: peer.address },
+      lateCompletion,
+    );
+    assert.equal(completionTimedOut.status, "completed");
+    assert.equal(completionTimedOut.ack.late, true);
+    assert.ok(completionTimedOut.delivery.completionDeadlineAt);
 
     const rotatedPeer = {
       ...peer,
@@ -529,6 +651,36 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     );
     assert.equal(timedOut.status, "completed");
     assert.equal(timedOut.ack.late, true);
+
+    let raceSafe = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "do not overwrite a terminal ACK with a stale refresh",
+    });
+    raceSafe = await sendClaudeDeliveryJob(
+      { socketPath: "/tmp/cc-socks/99999.sock" },
+      sourceRecord,
+      raceSafe,
+      { peers: async () => [peer], send: async () => {} },
+    );
+    raceSafe = await updateJob(raceSafe, {
+      delivery: {
+        ...raceSafe.delivery,
+        ackDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
+      },
+    });
+    const staleRaceCandidate = raceSafe;
+    const raceCompletion = parseClaudeDeliveryAck(
+      `<cxmsg-ack in-reply-to="${raceSafe.jobId}" status="completed">\nWon the race\n</cxmsg-ack>`,
+    );
+    raceSafe = await recordClaudeDeliveryAck(
+      { fromSession: peer.sessionId, fromAddress: peer.address },
+      raceCompletion,
+    );
+    assert.equal(raceSafe.status, "completed");
+    raceSafe = await refreshClaudeDelivery(staleRaceCandidate);
+    assert.equal(raceSafe.status, "completed");
 
     const eventLog = await fs.readFile(path.join(stateDir, "events.jsonl"), "utf8");
     const events = eventLog.trim().split("\n").map((line) => JSON.parse(line));

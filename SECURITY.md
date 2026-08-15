@@ -404,6 +404,16 @@ Claude `transport_delivered` records only native frame acceptance and a
 correlated Delivery Job ID; ACK, overload retry, model completion, reply, and
 task completion remain separate evidence.
 
+A correlated `accepted` ACK means only that Claude accepted or queued the
+request. It records a bounded completion deadline but is not called
+`turn_started`, does not prove model execution, and causes no Codex wake. A
+missing terminal ACK becomes `completion_timeout`; a late terminal ACK must
+still pass the exact source and correlation checks before reconciliation.
+Duplicate `accepted` ACKs cannot extend the deadline, and timeout refresh is
+serialized with ACK persistence so stale inspection cannot overwrite a
+terminal result. Retryable ACKs after acceptance fail closed instead of
+starting another attempt for work that may already be running.
+
 Claude native `peer_message_status` receipts are matched only to an exact
 outbound transport message ID and retained as bounded transport evidence.
 `held`, `denied`, `expired`, and `delivered` never become a model ACK or cause
