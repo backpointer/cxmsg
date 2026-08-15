@@ -207,17 +207,23 @@ function validPlan(plan) {
   );
 }
 
-function validMentionSelection(selection) {
+function validTeamCastSelection(selection) {
+  const recipientLimit =
+    selection?.wakePolicy === "mention-wake"
+      ? MENTION_LIMIT
+      : selection?.wakePolicy === "wake-all"
+        ? RECIPIENT_LIMIT
+        : 0;
   return Boolean(
     selection?.version === 1 &&
       UUID_PATTERN.test(selection.selectionId || "") &&
       UUID_PATTERN.test(selection.planId || "") &&
       NODE_KEY_PATTERN.test(selection.senderNodeKey || "") &&
       UUID_PATTERN.test(selection.projectId || "") &&
-      selection.wakePolicy === "mention-wake" &&
+      ["mention-wake", "wake-all"].includes(selection.wakePolicy) &&
       Array.isArray(selection.recipientNodeKeys) &&
       selection.recipientNodeKeys.length >= 1 &&
-      selection.recipientNodeKeys.length <= MENTION_LIMIT &&
+      selection.recipientNodeKeys.length <= recipientLimit &&
       selection.recipientNodeKeys.every((nodeKey) =>
         NODE_KEY_PATTERN.test(nodeKey),
       ) &&
@@ -312,19 +318,19 @@ function secureReadSelection(filename) {
       return null;
     }
     const selection = JSON.parse(readFileSync(filename, "utf8"));
-    return validMentionSelection(selection) ? selection : null;
+    return validTeamCastSelection(selection) ? selection : null;
   } catch {
     return null;
   }
 }
 
 function writeSelection(selection) {
-  if (!validMentionSelection(selection)) {
-    throw new Error("invalid Team Cast mention selection");
+  if (!validTeamCastSelection(selection)) {
+    throw new Error("invalid Team Cast selection");
   }
   const serialized = `${JSON.stringify(selection, null, 2)}\n`;
   if (Buffer.byteLength(serialized, "utf8") > PLAN_MAX_BYTES) {
-    throw new Error("Team Cast mention selection exceeds its bounded size");
+    throw new Error("Team Cast selection exceeds its bounded size");
   }
   const destination = selectionPath(selection.selectionId);
   const temporary = `${destination}.${randomUUID()}.tmp`;
@@ -353,6 +359,41 @@ function writeSelection(selection) {
     closeSync(directoryDescriptor);
   }
   return selection;
+}
+
+async function persistSelection(selection) {
+  ensureStorage();
+  return withFileLock(TEAM_CAST_SELECTION_LOCK_PATH, async () => {
+    const names = readdirSync(TEAM_CAST_SELECTIONS_DIR).filter((name) =>
+      name.endsWith(".json"),
+    );
+    if (names.length > PLAN_LIMIT) {
+      throw new Error("Team Cast selection limit exceeded");
+    }
+    const existing = secureReadSelection(selectionPath(selection.selectionId));
+    if (existing) {
+      if (
+        existing.planId !== selection.planId ||
+        existing.senderNodeKey !== selection.senderNodeKey ||
+        existing.wakePolicy !== selection.wakePolicy ||
+        existing.recipientSetSha256 !== selection.recipientSetSha256
+      ) {
+        throw new Error(
+          `Team Cast selection idempotency conflict: ${selection.selectionId}`,
+        );
+      }
+      return { selection: existing, created: false };
+    }
+    if (existsSync(selectionPath(selection.selectionId))) {
+      throw new Error(
+        `Team Cast selection failed validation: ${selection.selectionId}`,
+      );
+    }
+    if (names.length >= PLAN_LIMIT) {
+      throw new Error("Team Cast selection limit reached");
+    }
+    return { selection: writeSelection(selection), created: true };
+  });
 }
 
 function exactLiveNode(nodeKey, projectId) {
@@ -648,40 +689,49 @@ export async function resolveTeamCastMentionSelection({
     createdAt: now,
     expiresAt: plan.expiresAt,
   };
-  ensureStorage();
-  return withFileLock(TEAM_CAST_SELECTION_LOCK_PATH, async () => {
-    const names = readdirSync(TEAM_CAST_SELECTIONS_DIR).filter((name) =>
-      name.endsWith(".json"),
-    );
-    if (names.length > PLAN_LIMIT) {
-      throw new Error("Team Cast mention selection limit exceeded");
-    }
-    const existing = secureReadSelection(selectionPath(selectionId));
-    if (existing) {
-      if (
-        existing.planId !== selection.planId ||
-        existing.senderNodeKey !== selection.senderNodeKey ||
-        existing.recipientSetSha256 !== selection.recipientSetSha256
-      ) {
-        throw new Error(
-          `Team Cast mention selection idempotency conflict: ${selectionId}`,
-        );
-      }
-      return { selection: existing, created: false };
-    }
-    if (existsSync(selectionPath(selectionId))) {
-      throw new Error(
-        `Team Cast mention selection failed validation: ${selectionId}`,
-      );
-    }
-    if (names.length >= PLAN_LIMIT) {
-      throw new Error("Team Cast mention selection limit reached");
-    }
-    return { selection: writeSelection(selection), created: true };
-  });
+  return persistSelection(selection);
 }
 
-export function readTeamCastMentionSelection(selectionId) {
+export async function resolveTeamCastWakeAllSelection({
+  planId,
+  senderNodeKey,
+  selectionId = randomUUID(),
+  now = new Date().toISOString(),
+}) {
+  planId = validateUuid("Team Cast plan id", planId);
+  selectionId = validateUuid("Team Cast selection id", selectionId);
+  senderNodeKey = normalizeNodeKey(senderNodeKey);
+  if (!Number.isFinite(Date.parse(now))) {
+    throw new Error("Team Cast selection timestamp is invalid");
+  }
+  const plan = readTeamCastPlan(planId);
+  if (!plan) throw new Error(`unknown Team Cast plan: ${planId}`);
+  if (plan.senderNodeKey !== senderNodeKey) {
+    throw new Error("Team Cast selection sender does not own the plan");
+  }
+  if (Date.parse(plan.expiresAt) <= Date.parse(now)) {
+    throw new Error("Team Cast plan expired before wake-all selection");
+  }
+  for (const nodeKey of plan.recipientNodeKeys) {
+    exactLiveNode(nodeKey, plan.projectId);
+  }
+  const selection = {
+    version: 1,
+    selectionId,
+    planId,
+    senderNodeKey,
+    projectId: plan.projectId,
+    wakePolicy: "wake-all",
+    recipientNodeKeys: [...plan.recipientNodeKeys],
+    recipientSetSha256: plan.recipientSetSha256,
+    estimatedWakeTurns: plan.estimatedWakeTurns,
+    createdAt: now,
+    expiresAt: plan.expiresAt,
+  };
+  return persistSelection(selection);
+}
+
+export function readTeamCastSelection(selectionId) {
   if (!existsSync(TEAM_CAST_SELECTIONS_DIR)) return null;
   for (const directory of [TEAM_CAST_DIR, TEAM_CAST_SELECTIONS_DIR]) {
     assertPrivateDirectory(directory);
@@ -689,18 +739,22 @@ export function readTeamCastMentionSelection(selectionId) {
   const selection = secureReadSelection(selectionPath(selectionId));
   if (!selection && existsSync(selectionPath(selectionId))) {
     throw new Error(
-      `Team Cast mention selection failed validation: ${selectionId}`,
+      `Team Cast selection failed validation: ${selectionId}`,
     );
   }
   return selection;
 }
 
-export function publicTeamCastMentionSelection(
+export function readTeamCastMentionSelection(selectionId) {
+  return readTeamCastSelection(selectionId);
+}
+
+export function publicTeamCastSelection(
   selection,
   { includeRecipients = false } = {},
 ) {
-  if (!validMentionSelection(selection)) {
-    throw new Error("invalid Team Cast mention selection");
+  if (!validTeamCastSelection(selection)) {
+    throw new Error("invalid Team Cast selection");
   }
   return {
     version: selection.version,
@@ -719,6 +773,10 @@ export function publicTeamCastMentionSelection(
       ? { recipientNodeKeys: [...selection.recipientNodeKeys] }
       : {}),
   };
+}
+
+export function publicTeamCastMentionSelection(selection, options = {}) {
+  return publicTeamCastSelection(selection, options);
 }
 
 export async function prepareTeamCastMentionMessage(
@@ -750,15 +808,31 @@ export async function prepareTeamCastMentionMessage(
     );
   }
   return withRetentionWriter(async () => {
-    const selection = readTeamCastMentionSelection(selectionId);
+    const selection = readTeamCastSelection(selectionId);
     if (!selection) {
-      throw new Error(`unknown Team Cast mention selection: ${selectionId}`);
+      throw new Error(`unknown Team Cast selection: ${selectionId}`);
     }
     if (selection.senderNodeKey !== senderNodeKey) {
       throw new Error("Team Cast preparation sender does not own the selection");
     }
     if (Date.parse(selection.expiresAt) <= Date.parse(now)) {
-      throw new Error("Team Cast mention selection expired before preparation");
+      throw new Error("Team Cast selection expired before preparation");
+    }
+    const plan = readTeamCastPlan(selection.planId);
+    if (
+      !plan ||
+      plan.senderNodeKey !== selection.senderNodeKey ||
+      plan.projectId !== selection.projectId ||
+      (selection.wakePolicy === "wake-all" &&
+        (selection.recipientSetSha256 !== plan.recipientSetSha256 ||
+          JSON.stringify(selection.recipientNodeKeys) !==
+            JSON.stringify(plan.recipientNodeKeys))) ||
+      (selection.wakePolicy === "mention-wake" &&
+        selection.recipientNodeKeys.some(
+          (nodeKey) => !plan.recipientNodeKeys.includes(nodeKey),
+        ))
+    ) {
+      throw new Error("Team Cast selection no longer matches its fixed plan");
     }
     const senderIdentity = parseNodeKey(senderNodeKey);
     const sender = readNode(senderIdentity.runtimeKind, senderIdentity.nativeId);
@@ -824,7 +898,7 @@ export async function prepareTeamCastMentionMessage(
       now: body.createdAt,
     });
     return {
-      selection: publicTeamCastMentionSelection(selection),
+      selection: publicTeamCastSelection(selection),
       logicalMessageId,
       body: {
         bytes: body.bodyBytes,
@@ -844,6 +918,7 @@ export async function dispatchPreparedTeamCastMessage(
     preflightRecipient,
     dispatchRecipient,
     bodyRead = readWholeMessageBody,
+    scheduleRecipient = scheduleTeamCastRecipientDelivery,
   },
 ) {
   logicalMessageId = validateUuid("logical message id", logicalMessageId);
@@ -907,17 +982,27 @@ export async function dispatchPreparedTeamCastMessage(
     }
     const context = contexts.get(delivery.targetNodeKey);
     if (context?.scheduleWakePolicy === "when-idle") {
-      const scheduled = await scheduleTeamCastRecipientDelivery(
-        logicalMessageId,
-        delivery.targetNodeKey,
-        { now },
-      );
-      outcomes.push({
-        targetNodeKey: delivery.targetNodeKey,
-        status: "scheduled",
-        attempted: false,
-        scheduled: scheduled.scheduled,
-      });
+      try {
+        const scheduled = await scheduleRecipient(
+          logicalMessageId,
+          delivery.targetNodeKey,
+          { now },
+        );
+        outcomes.push({
+          targetNodeKey: delivery.targetNodeKey,
+          status: "scheduled",
+          attempted: false,
+          scheduled: scheduled.scheduled,
+        });
+      } catch {
+        outcomes.push({
+          targetNodeKey: delivery.targetNodeKey,
+          status: "schedule_failed",
+          attempted: false,
+          scheduled: false,
+          errorCode: "ESCHEDULEFAILED",
+        });
+      }
       continue;
     }
     const begun = await beginTeamCastRecipientDelivery(

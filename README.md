@@ -541,6 +541,8 @@ cxmsg team resolve --from codex:<uuid> \
 cxmsg team plan <plan-uuid> --json
 cxmsg team select-mentions --plan <plan-uuid> \
   --from codex:<uuid> --mention codex:<uuid> --json
+cxmsg team select-all --plan <plan-uuid> \
+  --from codex:<uuid> --json
 cxmsg team prepare --selection <selection-uuid> \
   --from codex:<uuid> --logical-message-id <uuid> -- \
   "Review handoff pointer abc123"
@@ -552,21 +554,32 @@ Default output exposes only the recipient count and set digest. Use
 `--recipients` for an explicit owner-local identity listing. Plans expire after
 15 minutes and cannot be rebound to a changed selector. Explicit mentions use
 stable Node keys only and produce another zero-delivery fixed subset; they do
-not parse names from prose. Preparation stores the body and one exact
+not parse names from prose. `select-all` is a separate explicit operation that
+copies the plan's complete frozen recipient set, up to 64 Nodes. Both selection
+commands start zero Deliveries and expose `estimatedWakeTurns` before body
+persistence. Preparation stores the body and one exact
 per-recipient Ledger batch. Explicit dispatch supports Codex and Claude
-recipients, performs an all-recipient
-identity/transport preflight, and then records independent per-recipient
+recipients, performs an all-recipient identity/transport preflight, and then
+records independent per-recipient
 outcomes. It never steers a Busy Codex turn or redrives an existing attempt.
 Codex acceptance records `turn_started`; Claude frame acceptance records
 `transport_delivered` plus a correlated Claude Delivery Job ID. That job, not
-the Team Cast state, tracks ACK, overload retry, and later completion. Wake-all
-is not enabled by this release. By default a Busy Codex recipient rejects the
+the Team Cast state, tracks ACK, overload retry, and later completion. By
+default a Busy Codex recipient rejects the
 whole preflight with zero attempts. `--when-busy when-idle` instead moves only
 that explicit recipient into the existing Delivery Ledger/Scheduler claim
 protocol; it never steers the active turn, creates a second queue, or schedules
 Claude recipients. The original 15-minute Team Cast expiry remains the fallback
 deadline. See
 [Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md).
+
+Preparation also reports `estimatedFanoutPayloadBytes`, calculated as Message
+Body bytes multiplied by the fixed recipient count. This is a conservative
+payload ceiling, not an exact token forecast: stored-body references, envelope
+metadata, tokenizer behavior, and each recipient's existing context change the
+actual token cost. A failed per-recipient Busy schedule is reported as
+`schedule_failed` and remains durably `prepared`; siblings are not hidden or
+rolled back, and retry remains explicit.
 
 When a Directory Project exists, `cxmsg route bind` also pins the binding to
 the private Project UUID and stable Codex Node key. Reusing the same routing

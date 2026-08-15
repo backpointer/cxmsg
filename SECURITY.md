@@ -336,6 +336,13 @@ rechecks lifecycle and Project identity, and rejects duplicates. The selection
 remains a zero-delivery intent: its `mention-wake` label cannot itself wake a
 model, invoke a transport, or establish authority.
 
+Wake-all is also a separate explicit selection, never an alias for plan
+resolution or preparation. It copies exactly the immutable plan recipient set,
+rejects policy-changing selection-ID reuse, and is bounded to 64 stable Nodes.
+The selection output exposes its maximum wake-turn count while default output
+continues to redact recipient identities. Selection, preparation, and dispatch
+remain separate actions; no plan or selection possession creates authority.
+
 Team Cast preparation persists the Message Body and the complete recipient
 batch before dispatch. Its `prepared` Delivery state is intentionally rejected
 by the generic immediate API and ignored by the Scheduler, so batch creation
@@ -368,6 +375,10 @@ body digest verification, successor rejection, and expiry handling. Scheduler
 restart rebuilds the same journal, and a Busy race releases the unused claim
 without creating an attempt. Node Tombstone, Project mismatch, or successor
 replacement blocks delivery rather than following a new identity.
+If one Busy fallback cannot enter the bounded target lane, that recipient stays
+`prepared` with a visible `schedule_failed` result. No attempt or wake is
+recorded, siblings retain independent outcomes, and there is no automatic
+retry.
 
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after

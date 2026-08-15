@@ -74,6 +74,14 @@ cxmsg team select-mentions --plan <plan-uuid> \
 cxmsg team selection <selection-uuid> --json
 ```
 
+Select every frozen plan recipient without delivery:
+
+```bash
+cxmsg team select-all --plan <plan-uuid> \
+  --from codex:<uuid> \
+  --json
+```
+
 Mention selection accepts 1–16 exact stable Node keys, rejects duplicates and
 identities outside the frozen plan, and rechecks each selected Node's lifecycle
 and Project. It stores only an immutable recipient subset and digest. It does
@@ -81,6 +89,12 @@ not parse prose or infer `@name` aliases, so a display-name collision cannot
 change the recipient. It also starts zero Deliveries and zero turns; the
 subsequent multi-recipient Ledger and dispatch gates are not implemented by
 this command.
+
+Wake-all uses the same selection store but a distinct `wake-all` policy. Its
+recipient list and digest must equal the complete immutable parent Plan, and it
+supports at most 64 recipients. Reusing a selection ID across `mention-wake`
+and `wake-all` is an idempotency conflict even when the recipient set happens to
+match. Wake-all selection is still zero-delivery and zero-turn metadata.
 
 Prepare the Message Body and all recipient-specific Ledger entries without
 dispatching them:
@@ -102,6 +116,12 @@ changed content, routing evidence, or recipients is a conflict.
 This crash-safe preparation seam reserves Ledger quota for later per-recipient
 evidence but still reports `deliveryStarted: false`. It is not transport
 delivery, model receipt, or task completion.
+
+Preparation reports `estimatedWakeTurns` and
+`estimatedFanoutPayloadBytes = bodyBytes × recipientCount`. The latter is a
+conservative payload ceiling rather than an exact token estimate; body-reference
+projection, envelope overhead, tokenizer differences, and existing context are
+not predicted.
 
 Dispatch prepared Codex or Claude recipients explicitly:
 
@@ -143,9 +163,14 @@ A Busy race releases the claim with zero attempts. The frozen Team expiry is
 also the scheduled deadline; expiry becomes terminal without target access.
 Claude recipients are not placed in this Codex-only fallback.
 
+If a selected Busy recipient cannot enter its bounded Scheduler lane, dispatch
+reports `schedule_failed` for that recipient and leaves its durable state as
+`prepared`. Other recipients continue independently. The failure starts no
+attempt and is never retried automatically.
+
 The JSON result includes `deliveryStarted: false` when resolving. Membership,
 role, and plan possession are coordination metadata only; none authorizes work,
 grants a permission, approves a prompt, or expands a peer's authority.
 
-Explicit wake-all, `after-turn`/`after-job` Team policies, and digest composition
-remain separately gated future work.
+`after-turn`/`after-job` Team policies and digest composition remain separately
+gated future work.

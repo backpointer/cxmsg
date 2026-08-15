@@ -73,6 +73,10 @@ they carry different authority and delivery semantics.
 - **Team Cast Mention Selection**: a bounded immutable subset of an unexpired
   Team Cast Plan chosen by exact stable Node keys. It estimates possible wake
   turns but is not itself a Delivery or wake operation.
+- **Team Cast Wake-All Selection**: an explicit immutable copy of every frozen
+  recipient in an unexpired Team Cast Plan. It is bounded to 64 Nodes and
+  exposes the maximum model-turn count before any body or Delivery is created.
+  It is not an implicit broadcast, authority, or Delivery operation.
 - **Prepared Team Cast Delivery**: a recipient-specific entry committed with
   every sibling recipient in one Ledger batch after body persistence but before
   transport. Prepared state has no attempt, claim, receipt, or authority.

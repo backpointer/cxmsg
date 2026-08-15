@@ -38,6 +38,7 @@ export const DELIVERY_LEDGER_MAX_SCAN_BYTES = 256 * 1024 * 1024;
 export const DELIVERY_LEDGER_MAX_RECORD_BYTES = 256 * 1024;
 export const DELIVERY_LEDGER_EVENT_RESERVE_BYTES = 4 * 1024;
 export const MAX_ORDINARY_DELIVERY_ATTEMPTS = 2;
+export const TEAM_CAST_RECIPIENT_LIMIT = 64;
 export { SCHEDULED_DELIVERY_PER_TARGET_LIMIT };
 
 export const DELIVERY_LEDGER_DIR = path.join(CXMSG_STATE_DIR, "delivery-ledger");
@@ -286,10 +287,10 @@ function validTeamCastEnvelope(teamCast, message) {
       UUID_PATTERN.test(teamCast.planId || "") &&
       UUID_PATTERN.test(teamCast.selectionId || "") &&
       UUID_PATTERN.test(teamCast.projectId || "") &&
-      teamCast.wakePolicy === "mention-wake" &&
+      ["mention-wake", "wake-all"].includes(teamCast.wakePolicy) &&
       Array.isArray(teamCast.recipientNodeKeys) &&
       teamCast.recipientNodeKeys.length >= 1 &&
-      teamCast.recipientNodeKeys.length <= 16 &&
+      teamCast.recipientNodeKeys.length <= TEAM_CAST_RECIPIENT_LIMIT &&
       teamCast.recipientNodeKeys.every((nodeKey) =>
         NODE_KEY_PATTERN.test(nodeKey),
       ) &&
@@ -372,7 +373,7 @@ function validPreparedTeamDelivery(delivery, message) {
       delivery.replyHandle === null &&
       delivery.admissionState === "admitted" &&
       delivery.admissionReason === "team_cast_plan" &&
-      delivery.wakePolicy === "mention-wake" &&
+      delivery.wakePolicy === message.teamCast.wakePolicy &&
       delivery.state === "prepared" &&
       validTimestamp(delivery.createdAt) &&
       delivery.updatedAt === delivery.createdAt &&
@@ -834,7 +835,7 @@ function indexProjectionDigest(projection) {
   return createHash("sha256").update(JSON.stringify(projection)).digest("hex");
 }
 
-function validTeamDeliveryProjection(candidate, messageId) {
+function validTeamDeliveryProjection(candidate, messageId, initialWakePolicy) {
   if (
     ![
       "prepared",
@@ -858,7 +859,7 @@ function validTeamDeliveryProjection(candidate, messageId) {
   const scheduled = candidate.schedule != null;
   if (
     scheduled !== (candidate.wakePolicy === "when-idle") ||
-    (!scheduled && candidate.wakePolicy !== "mention-wake") ||
+    (!scheduled && candidate.wakePolicy !== initialWakePolicy) ||
     (scheduled &&
       (!validTeamSchedule(candidate.schedule) ||
         candidate.schedule.messageId !== messageId ||
@@ -970,7 +971,7 @@ function validIndexProjection(projection, messageId) {
           errorCode,
           ...initial
         } = candidate;
-        initial.wakePolicy = "mention-wake";
+        initial.wakePolicy = projection.logicalMessage.teamCast.wakePolicy;
         initial.state = "prepared";
         initial.updatedAt = initial.createdAt;
         return initial;
@@ -979,7 +980,11 @@ function validIndexProjection(projection, messageId) {
     return Boolean(
       validBatch(baseBatch) &&
         projection.teamDeliveries.every((candidate) =>
-          validTeamDeliveryProjection(candidate, messageId),
+          validTeamDeliveryProjection(
+            candidate,
+            messageId,
+            projection.logicalMessage.teamCast.wakePolicy,
+          ),
         ),
     );
   }
@@ -1395,16 +1400,17 @@ function applyDeliveryEvent(projected, record) {
     const delivery = projected.teamDeliveries.find(
       (candidate) => candidate.deliveryId === record.deliveryId,
     );
+    const initialWakePolicy = projected.logicalMessage.teamCast.wakePolicy;
     if (
       !delivery ||
-      !["mention-wake", "when-idle"].includes(delivery.wakePolicy)
+      ![initialWakePolicy, "when-idle"].includes(delivery.wakePolicy)
     ) {
       throw new Error(`invalid Team Cast Delivery event: ${record.messageId}`);
     }
     if (record.recordType === "team-delivery-schedule") {
       if (
         !validTeamSchedule(record) ||
-        delivery.wakePolicy !== "mention-wake" ||
+        delivery.wakePolicy !== initialWakePolicy ||
         delivery.state !== "prepared" ||
         delivery.schedule != null ||
         delivery.attempts.length !== 0 ||
@@ -1474,7 +1480,7 @@ function applyDeliveryEvent(projected, record) {
       }
     } else if (record.recordType === "delivery-attempt") {
       const direct =
-        delivery.wakePolicy === "mention-wake" &&
+        delivery.wakePolicy === initialWakePolicy &&
         delivery.state === "prepared" &&
         record.claimId === null;
       const scheduled =
@@ -2169,8 +2175,14 @@ export async function commitPreparedTeamCastDelivery(
   if (!NAME_PATTERN.test(logicalMessage?.from || "")) {
     throw new Error("invalid Team Cast Ledger sender");
   }
-  if (!Array.isArray(recipients) || recipients.length < 1 || recipients.length > 16) {
-    throw new Error("Team Cast Delivery requires 1-16 fixed recipients");
+  if (
+    !Array.isArray(recipients) ||
+    recipients.length < 1 ||
+    recipients.length > TEAM_CAST_RECIPIENT_LIMIT
+  ) {
+    throw new Error(
+      `Team Cast Delivery requires 1-${TEAM_CAST_RECIPIENT_LIMIT} fixed recipients`,
+    );
   }
   if (!validTimestamp(now)) {
     throw new Error("invalid Team Cast Delivery timestamp");
@@ -2244,7 +2256,7 @@ export async function commitPreparedTeamCastDelivery(
         replyHandle: null,
         admissionState: "admitted",
         admissionReason: "team_cast_plan",
-        wakePolicy: "mention-wake",
+        wakePolicy: logicalMessage.teamCast.wakePolicy,
         state: "prepared",
         createdAt: now,
         updatedAt: now,

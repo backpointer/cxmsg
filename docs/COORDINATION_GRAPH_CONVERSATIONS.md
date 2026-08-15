@@ -804,6 +804,16 @@ releases the claim before any attempt, restart rebuilds the journal, and a
 terminal Team outcome clears the live claim. `after-turn`, `after-job`, and
 wake-all remain separate gates.
 
+Version 0.39.0 adds explicit wake-all as another immutable, zero-delivery
+selection rather than an implicit plan side effect. `select-all` copies exactly
+the plan's frozen recipient set, is bounded to 64 Nodes, and preserves a
+policy-specific idempotency identity so an all-recipient mention cannot be
+reinterpreted as wake-all. Preparation reports both the maximum possible model
+turns and a conservative body-by-recipient payload-byte ceiling. Dispatch
+reuses the same cross-runtime recipient attempts and Codex `when-idle`
+fallback. A saturated fallback remains `prepared` with visible
+`schedule_failed` output while sibling outcomes continue independently.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

@@ -53,6 +53,14 @@ const ids = {
   claudeMessage: "e1345678-6234-4234-8234-123456789abc",
   claudeTransportMismatch: "f1345678-6234-4234-8234-123456789abc",
   scheduledMessage: "12345678-7234-4234-8234-123456789abc",
+  wakeAllSelection: "22345678-7234-4234-8234-123456789abc",
+  cliWakeAllSelection: "32345678-7234-4234-8234-123456789abc",
+  wakeAllMessage: "42345678-7234-4234-8234-123456789abc",
+  wakeAllTurnFirst: "52345678-7234-4234-8234-123456789abc",
+  wakeAllScheduleFailure: "62345678-7234-4234-8234-123456789abc",
+  wakeAllWideMessage: "72345678-7234-4234-8234-123456789abc",
+  wakeAllWidePlan: "82345678-7234-4234-8234-123456789abc",
+  wakeAllWideSelection: "92345678-7234-4234-8234-123456789abc",
 };
 const keys = Object.fromEntries(
   ["sender", "first", "second", "cross"].map((name) => [
@@ -266,6 +274,39 @@ test("mention metadata selects only an explicit bounded plan subset", async () =
   );
 });
 
+test("wake-all freezes the complete plan and exposes its wake ceiling", async () => {
+  const result = await teams.resolveTeamCastWakeAllSelection({
+    planId: ids.groupPlan,
+    senderNodeKey: keys.sender,
+    selectionId: ids.wakeAllSelection,
+  });
+  assert.equal(result.created, true);
+  const plan = teams.readTeamCastPlan(ids.groupPlan);
+  assert.deepEqual(result.selection.recipientNodeKeys, plan.recipientNodeKeys);
+  assert.equal(result.selection.recipientSetSha256, plan.recipientSetSha256);
+  const output = teams.publicTeamCastSelection(result.selection);
+  assert.equal(output.wakePolicy, "wake-all");
+  assert.equal(output.recipientCount, 2);
+  assert.equal(output.estimatedWakeTurns, 2);
+  assert.equal("recipientNodeKeys" in output, false);
+
+  const repeated = await teams.resolveTeamCastWakeAllSelection({
+    planId: ids.groupPlan,
+    senderNodeKey: keys.sender,
+    selectionId: ids.wakeAllSelection,
+  });
+  assert.equal(repeated.created, false);
+  await assert.rejects(
+    teams.resolveTeamCastMentionSelection({
+      planId: ids.groupPlan,
+      senderNodeKey: keys.sender,
+      mentionedNodeKeys: plan.recipientNodeKeys,
+      selectionId: ids.wakeAllSelection,
+    }),
+    /idempotency conflict/,
+  );
+});
+
 test("CLI mention selection remains an explicit zero-delivery operation", () => {
   const result = spawnSync(
     process.execPath,
@@ -292,6 +333,35 @@ test("CLI mention selection remains an explicit zero-delivery operation", () => 
   const output = JSON.parse(result.stdout);
   assert.equal(output.deliveryStarted, false);
   assert.equal(output.recipientCount, 1);
+  assert.equal("recipientNodeKeys" in output, false);
+});
+
+test("CLI wake-all selection remains explicit and starts zero delivery", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.resolve("bin/cxmsg.js"),
+      "team",
+      "select-all",
+      "--plan",
+      ids.groupPlan,
+      "--from",
+      keys.sender,
+      "--selection-id",
+      ids.cliWakeAllSelection,
+      "--json",
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, CXMSG_STATE_DIR: stateDir },
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.wakePolicy, "wake-all");
+  assert.equal(output.deliveryStarted, false);
+  assert.equal(output.recipientCount, 2);
+  assert.equal(output.estimatedWakeTurns, 2);
   assert.equal("recipientNodeKeys" in output, false);
 });
 
@@ -418,6 +488,84 @@ test("one Ledger batch prepares every selected Team Cast recipient", async () =>
   );
 });
 
+test("wake-all Ledger batches remain bounded at 64 fixed recipients", async () => {
+  const recipientNodeKeys = Array.from(
+    { length: ledger.TEAM_CAST_RECIPIENT_LIMIT },
+    (_, index) =>
+      `codex:${String(index + 1).padStart(8, "0")}-1234-4234-8234-123456789abc`,
+  ).sort();
+  const route = {
+    schema_version: 1,
+    kind: "team-cast",
+    plan_id: ids.wakeAllWidePlan,
+    selection_id: ids.wakeAllWideSelection,
+    project_id: ids.firstProject,
+    wake_policy: "wake-all",
+    expiry: "2026-08-15T00:15:00.000Z",
+  };
+  const logicalMessage = {
+    messageId: ids.wakeAllWideMessage,
+    from: keys.sender,
+    senderThreadId: ids.sender,
+    senderNodeKey: keys.sender,
+    body: {
+      messageId: ids.wakeAllWideMessage,
+      bytes: 1,
+      sha256: createHash("sha256").update("x").digest("hex"),
+      contentRef: `cxmsg-message:${ids.wakeAllWideMessage}`,
+    },
+    route,
+    routeFingerprint: createHash("sha256")
+      .update(JSON.stringify(route))
+      .digest("hex"),
+    createdAt: "2026-08-15T00:00:00.000Z",
+    teamCast: {
+      version: 1,
+      planId: ids.wakeAllWidePlan,
+      selectionId: ids.wakeAllWideSelection,
+      projectId: ids.firstProject,
+      wakePolicy: "wake-all",
+      recipientNodeKeys,
+      recipientSetSha256: createHash("sha256")
+        .update(JSON.stringify(recipientNodeKeys))
+        .digest("hex"),
+      expiresAt: "2026-08-15T00:15:00.000Z",
+    },
+  };
+  const committed = await ledger.commitPreparedTeamCastDelivery({
+    logicalMessage,
+    recipients: recipientNodeKeys.map((nodeKey) => ({
+      nodeKey,
+      targetThreadId: nodeKey.slice("codex:".length),
+    })),
+    now: logicalMessage.createdAt,
+  });
+  assert.equal(
+    committed.record.teamDeliveries.length,
+    ledger.TEAM_CAST_RECIPIENT_LIMIT,
+  );
+  await assert.rejects(
+    ledger.commitPreparedTeamCastDelivery({
+      logicalMessage: {
+        ...logicalMessage,
+        messageId: "a2345678-7234-4234-8234-123456789abc",
+      },
+      recipients: [
+        ...recipientNodeKeys.map((nodeKey) => ({
+          nodeKey,
+          targetThreadId: nodeKey.slice("codex:".length),
+        })),
+        {
+          nodeKey: "codex:ffffffff-1234-4234-8234-123456789abc",
+          targetThreadId: "ffffffff-1234-4234-8234-123456789abc",
+        },
+      ],
+      now: logicalMessage.createdAt,
+    }),
+    /requires 1-64 fixed recipients/,
+  );
+});
+
 test("Team Cast preparation persists body and batch without dispatch", async () => {
   const result = await teams.prepareTeamCastMentionMessage({
     selectionId: ids.mentionSelection,
@@ -469,6 +617,11 @@ test("CLI prepares Team Cast evidence and reports zero delivery", () => {
   assert.equal(output.status, "prepared");
   assert.equal(output.deliveryStarted, false);
   assert.equal(output.recipientCount, 1);
+  assert.equal(output.estimatedWakeTurns, 1);
+  assert.equal(
+    output.estimatedFanoutPayloadBytes,
+    Buffer.byteLength("bounded handoff pointer", "utf8"),
+  );
   assert.equal("message" in output, false);
 });
 
@@ -678,6 +831,106 @@ test("a Busy Team Cast recipient can enter the shared when-idle ledger", async (
       (delivery) => delivery.targetNodeKey === keys.second,
     ).state,
     "scheduled",
+  );
+});
+
+test("wake-all reuses recipient dispatch and Busy fallback without implicit steering", async () => {
+  const prepared = await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.wakeAllSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.wakeAllMessage,
+    message: "explicitly wake every frozen plan recipient",
+  });
+  assert.equal(prepared.selection.wakePolicy, "wake-all");
+  assert.equal(prepared.selection.estimatedWakeTurns, 2);
+  assert.equal(prepared.ledger.teamDeliveries.length, 2);
+  assert.ok(
+    prepared.ledger.teamDeliveries.every(
+      (delivery) => delivery.wakePolicy === "wake-all",
+    ),
+  );
+
+  const result = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.wakeAllMessage },
+    {
+      preflightRecipient: async ({ targetNodeKey }) =>
+        targetNodeKey === keys.second
+          ? {
+              transport: "codex-app-server",
+              scheduleWakePolicy: "when-idle",
+            }
+          : { transport: "codex-app-server" },
+      dispatchRecipient: async ({ targetNodeKey }) => {
+        assert.equal(targetNodeKey, keys.first);
+        return {
+          state: "turn_started",
+          turnId: ids.wakeAllTurnFirst,
+          transportResult: "started",
+          errorCode: null,
+        };
+      },
+    },
+  );
+  assert.deepEqual(
+    result.record.teamDeliveries.map((delivery) => delivery.state).sort(),
+    ["scheduled", "turn_started"],
+  );
+  const scheduled = result.record.teamDeliveries.find(
+    (delivery) => delivery.targetNodeKey === keys.second,
+  );
+  assert.equal(scheduled.wakePolicy, "when-idle");
+  assert.equal(scheduled.schedule.wakePolicy, "when-idle");
+  await ledger.rebuildDeliveryLedgerIndex();
+});
+
+test("one wake-all schedule failure stays visible without hiding siblings", async () => {
+  await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.wakeAllSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.wakeAllScheduleFailure,
+    message: "keep one saturated recipient prepared",
+  });
+  const result = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.wakeAllScheduleFailure },
+    {
+      preflightRecipient: async ({ targetNodeKey }) =>
+        targetNodeKey === keys.second
+          ? {
+              transport: "codex-app-server",
+              scheduleWakePolicy: "when-idle",
+            }
+          : { transport: "codex-app-server" },
+      scheduleRecipient: async () => {
+        throw new Error("injected queue saturation");
+      },
+      dispatchRecipient: async () => ({
+        state: "turn_started",
+        turnId: ids.wakeAllTurnFirst,
+        transportResult: "started",
+        errorCode: null,
+      }),
+    },
+  );
+  const failed = result.outcomes.find(
+    (outcome) => outcome.targetNodeKey === keys.second,
+  );
+  assert.deepEqual(failed, {
+    targetNodeKey: keys.second,
+    status: "schedule_failed",
+    attempted: false,
+    scheduled: false,
+    errorCode: "ESCHEDULEFAILED",
+  });
+  const retained = result.record.teamDeliveries.find(
+    (delivery) => delivery.targetNodeKey === keys.second,
+  );
+  assert.equal(retained.state, "prepared");
+  assert.equal(retained.attempts.length, 0);
+  assert.equal(
+    result.record.teamDeliveries.find(
+      (delivery) => delivery.targetNodeKey === keys.first,
+    ).state,
+    "turn_started",
   );
 });
 

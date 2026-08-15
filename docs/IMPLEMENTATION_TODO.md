@@ -206,8 +206,9 @@ model wake-ups and exact per-recipient evidence.
 - [x] Add cross-runtime `mention-wake` with 1–16 exact stable-Node mentions,
       Codex `turn_started`, and Claude `transport_delivered` evidence linked to
       a separate Claude Delivery Job.
-- [ ] Add explicit `wake-all` with per-recipient fallback and token-cost
-      visibility.
+- [x] Add explicit `wake-all` over the complete frozen plan, bounded to 64
+      recipients, with per-recipient fallback outcomes, wake-turn visibility,
+      and a conservative fan-out payload-byte ceiling.
 - [x] Add an explicit Codex `when-idle` Busy fallback per recipient by reusing
       the shared Delivery Ledger and Scheduler claim protocol.
 - [ ] Add `after-turn` and `after-job` per-recipient policies without creating

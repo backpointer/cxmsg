@@ -97,13 +97,14 @@ import {
 } from "../src/group-conversations.js";
 import {
   dispatchPreparedTeamCastMessage,
-  publicTeamCastMentionSelection,
+  publicTeamCastSelection,
   publicTeamCastPlan,
   prepareTeamCastMentionMessage,
-  readTeamCastMentionSelection,
+  readTeamCastSelection,
   readTeamCastPlan,
   resolveTeamCastMentionSelection,
   resolveTeamCastPlan,
+  resolveTeamCastWakeAllSelection,
 } from "../src/team-cast.js";
 import {
   activeJobsForTarget,
@@ -315,6 +316,8 @@ function usage(exitCode = 0) {
   cxmsg team select-mentions --plan <plan-id> --from <node-key>
              --mention <node-key> [--mention <node-key>...] [--selection-id <uuid>]
              [--recipients] [--json]
+  cxmsg team select-all --plan <plan-id> --from <node-key>
+             [--selection-id <uuid>] [--recipients] [--json]
   cxmsg team selection <selection-id> [--recipients] [--json]
   cxmsg team prepare --selection <selection-id> --from <node-key>
              [--logical-message-id <uuid>] [--json] -- <message...>
@@ -3688,12 +3691,18 @@ async function commandTeam(args) {
       created: result.created,
       deliveryStarted: false,
       body: result.body,
+      estimatedWakeTurns: result.selection.estimatedWakeTurns,
+      estimatedFanoutPayloadBytes:
+        result.body.bytes * result.selection.recipientCount,
     };
     process.stdout.write(
       jsonOutput
         ? `${JSON.stringify(output, null, 2)}\n`
         : `${result.created ? "prepared" : "unchanged"}\t${output.logicalMessageId}` +
-          `\trecipients=${output.recipientCount}\tdelivery-started=false\n`,
+          `\trecipients=${output.recipientCount}` +
+          `\twake-ceiling=${output.estimatedWakeTurns}` +
+          `\tpayload-byte-ceiling=${output.estimatedFanoutPayloadBytes}` +
+          `\tdelivery-started=false\n`,
     );
     return;
   }
@@ -3707,17 +3716,17 @@ async function commandTeam(args) {
     ) {
       usage(2);
     }
-    const selection = readTeamCastMentionSelection(selectionId);
+    const selection = readTeamCastSelection(selectionId);
     if (!selection) {
-      throw new Error(`unknown Team Cast mention selection: ${selectionId}`);
+      throw new Error(`unknown Team Cast selection: ${selectionId}`);
     }
-    const output = publicTeamCastMentionSelection(selection, {
+    const output = publicTeamCastSelection(selection, {
       includeRecipients,
     });
     process.stdout.write(
       jsonOutput
         ? `${JSON.stringify(output, null, 2)}\n`
-        : `${output.selectionId}\tmention-wake\trecipients=${output.recipientCount}` +
+        : `${output.selectionId}\t${output.wakePolicy}\trecipients=${output.recipientCount}` +
           `\twake-ceiling=${output.estimatedWakeTurns}\t${output.recipientSetSha256}\n`,
     );
     return;
@@ -3750,7 +3759,7 @@ async function commandTeam(args) {
       ...(selectionId ? { selectionId } : {}),
     });
     const output = {
-      ...publicTeamCastMentionSelection(result.selection, {
+      ...publicTeamCastSelection(result.selection, {
         includeRecipients,
       }),
       created: result.created,
@@ -3761,6 +3770,44 @@ async function commandTeam(args) {
         ? `${JSON.stringify(output, null, 2)}\n`
         : `${result.created ? "selected" : "unchanged"}\t${output.selectionId}` +
           `\trecipients=${output.recipientCount}\twake-ceiling=${output.estimatedWakeTurns}` +
+          `\tdelivery-started=false\n`,
+    );
+    return;
+  }
+  if (operation === "select-all") {
+    let planId = null;
+    let senderNodeKey = null;
+    let selectionId;
+    let includeRecipients = false;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--plan") planId = args.shift();
+      else if (option === "--from") senderNodeKey = stableNodeKey(args.shift());
+      else if (option === "--selection-id") selectionId = args.shift();
+      else if (option === "--recipients") includeRecipients = true;
+      else if (option === "--json") jsonOutput = true;
+      else throw new Error(`unknown Team Cast wake-all option: ${option}`);
+    }
+    if (!planId || !senderNodeKey) {
+      throw new Error("team select-all requires --plan and --from");
+    }
+    const result = await resolveTeamCastWakeAllSelection({
+      planId,
+      senderNodeKey,
+      ...(selectionId ? { selectionId } : {}),
+    });
+    const output = {
+      ...publicTeamCastSelection(result.selection, { includeRecipients }),
+      created: result.created,
+      deliveryStarted: false,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.created ? "selected" : "unchanged"}\t${output.selectionId}` +
+          `\trecipients=${output.recipientCount}` +
+          `\twake-ceiling=${output.estimatedWakeTurns}` +
           `\tdelivery-started=false\n`,
     );
     return;
