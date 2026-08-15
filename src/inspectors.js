@@ -35,6 +35,7 @@ import { processIdentity, processState, serviceEvidence } from "./process-state.
 import { EVENT_LOG_ARCHIVES, EVENT_LOG_MAX_BYTES } from "./runtime.js";
 import { failedProbe } from "./socket-probe.js";
 import { readThreadMetadata } from "./thread-activity.js";
+import { validTurnLifecycleState } from "./turn-lifecycle.js";
 import { CXMSG_VERSION } from "./version.js";
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
@@ -1978,21 +1979,108 @@ export function inspectRouteState({
     }),
   );
   const scheduled = ledger.records.filter((delivery) => delivery.status === "scheduled");
+  const lifecyclePath = path.join(stateDir, "turn-lifecycle.json");
+  const lifecycleMetadata = secureMetadata(lifecyclePath, "file");
+  if (!["missing", "secure"].includes(lifecycleMetadata.status)) {
+    checks.push(
+      metadataFinding(
+        "schedules.lifecycle.metadata",
+        "schedules",
+        "Turn Lifecycle projection",
+        lifecycleMetadata,
+      ),
+    );
+  } else if (lifecycleMetadata.status === "secure") {
+    let lifecycle = null;
+    try {
+      lifecycle = JSON.parse(readFileSync(lifecyclePath, "utf8"));
+    } catch {}
+    const lifecycleValid = validTurnLifecycleState(lifecycle);
+    checks.push(
+      diagnosticCheck({
+        id: "schedules.lifecycle.schema",
+        scope: "schedules",
+        status: lifecycleValid ? "pass" : "fail",
+        summary: lifecycleValid
+          ? "Turn Lifecycle projection is valid and metadata-only"
+          : "Turn Lifecycle projection is invalid",
+        verification: "schema",
+        errorCode: lifecycleValid ? null : "ETURNLIFECYCLESCHEMA",
+        required: false,
+      }),
+    );
+  }
   const schedulerPath = path.join(stateDir, "scheduler.json");
+  const schedulerIntentPath = path.join(stateDir, "scheduler.intent.json");
+  const schedulerIntentMetadata = secureMetadata(schedulerIntentPath, "file");
+  let schedulerIntent = null;
+  if (schedulerIntentMetadata.status === "secure") {
+    try {
+      const candidate = JSON.parse(readFileSync(schedulerIntentPath, "utf8"));
+      if (
+        candidate?.version === 1 &&
+        ["running", "stopped"].includes(candidate.desiredState) &&
+        Number.isFinite(Date.parse(candidate.changedAt || ""))
+      ) {
+        schedulerIntent = candidate;
+      }
+    } catch {}
+  }
+  if (!["missing", "secure"].includes(schedulerIntentMetadata.status)) {
+    checks.push(
+      metadataFinding(
+        "schedules.worker.intent.metadata",
+        "schedules",
+        "Scheduler desired-state record",
+        schedulerIntentMetadata,
+      ),
+    );
+  } else if (schedulerIntentMetadata.status === "secure" && !schedulerIntent) {
+    checks.push(
+      diagnosticCheck({
+        id: "schedules.worker.intent.schema",
+        scope: "schedules",
+        status: "fail",
+        summary: "Scheduler desired-state record is invalid",
+        verification: "schema",
+        errorCode: "ESCHEDULERINTENTSCHEMA",
+        required: false,
+      }),
+    );
+  }
   const schedulerMetadata = secureMetadata(schedulerPath, "file");
   if (schedulerMetadata.status === "missing") {
+    const missingError =
+      schedulerIntent?.desiredState === "running"
+        ? "ESCHEDULERCRASHED"
+        : schedulerIntent?.desiredState === "stopped"
+          ? "ESCHEDULERSTOPPED"
+          : "ESCHEDULERDOWN";
     checks.push(
       diagnosticCheck({
         id: "schedules.worker",
         scope: "schedules",
-        status: scheduled.length > 0 ? "warn" : "pass",
+        status:
+          scheduled.length > 0 || schedulerIntent?.desiredState === "running"
+            ? "warn"
+            : "pass",
         summary:
           scheduled.length > 0
-            ? `${scheduled.length} scheduled Delivery record(s) have no registered scheduler worker`
-            : "No scheduled Deliveries require a scheduler worker",
+            ? schedulerIntent?.desiredState === "running"
+              ? `${scheduled.length} scheduled Delivery record(s) lost their intended scheduler worker`
+              : `${scheduled.length} scheduled Delivery record(s) have no registered scheduler worker`
+            : schedulerIntent?.desiredState === "running"
+              ? "The intended Scheduler worker is missing"
+              : "No scheduled Deliveries require a scheduler worker",
         verification: "metadata",
-        errorCode: scheduled.length > 0 ? "ESCHEDULERDOWN" : null,
-        remediation: scheduled.length > 0 ? "Run cxmsg scheduler start" : null,
+        errorCode:
+          scheduled.length > 0 || schedulerIntent?.desiredState === "running"
+            ? missingError
+            : null,
+        remediation:
+          scheduled.length > 0 || schedulerIntent?.desiredState === "running"
+            ? "Run cxmsg scheduler start"
+            : null,
         required: false,
       }),
     );
@@ -2057,6 +2145,10 @@ export function inspectRouteState({
             : passError
               ? "ESCHEDULERPASS"
               : null;
+      const missingError =
+        schedulerIntent?.desiredState === "stopped"
+          ? "ESCHEDULERSTOPPED"
+          : "ESCHEDULERCRASHED";
       checks.push(
         diagnosticCheck({
           id: "schedules.worker.process",
@@ -2066,7 +2158,7 @@ export function inspectRouteState({
               ? liveStatus
               : workerState === "unverified"
                 ? "unknown"
-                : scheduled.length > 0
+                : scheduled.length > 0 || schedulerIntent?.desiredState === "running"
                   ? "warn"
                   : "pass",
           summary:
@@ -2074,14 +2166,16 @@ export function inspectRouteState({
               ? liveSummary
               : workerState === "unverified"
                 ? "Scheduler worker process cannot be verified by this caller"
-                : "Scheduler worker process is missing",
+                : schedulerIntent?.desiredState === "stopped"
+                  ? "Scheduler worker was intentionally stopped"
+                  : "Scheduler worker exited while its desired state remained running",
           verification: "process",
           errorCode:
             workerState === "alive"
               ? liveError
               : workerState === "unverified"
                 ? "ESCHEDULERUNVERIFIED"
-                : "ESCHEDULEREXITED",
+                : missingError,
           remediation:
             workerState === "alive" && liveStatus === "warn"
               ? "Restart the scheduler from an allowed host context after inspecting its bounded log and Delivery state"

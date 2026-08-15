@@ -9,14 +9,14 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
-import { AppServerClient } from "./app-server-client.js";
+import { AppServerClient, appServerVersion } from "./app-server-client.js";
 import {
   appendDeliveryEvidence,
   beginScheduledDelivery,
   claimScheduledDelivery,
   listDeliveryLedgerIndexed,
   releaseScheduledDeliveryClaim,
+  renewScheduledDeliveryClaim,
 } from "./delivery-ledger.js";
 import {
   SCHEDULER_HEARTBEAT_MS,
@@ -41,12 +41,23 @@ import { CXMSG_STATE_DIR } from "./runtime.js";
 import {
   findThreadTurn,
   isTerminalTurnStatus,
+  listRecentTurns,
   readThreadMetadata,
 } from "./thread-activity.js";
 import { writeCoordinationEvent } from "./observability.js";
+import {
+  beginTurnLifecycleConnection,
+  endTurnLifecycleConnection,
+  observeTurnLifecycleCatchUp,
+  observeTurnLifecycleNotification,
+} from "./turn-lifecycle.js";
 
 export const SCHEDULER_RECORD_PATH = path.join(CXMSG_STATE_DIR, "scheduler.json");
 export const SCHEDULER_LOG_PATH = path.join(CXMSG_STATE_DIR, "scheduler.log");
+export const SCHEDULER_INTENT_PATH = path.join(
+  CXMSG_STATE_DIR,
+  "scheduler.intent.json",
+);
 export const SCHEDULER_LIFECYCLE_LOCK_PATH = path.join(
   CXMSG_STATE_DIR,
   "scheduler.lifecycle.lock",
@@ -84,6 +95,35 @@ export function readSchedulerRecord() {
   } catch {
     return null;
   }
+}
+
+export function readSchedulerIntent() {
+  try {
+    const record = JSON.parse(readFileSync(SCHEDULER_INTENT_PATH, "utf8"));
+    if (
+      record?.version !== 1 ||
+      !["running", "stopped"].includes(record.desiredState) ||
+      !Number.isFinite(Date.parse(record.changedAt || ""))
+    ) {
+      return null;
+    }
+    return record;
+  } catch {
+    return null;
+  }
+}
+
+export function writeSchedulerIntent(desiredState, { now } = {}) {
+  if (!["running", "stopped"].includes(desiredState)) {
+    throw new Error("invalid Scheduler desired state");
+  }
+  const changedAt = now || new Date().toISOString();
+  if (!Number.isFinite(Date.parse(changedAt))) {
+    throw new Error("invalid Scheduler intent timestamp");
+  }
+  const record = { version: 1, desiredState, changedAt };
+  atomicWrite(SCHEDULER_INTENT_PATH, record);
+  return record;
 }
 
 function updateSchedulerHeartbeat(identity, patch = {}) {
@@ -169,31 +209,92 @@ async function eligibleScheduledDeliveries(
   triggerReadiness = scheduledTriggerReadiness,
 ) {
   const firstByTarget = new Map();
-  const expired = [];
-  for (const record of await listDeliveryLedgerIndexed()) {
+  const candidates = (await listDeliveryLedgerIndexed())
+    .filter((record) => {
+      const delivery = record.delivery;
+      return (
+        delivery.admissionState === "admitted" &&
+        ["when-idle", "after-turn", "after-job"].includes(delivery.wakePolicy) &&
+        delivery.state === "scheduled" &&
+        delivery.attempts.length === 0
+      );
+    })
+    .sort((left, right) => {
+      const byCreation = left.delivery.createdAt.localeCompare(right.delivery.createdAt);
+      return byCreation || left.logicalMessage.messageId.localeCompare(right.logicalMessage.messageId);
+    });
+  for (const record of candidates) {
     const delivery = record.delivery;
-    if (
-      delivery.admissionState !== "admitted" ||
-      !["when-idle", "after-turn", "after-job"].includes(delivery.wakePolicy) ||
-      delivery.state !== "scheduled" ||
-      delivery.attempts.length > 0
-    ) {
-      continue;
-    }
-    const expiry = Date.parse(record.logicalMessage.route?.expiry || "");
-    if (Number.isFinite(expiry) && expiry <= now) {
-      expired.push(record);
-      continue;
-    }
-    const readiness = await triggerReadiness(record, client);
-    if (readiness.state !== "eligible") continue;
     const lane = delivery.targetThreadId || delivery.target;
     if (!firstByTarget.has(lane)) firstByTarget.set(lane, record);
   }
-  return [...expired, ...firstByTarget.values()].filter((record) => {
+  const ready = [];
+  for (const record of firstByTarget.values()) {
+    const expiry = Date.parse(record.logicalMessage.route?.expiry || "");
+    if (Number.isFinite(expiry) && expiry <= now) {
+      ready.push(record);
+      continue;
+    }
+    if ((await triggerReadiness(record, client)).state === "eligible") {
+      ready.push(record);
+    }
+  }
+  return ready.filter((record) => {
     const claim = record.delivery.claim;
     return !claim || Date.parse(claim.leaseUntil) <= now;
   });
+}
+
+export async function reconcileTurnLifecycle(
+  client,
+  {
+    readThread = readThreadMetadata,
+    listTurns = listRecentTurns,
+    observe = observeTurnLifecycleCatchUp,
+    limit = 256,
+  } = {},
+) {
+  const targets = new Set();
+  for (const record of await listDeliveryLedgerIndexed()) {
+    if (
+      record.delivery.admissionState === "admitted" &&
+      record.delivery.state === "scheduled" &&
+      record.delivery.attempts.length === 0 &&
+      record.delivery.targetThreadId
+    ) {
+      targets.add(record.delivery.targetThreadId);
+      if (targets.size >= limit) break;
+    }
+  }
+  const outcomes = [];
+  for (const threadId of targets) {
+    try {
+      const thread = await readThread(client, threadId);
+      let page = { data: [], nextCursor: null };
+      let errorCode = null;
+      try {
+        page = await listTurns(client, threadId, {
+          limit: 8,
+          itemsView: "notLoaded",
+        });
+      } catch (error) {
+        errorCode = boundedErrorCode(error);
+      }
+      observe(thread, page);
+      outcomes.push({
+        threadId,
+        state: errorCode ? "metadata-only" : "observed",
+        ...(errorCode ? { errorCode } : {}),
+      });
+    } catch (error) {
+      outcomes.push({
+        threadId,
+        state: "unavailable",
+        errorCode: boundedErrorCode(error),
+      });
+    }
+  }
+  return outcomes;
 }
 
 async function markUnknown(messageId, error, now) {
@@ -216,6 +317,7 @@ export async function dispatchScheduledDelivery(
     readThread = readThreadMetadata,
     deliver = deliverPeerMessageWhenIdle,
     triggerReadiness = scheduledTriggerReadiness,
+    renewClaim = renewScheduledDeliveryClaim,
     log = writeCoordinationEvent,
   } = {},
 ) {
@@ -350,6 +452,12 @@ export async function dispatchScheduledDelivery(
       {
         allowResume,
         beforeStart: async () => {
+          await renewClaim(messageId, {
+            claimId: claimResult.claim.claimId,
+            workerId,
+            leaseMs: SCHEDULER_CLAIM_LEASE_MS,
+            now: new Date(now()).toISOString(),
+          });
           attempt = await beginScheduledDelivery(messageId, {
             claimId: claimResult.claim.claimId,
             workerId,
@@ -376,6 +484,17 @@ export async function dispatchScheduledDelivery(
     });
     return { state: "turn_started", messageId, turnId: result.turnId };
   } catch (error) {
+    if (!attempt && error?.code === "ECLAIMLOST") {
+      await log({
+        kind: "scheduled-delivery",
+        phase: "claim-loss",
+        correlationId: messageId,
+        target: delivery.target,
+        outcome: "stopped",
+        errorCode: "ECLAIMLOST",
+      });
+      return { state: "claim_lost", messageId, errorCode: "ECLAIMLOST" };
+    }
     if ((error instanceof TargetBusyError || error?.code === "ETARGETBUSY") && !attempt) {
       await releaseScheduledDeliveryClaim(messageId, {
         claimId: claimResult.claim.claimId,
@@ -434,6 +553,39 @@ export async function runSchedulerPass(
   return outcomes;
 }
 
+export function createSchedulerWakeSignal() {
+  let pending = false;
+  let waiter = null;
+  return {
+    wake() {
+      if (waiter) {
+        const current = waiter;
+        waiter = null;
+        current();
+      } else {
+        pending = true;
+      }
+    },
+    wait(timeoutMs) {
+      if (pending) {
+        pending = false;
+        return Promise.resolve("event");
+      }
+      return new Promise((resolve) => {
+        const timer = setTimeout(() => {
+          if (waiter === onWake) waiter = null;
+          resolve("poll");
+        }, timeoutMs);
+        const onWake = () => {
+          clearTimeout(timer);
+          resolve("event");
+        };
+        waiter = onWake;
+      });
+    },
+  };
+}
+
 export async function runSchedulerWorker({
   Client = AppServerClient,
   pollMs = SCHEDULER_POLL_MS,
@@ -453,16 +605,35 @@ export async function runSchedulerWorker({
   atomicWrite(SCHEDULER_RECORD_PATH, record);
   let lastHeartbeatAt = Date.now();
   let stopping = false;
+  const wakeSignal = createSchedulerWakeSignal();
   const stop = () => {
     stopping = true;
+    wakeSignal.wake();
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
   try {
     do {
-      const client = new Client();
+      let connectionEpoch = null;
+      const client = new Client({
+        onNotification: (message) => {
+          try {
+            const observation = observeTurnLifecycleNotification(message);
+            if (observation) wakeSignal.wake();
+          } catch (error) {
+            updateSchedulerHeartbeat(record, {
+              lastErrorCode: boundedErrorCode(error),
+            });
+          }
+        },
+        onDisconnect: () => wakeSignal.wake(),
+      });
       try {
         await client.connect();
+        connectionEpoch = beginTurnLifecycleConnection({
+          appServerVersion: appServerVersion(client.initializeResult?.userAgent),
+        }).epoch;
+        await reconcileTurnLifecycle(client);
         do {
           const outcomes = await runSchedulerPass(client, workerId);
           const heartbeatDue = Date.now() - lastHeartbeatAt >= SCHEDULER_HEARTBEAT_MS;
@@ -474,7 +645,7 @@ export async function runSchedulerWorker({
             });
             lastHeartbeatAt = Date.now();
           }
-          if (!once && !stopping) await delay(pollMs);
+          if (!once && !stopping) await wakeSignal.wait(pollMs);
         } while (!once && !stopping);
       } catch (error) {
         updateSchedulerHeartbeat(record, {
@@ -485,13 +656,22 @@ export async function runSchedulerWorker({
         lastHeartbeatAt = Date.now();
         if (once) throw error;
       } finally {
-        await client.close();
+        try {
+          if (connectionEpoch) endTurnLifecycleConnection(connectionEpoch);
+        } catch (error) {
+          updateSchedulerHeartbeat(record, {
+            lastErrorCode: boundedErrorCode(error),
+          });
+        } finally {
+          await client.close();
+        }
       }
-      if (!once && !stopping) await delay(pollMs);
+      if (!once && !stopping) await wakeSignal.wait(pollMs);
     } while (!once && !stopping);
   } finally {
     const saved = readSchedulerRecord();
     if (
+      (once || stopping) &&
       saved?.pid === process.pid &&
       saved.workerId === workerId &&
       existsSync(SCHEDULER_RECORD_PATH)

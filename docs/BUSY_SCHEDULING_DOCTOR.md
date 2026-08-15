@@ -695,8 +695,8 @@ Lifecycle work.
 
 - expiry has no silent default: every scheduled policy requires an explicit future value
   no more than seven days away;
-- a claim lease is 30 seconds and is not renewed during the bounded first
-  dispatch attempt;
+- a claim lease is 30 seconds and the exact still-owned claim is renewed once
+  immediately before recording a dispatch attempt;
 - `cxmsg server start` starts the Scheduler, `server stop` stops it while
   preserving queued records, and explicit `scheduler start|status|stop`
   commands expose the same lifecycle;
@@ -715,8 +715,6 @@ before retention, migration, or additional Trigger policies beyond the current
 exact-turn and exact-Job slice begin:
 
 - terminal Delivery and schedule metadata retention and cleanup ownership;
-- claim renewal behavior for transport operations that can exceed 30 seconds;
-- distinction between an intentionally stopped Scheduler and an exited worker;
 - any configurable per-target queue depth below the fixed safety maximum;
 - explicit successor migration for a scheduled target; names never transfer a
   Delivery to a replacement thread;
@@ -727,6 +725,21 @@ exact-turn and exact-Job slice begin:
   expected-turn mismatch non-mutation behavior.
 
 Until these are decided, later slices must not choose silent defaults.
+
+## Durable lifecycle and Scheduler recovery follow-up
+
+The Phase 2/4 recovery follow-up is implemented by
+`TURN_LIFECYCLE_SCHEDULER_V1.md`. App Server 0.147.0 lifecycle notifications do
+not expose a replay cursor, so cxmsg persists a local metadata-only observation
+sequence and connection epoch and performs a single bounded recent-turn
+catch-up page after reconnect. Notifications wake the Scheduler early while
+polling remains the correctness fallback.
+
+The Scheduler now keeps a separate desired-state record, reports an absent
+intended worker as crashed rather than stopped, renews the exact live claim
+immediately before dispatch, stops on lease loss with zero attempts, and
+enforces strict FIFO without allowing an unready earlier Trigger to be
+overtaken within the same target lane.
 
 ## Recommended first slice
 

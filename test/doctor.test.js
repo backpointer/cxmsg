@@ -651,6 +651,46 @@ test("Route Inspector distinguishes healthy, stalled, and legacy scheduler recor
       startedAt: base.startedAt,
     });
     assert.equal(inspect().errorCode, "ESCHEDULERLEGACY");
+    await writeJson(schedulerPath, base);
+    const intentPath = path.join(root, "scheduler.intent.json");
+    await writeJson(intentPath, {
+      version: 1,
+      desiredState: "running",
+      changedAt: "2026-08-14T00:00:10.000Z",
+    });
+    const inspectMissing = () =>
+      inspectRouteState({
+        stateDir: root,
+        now: Date.parse("2026-08-14T00:00:20.000Z"),
+        processStateFn: () => "missing",
+      }).find((check) => check.id === "schedules.worker.process");
+    assert.equal(inspectMissing().errorCode, "ESCHEDULERCRASHED");
+    await writeJson(intentPath, {
+      version: 1,
+      desiredState: "stopped",
+      changedAt: "2026-08-14T00:00:11.000Z",
+    });
+    assert.equal(inspectMissing().errorCode, "ESCHEDULERSTOPPED");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Route Inspector fails closed on malformed Turn Lifecycle state", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-lifecycle-"));
+  try {
+    await fs.chmod(root, 0o700);
+    await writeJson(path.join(root, "turn-lifecycle.json"), {
+      version: 1,
+      observationSequence: 1,
+      connection: null,
+      threads: { "not-a-thread-id": { status: "idle" } },
+    });
+    const check = inspectRouteState({ stateDir: root }).find(
+      (candidate) => candidate.id === "schedules.lifecycle.schema",
+    );
+    assert.equal(check.status, "fail");
+    assert.equal(check.errorCode, "ETURNLIFECYCLESCHEMA");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

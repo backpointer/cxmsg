@@ -78,6 +78,8 @@ export class AppServerClient {
     socketPath = defaultSocketPath(),
     timeoutMs = DEFAULT_TIMEOUT_MS,
     onServerRequest = null,
+    onNotification = null,
+    onDisconnect = null,
     transportFactory = null,
   } = {}) {
     this.socketPath = socketPath;
@@ -87,6 +89,8 @@ export class AppServerClient {
     this.pending = new Map();
     this.closed = false;
     this.onServerRequest = onServerRequest;
+    this.onNotification = onNotification;
+    this.onDisconnect = onDisconnect;
     this.transportFactory = transportFactory;
     this.initializeResult = null;
   }
@@ -103,9 +107,11 @@ export class AppServerClient {
     this.transport.on("error", (error) => this.#failAll(error));
     this.transport.once("close", () => {
       if (this.closed) return;
-      this.#failAll(
-        new AppServerError("Codex app-server Unix socket closed unexpectedly"),
+      const error = new AppServerError(
+        "Codex app-server Unix socket closed unexpectedly",
       );
+      this.#failAll(error);
+      this.onDisconnect?.(error);
     });
     await this.transport.connect();
 
@@ -200,7 +206,12 @@ export class AppServerClient {
       return;
     }
 
-    if (message.id === undefined) return;
+    if (message.id === undefined) {
+      if (message.method && this.onNotification) {
+        Promise.resolve(this.onNotification(message)).catch(() => {});
+      }
+      return;
+    }
 
     const pending = this.pending.get(message.id);
     if (!pending) return;

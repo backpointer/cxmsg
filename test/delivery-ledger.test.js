@@ -274,6 +274,16 @@ test("when-idle Delivery uses an expiring claim before one dispatch attempt", as
   assert.equal(competing.acquired, false);
   assert.equal(competing.claim.claimId, first.claim.claimId);
 
+  const renewed = await ledger.renewScheduledDeliveryClaim(ids.scheduledMessage, {
+    claimId: first.claim.claimId,
+    workerId: ids.worker,
+    leaseMs: 30_000,
+    now: "2026-08-14T01:00:02.000Z",
+  });
+  assert.equal(renewed.renewed, true);
+  assert.equal(renewed.claim.renewalCount, 1);
+  assert.ok(Date.parse(renewed.claim.leaseUntil) > Date.parse(first.claim.leaseUntil));
+
   await ledger.releaseScheduledDeliveryClaim(ids.scheduledMessage, {
     claimId: first.claim.claimId,
     workerId: ids.worker,
@@ -308,6 +318,35 @@ test("when-idle Delivery uses an expiring claim before one dispatch attempt", as
     }),
     /not claimable/,
   );
+});
+
+test("an expired or replaced claim cannot be renewed by the old dispatcher", async () => {
+  const messageId = "04345678-1234-4234-8234-123456789abc";
+  const scheduled = logicalMessage(messageId, "lease loss", "when-idle");
+  scheduled.body.contentRef = `cxmsg-message:${messageId}`;
+  await ledger.commitSingleRecipientDelivery({
+    logicalMessage: scheduled,
+    target: "auditor",
+    targetThreadId: ids.targetThread,
+    admissionState: "admitted",
+    admissionReason: "binding_match",
+    wakePolicy: "when-idle",
+    now: "2026-08-14T03:00:00.000Z",
+  });
+  const abandoned = await ledger.claimScheduledDelivery(messageId, {
+    workerId: ids.worker,
+    leaseMs: 1_000,
+    now: "2026-08-14T03:00:01.000Z",
+  });
+  await assert.rejects(
+    ledger.renewScheduledDeliveryClaim(messageId, {
+      claimId: abandoned.claim.claimId,
+      workerId: ids.worker,
+      now: abandoned.claim.leaseUntil,
+    }),
+    (error) => error.code === "ECLAIMLOST",
+  );
+  assert.equal(ledger.readDeliveryLedger(messageId).delivery.attempts.length, 0);
 });
 
 test("an expired claim is reclaimable after scheduler restart", async () => {
@@ -433,6 +472,7 @@ test("scheduled cancellation is terminal and the rebuildable index self-recovers
 });
 
 test("an incomplete active tail is quarantined before a new batch is appended", async () => {
+  const expectedRecords = ledger.listDeliveryLedger().length + 1;
   const active = path.join(
     ledger.DELIVERY_LEDGER_SEGMENTS_DIR,
     readdirSync(ledger.DELIVERY_LEDGER_SEGMENTS_DIR)[0],
@@ -450,7 +490,7 @@ test("an incomplete active tail is quarantined before a new batch is appended", 
   });
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_QUARANTINE_DIR).length, 1);
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_SEGMENTS_DIR).length, 1);
-  assert.equal(ledger.listDeliveryLedger().length, 9);
+  assert.equal(ledger.listDeliveryLedger().length, expectedRecords);
 });
 
 test("Ledger scans reject broad modes and symlink segments", () => {

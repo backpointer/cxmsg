@@ -32,6 +32,7 @@ const ids = {
   triggerDispatch: "b2345678-2234-4234-8234-123456789abc",
   triggerRegression: "c2345678-2234-4234-8234-123456789abc",
   externalWriter: "d2345678-2234-4234-8234-123456789abc",
+  claimLoss: "e2345678-2234-4234-8234-123456789abc",
 };
 
 async function scheduledRecord(messageId, body, wakePolicy = "when-idle", trigger = {}) {
@@ -90,7 +91,25 @@ test("worker lifecycle writes a versioned heartbeat record and removes it on exi
   assert.equal(existsSync(scheduler.SCHEDULER_RECORD_PATH), false);
 });
 
-test("explicit triggers wait, block safely, and do not hold an eligible target lane", async () => {
+test("Scheduler desired state distinguishes an operator stop from a missing worker", () => {
+  scheduler.writeSchedulerIntent("running", {
+    now: "2026-08-15T00:00:00.000Z",
+  });
+  assert.equal(scheduler.readSchedulerIntent().desiredState, "running");
+  scheduler.writeSchedulerIntent("stopped", {
+    now: "2026-08-15T00:00:01.000Z",
+  });
+  assert.equal(scheduler.readSchedulerIntent().desiredState, "stopped");
+});
+
+test("a lifecycle event wakes the Scheduler before its polling fallback", async () => {
+  const signal = scheduler.createSchedulerWakeSignal();
+  const waiting = signal.wait(60_000);
+  signal.wake();
+  assert.equal(await waiting, "event");
+});
+
+test("an earlier unready trigger preserves FIFO and blocks its target lane", async () => {
   const blocked = await scheduledRecord(
     ids.blocked,
     "after turn",
@@ -135,7 +154,7 @@ test("explicit triggers wait, block safely, and do not hold an eligible target l
       return { state: "observed" };
     },
   });
-  assert.deepEqual(dispatched, [eligible.logicalMessage.messageId]);
+  assert.deepEqual(dispatched, []);
 
   assert.equal(
     (await scheduler.scheduledTriggerReadiness(
@@ -156,6 +175,27 @@ test("explicit triggers wait, block safely, and do not hold an eligible target l
     )).state,
     "eligible",
   );
+});
+
+test("lifecycle reconnect catch-up reads one bounded metadata-only page per scheduled target", async () => {
+  const calls = [];
+  const observations = [];
+  const outcomes = await scheduler.reconcileTurnLifecycle({}, {
+    readThread: async (_client, threadId) => ({
+      id: threadId,
+      status: { type: "idle" },
+    }),
+    listTurns: async (_client, threadId, options) => {
+      calls.push({ threadId, options });
+      return { data: [], nextCursor: "older" };
+    },
+    observe: (thread, page) => observations.push({ thread, page }),
+  });
+  assert.ok(outcomes.length >= 1);
+  assert.equal(calls.length, outcomes.length);
+  assert.ok(calls.every(({ options }) => options.limit === 8));
+  assert.ok(calls.every(({ options }) => options.itemsView === "notLoaded"));
+  assert.equal(observations.length, outcomes.length);
 });
 
 test("a terminal trigger is rechecked after claim and starts exactly one turn", async () => {
@@ -350,6 +390,39 @@ test("a target becoming busy after claim releases it without a dispatch attempt"
   assert.equal(rebuilt.delivery.claim, null);
   assert.equal(rebuilt.delivery.claimCount, 1);
   assert.equal(rebuilt.delivery.attempts.length, 0);
+});
+
+test("claim loss immediately before start stops the old dispatcher with zero attempts", async () => {
+  const record = await scheduledRecord(ids.claimLoss, "claim loss coordination");
+  let starts = 0;
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    {
+      now: () => Date.parse("2026-08-15T00:05:00.000Z"),
+      session: () => ({ name: "auditor", threadId: ids.targetThread }),
+      readThread: async () => ({ id: ids.targetThread, status: { type: "idle" } }),
+      renewClaim: async () => {
+        const error = new Error("lease replaced");
+        error.code = "ECLAIMLOST";
+        throw error;
+      },
+      deliver: async (_client, _thread, _payload, options) => {
+        starts += 1;
+        await options.beforeStart();
+        assert.fail("a lost claim must stop before the App Server request");
+      },
+      log: async () => {},
+    },
+  );
+  assert.deepEqual(outcome, {
+    state: "claim_lost",
+    messageId: ids.claimLoss,
+    errorCode: "ECLAIMLOST",
+  });
+  assert.equal(starts, 1);
+  assert.equal(ledger.readDeliveryLedger(ids.claimLoss).delivery.attempts.length, 0);
 });
 
 test("an expired when-idle Delivery becomes terminal without target access", async () => {

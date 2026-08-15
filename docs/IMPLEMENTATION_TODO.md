@@ -95,17 +95,18 @@ non-acceptance, while every ambiguous attempt produces zero replay.
 ### T3 — Durable Turn Lifecycle and Scheduler recovery
 
 - Priority: P0
-- Status: NEXT
+- Status: COMPLETE
 - Canonical phases: Phase 2 and Phase 4
 
-- [ ] Persist App Server notification cursors and reconnect state.
-- [ ] Reconcile missed events without full-history reads or model work.
-- [ ] Distinguish an intentionally stopped Scheduler from a crashed worker.
-- [ ] Define claim renewal for bounded operations that may exceed the current
+- [x] Record that App Server 0.147.0 has no notification replay cursor; persist
+      a local observation sequence, connection epoch, and reconnect state.
+- [x] Reconcile missed events without full-history reads or model work.
+- [x] Distinguish an intentionally stopped Scheduler from a crashed worker.
+- [x] Define claim renewal for bounded operations that may exceed the current
       lease.
-- [ ] Preserve FIFO per target while proving that lease loss stops the old
+- [x] Preserve FIFO per target while proving that lease loss stops the old
       dispatcher.
-- [ ] Add restart tests covering active claims, ready Triggers, and newly Busy
+- [x] Add restart tests covering active claims, ready Triggers, and newly Busy
       targets.
 
 Done when polling is only a bounded fallback and restart does not lose,
@@ -114,7 +115,7 @@ duplicate, or prematurely dispatch Scheduled Peer Messages.
 ### T4 — Explicit identity lifecycle
 
 - Priority: P1
-- Status: READY after T1
+- Status: NEXT
 - Canonical phase: Phase 3
 
 - [ ] Specify Project move, merge, split, and worktree alias transitions.

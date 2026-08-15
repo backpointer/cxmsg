@@ -176,9 +176,11 @@ import {
 } from "../src/host-relay.js";
 import {
   readSchedulerRecord,
+  readSchedulerIntent,
   SCHEDULER_LIFECYCLE_LOCK_PATH,
   SCHEDULER_LOG_PATH,
   SCHEDULER_RECORD_PATH,
+  writeSchedulerIntent,
 } from "../src/scheduler.js";
 import { SCHEDULER_HEARTBEAT_STALE_MS } from "../src/delivery-policy.js";
 import { withFileLock } from "../src/file-lock.js";
@@ -440,7 +442,16 @@ async function ensureServer() {
 
 function schedulerState() {
   const record = readSchedulerRecord();
-  if (!record) return { status: "stopped", record: null, process: "missing", identity: "unavailable" };
+  const intent = readSchedulerIntent();
+  if (!record) {
+    return {
+      status: intent?.desiredState === "running" ? "crashed" : "stopped",
+      record: null,
+      intent,
+      process: "missing",
+      identity: "unavailable",
+    };
+  }
   const process = processState(record.pid);
   const identity =
     process === "missing"
@@ -458,9 +469,9 @@ function schedulerState() {
       : process === "alive" && identity === "matched"
         ? "running"
       : process === "missing"
-        ? "stopped"
+        ? intent?.desiredState === "stopped" ? "stopped" : "crashed"
         : "unreachable";
-  return { status, record, process, identity, heartbeatAgeMs };
+  return { status, record, intent, process, identity, heartbeatAgeMs };
 }
 
 async function startScheduler() {
@@ -475,6 +486,7 @@ async function startScheduler() {
     if (current.record && existsSync(SCHEDULER_RECORD_PATH)) {
       unlinkSync(SCHEDULER_RECORD_PATH);
     }
+    writeSchedulerIntent("running");
     mkdirSync(CXMSG_STATE_DIR, { recursive: true, mode: 0o700 });
     chmodSync(CXMSG_STATE_DIR, 0o700);
     const logFd = openSync(SCHEDULER_LOG_PATH, "a", 0o600);
@@ -506,9 +518,13 @@ async function startScheduler() {
 async function stopScheduler() {
   return withFileLock(SCHEDULER_LIFECYCLE_LOCK_PATH, async () => {
     const state = schedulerState();
-    if (!state.record) return false;
+    if (!state.record) {
+      writeSchedulerIntent("stopped");
+      return false;
+    }
     if (state.process === "missing") {
       if (existsSync(SCHEDULER_RECORD_PATH)) unlinkSync(SCHEDULER_RECORD_PATH);
+      writeSchedulerIntent("stopped");
       return false;
     }
     if (state.process !== "alive" || state.identity !== "matched") {
@@ -522,6 +538,7 @@ async function stopScheduler() {
       throw new Error(`scheduler pid ${state.record.pid} did not stop`);
     }
     if (existsSync(SCHEDULER_RECORD_PATH)) unlinkSync(SCHEDULER_RECORD_PATH);
+    writeSchedulerIntent("stopped");
     return true;
   });
 }

@@ -208,17 +208,29 @@ fires for success or failure. A pending Trigger remains `waiting-trigger`; a
 missing, unavailable, unknown, or unsupported state is observationally
 `blocked` and never becomes permission to wake. Trigger readiness is checked
 again after claim acquisition. If it regresses, the unused claim is released
-without recording a dispatch attempt. A blocked earlier Trigger does not hold
-an otherwise eligible target lane. `cxmsg status <target> --json` exposes only
+without recording a dispatch attempt. A blocked earlier Trigger holds its
+target lane so a later message cannot violate FIFO. `cxmsg status <target> --json` exposes only
 the bounded active and recent terminal turn IDs, never turn contents.
 
 `cxmsg server start` starts the Scheduler with App Server. It can also be
 managed with `cxmsg scheduler start|status|stop`. The worker checks the target
 again after acquiring a 30-second claim, releases the claim if the target has
-become Busy, and records one attempt immediately before `turn/start`. Expired
-claims are recoverable after restart. Each target lane is FIFO and accepts at
+become Busy, renews the still-owned claim immediately before dispatch, and
+records one attempt immediately before `turn/start`. A failed renewal stops the
+old dispatcher with zero attempts; expired claims are recoverable after
+restart. Each target lane is FIFO and accepts at
 most 256 pending scheduled Deliveries. A transport result whose mutation is
 uncertain becomes `unknown` and is never replayed automatically.
+
+The [Turn Lifecycle and Scheduler Recovery contract](docs/TURN_LIFECYCLE_SCHEDULER_V1.md)
+consumes App Server 0.147.0 `thread/status/changed`,
+`turn/started`, and `turn/completed` notifications as low-latency wake signals.
+That protocol has no replay cursor, so cxmsg persists its own monotonic
+observation sequence and connection epoch, then reconciles each pending target
+with `thread/read` and one recent eight-turn metadata-only page after reconnect.
+Polling remains a bounded fallback; notifications are never treated as durable
+delivery, completion, approval, or authority evidence. The lifecycle store
+retains no turn items or message text.
 
 The Scheduler reads a rebuildable per-message index instead of rescanning the
 whole Ledger on every poll. The append-only Ledger remains the source of truth;
@@ -235,7 +247,9 @@ cxmsg deliveries rebuild-index --json
 
 Cancellation is terminal and refuses an active, unexpired claim. Scheduler
 status includes a heartbeat and reports a live identity with a stale heartbeat
-as `stalled`, rather than as stopped. Claim, release, expiry, cancellation,
+as `stalled`, rather than as stopped. A separate desired-state marker makes a
+missing worker `crashed` when it was intended to run and `stopped` only after an
+operator stop. Claim, renewal, release, expiry, cancellation,
 dispatch, and bounded failure outcomes are written to the existing redacted
 coordination event log; retained bodies and endpoint paths are never included.
 `cxmsg doctor` validates the index/checkpoint and heartbeat without rebuilding,

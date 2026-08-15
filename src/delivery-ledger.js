@@ -260,6 +260,13 @@ function validClaim(record) {
         Date.parse(record.leaseUntil) > Date.parse(record.claimedAt),
     );
   }
+  if (record.action === "renewed") {
+    return Boolean(
+      validTimestamp(record.renewedAt) &&
+        validTimestamp(record.leaseUntil) &&
+        Date.parse(record.leaseUntil) > Date.parse(record.renewedAt),
+    );
+  }
   return Boolean(
     record.action === "released" &&
       CLAIM_RELEASE_REASONS.has(record.reason) &&
@@ -784,7 +791,7 @@ function reservedEvidenceBytes(messages) {
       records += delivery.attempts.length === 1 ? 2 : 1;
       continue;
     }
-    records += delivery.attempts.length > 0 ? 2 : 3;
+    records += delivery.attempts.length > 0 ? 2 : delivery.claim ? 3 : 4;
   }
   return records * DELIVERY_LEDGER_EVENT_RESERVE_BYTES;
 }
@@ -834,11 +841,37 @@ function applyDeliveryEvent(projected, record) {
       projected.delivery.updatedAt = record.claimedAt;
       return projected;
     }
+    if (record.action === "renewed") {
+      const claim = projected.delivery.claim;
+      if (
+        !claim ||
+        claim.claimId !== record.claimId ||
+        claim.workerId !== record.workerId ||
+        Date.parse(record.renewedAt) <
+          Date.parse(claim.renewedAt || claim.claimedAt) ||
+        Date.parse(record.renewedAt) >= Date.parse(claim.leaseUntil) ||
+        Date.parse(record.leaseUntil) <= Date.parse(claim.leaseUntil)
+      ) {
+        throw new Error(`Delivery claim renewal has no live owner: ${record.messageId}`);
+      }
+      projected.delivery.claim = {
+        ...claim,
+        leaseUntil: record.leaseUntil,
+        renewedAt: record.renewedAt,
+        renewalCount: (claim.renewalCount || 0) + 1,
+      };
+      projected.delivery.updatedAt = record.renewedAt;
+      return projected;
+    }
     if (
       !projected.delivery.claim ||
       projected.delivery.claim.claimId !== record.claimId ||
       projected.delivery.claim.workerId !== record.workerId ||
-      Date.parse(record.releasedAt) < Date.parse(projected.delivery.claim.claimedAt)
+      Date.parse(record.releasedAt) <
+        Date.parse(
+          projected.delivery.claim.renewedAt ||
+            projected.delivery.claim.claimedAt,
+        )
     ) {
       throw new Error(`Delivery claim release has no owner: ${record.messageId}`);
     }
@@ -856,6 +889,7 @@ function applyDeliveryEvent(projected, record) {
       SCHEDULED_WAKE_POLICIES.includes(projected.delivery.wakePolicy) &&
       projected.delivery.state === "scheduled" &&
       projected.delivery.claim?.claimId === record.claimId &&
+      Date.parse(record.startedAt) >= Date.parse(projected.delivery.updatedAt) &&
       record.retryOfAttemptId === undefined;
     const retry =
       projected.delivery.wakePolicy === "immediate" &&
@@ -1431,6 +1465,69 @@ export async function releaseScheduledDeliveryClaim(
     });
     updateDeliveryIndexLocked(after, messageId);
     return { released: true, record: after.get(messageId) };
+  });
+}
+
+export async function renewScheduledDeliveryClaim(
+  messageId,
+  {
+    claimId,
+    workerId,
+    leaseMs = 30_000,
+    now = new Date().toISOString(),
+    quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+    segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
+  } = {},
+) {
+  validateUuid("Delivery claim id", claimId);
+  validateUuid("scheduler worker id", workerId);
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1_000 || leaseMs > 300_000) {
+    throw new Error("Delivery claim lease must be 1000-300000 milliseconds");
+  }
+  if (!validTimestamp(now)) throw new Error("invalid Delivery claim renewal timestamp");
+  validateStorageOptions(quotaBytes, segmentBytes);
+  return withDeliveryLedgerMutation(async () => {
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
+    if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
+    const claim = record.delivery.claim;
+    const renewedAt = Date.parse(now);
+    if (
+      record.delivery.state !== "scheduled" ||
+      record.delivery.attempts.length > 0 ||
+      claim?.claimId !== claimId ||
+      claim?.workerId !== workerId ||
+      Date.parse(claim.leaseUntil) <= renewedAt
+    ) {
+      const error = new Error("Delivery claim is missing, expired, or owned by another scheduler worker");
+      error.code = "ECLAIMLOST";
+      throw error;
+    }
+    const event = {
+      schemaVersion: 1,
+      recordType: "delivery-claim",
+      action: "renewed",
+      messageId,
+      deliveryId: record.delivery.deliveryId,
+      claimId,
+      workerId,
+      renewedAt: now,
+      leaseUntil: new Date(
+        Math.max(Date.parse(claim.leaseUntil) + 1, renewedAt + leaseMs),
+      ).toISOString(),
+    };
+    if (!validClaim(event)) throw new Error("invalid Delivery claim renewal");
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
+    appendLedgerRecord(event, {
+      quotaBytes,
+      segmentBytes,
+      reserveBytes: reservedEvidenceBytes(after),
+    });
+    updateDeliveryIndexLocked(after, messageId);
+    return { claim: structuredClone(projected.delivery.claim), renewed: true };
   });
 }
 

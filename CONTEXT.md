@@ -96,9 +96,14 @@ they carry different authority and delivery semantics.
 ## Lifecycle and diagnosis
 
 - **Turn Lifecycle Module**: the Module that observes App Server turn state,
-  reconciles missed events, and exposes a stable Busy/Idle view.
+  persists a metadata-only local observation sequence and connection epoch,
+  reconciles missed events from one bounded recent-turn page, and exposes a
+  stable Busy/Idle view. App Server notifications are ephemeral wake hints,
+  not replayable evidence.
 - **Scheduler Module**: the Module that durably stores Triggered work, claims it
-  once, and dispatches it under per-target ordering rules.
+  once, renews a still-owned lease before dispatch, and dispatches it under
+  strict per-target FIFO ordering rules. Its desired-state record distinguishes
+  an operator stop from a missing intended worker.
 - **Message Body Store Module**: the owner-private Module that appends bounded
   Message Bodies, verifies their digest, quarantines partial segments, and
   exposes bounded range reads through opaque Content References.

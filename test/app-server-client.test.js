@@ -82,6 +82,30 @@ test("App Server client answers server-initiated approval requests", async () =>
   await client.close();
 });
 
+test("App Server client exposes notifications without confusing them with responses", async () => {
+  const transport = new FakeTransport();
+  const notifications = [];
+  const client = new AppServerClient({
+    transportFactory: () => transport,
+    onNotification: async (message) => notifications.push(message),
+  });
+  await client.connect();
+  transport.emit(
+    "message",
+    JSON.stringify({
+      method: "thread/status/changed",
+      params: {
+        threadId: "11345678-1234-4234-8234-123456789abc",
+        status: { type: "idle" },
+      },
+    }),
+  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0].method, "thread/status/changed");
+  await client.close();
+});
+
 test("negative acceptance is recognized only for pinned App Server contracts", () => {
   const mismatch = new AppServerError("turn/steer failed", {
     code: -32600,

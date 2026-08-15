@@ -155,13 +155,21 @@ Exact turn and Job identities are validated at enqueue; trigger readiness is
 checked again before and after claim. Missing or unverifiable evidence is
 blocked, not eligible, and an unused claim is released without an attempt.
 Trigger completion creates no authority and cannot infer task completion.
-Claims use random worker and
-claim IDs with a 30-second lease; they are concurrency metadata, never delivery
-or authorization evidence. The Scheduler rechecks the pinned target thread
-after claim acquisition and records the attempt before `turn/start`. A Busy
-race releases the unused claim. An uncertain result becomes `unknown` and is
-not retried automatically. Scheduler stop and stale worker replacement remain
-fail-closed when process identity cannot be verified.
+Claims use random worker and claim IDs with a 30-second lease; they are
+concurrency metadata, never delivery or authorization evidence. The Scheduler
+rechecks the pinned target thread after claim acquisition and renews the exact
+still-live claim immediately before recording an attempt and calling
+`turn/start`. An expired, replaced, or mismatched claim stops the old dispatcher
+with zero attempts. A Busy race releases the unused claim. An uncertain result
+becomes `unknown` and is not retried automatically. Scheduler stop and stale
+worker replacement remain fail-closed when process identity cannot be verified.
+
+App Server lifecycle notifications have no replay cursor in the pinned 0.147.0
+contract. They reduce latency but do not prove delivery, reading, processing,
+completion, approval, or authority. The owner-private lifecycle projection
+stores only thread state, bounded turn IDs, a local observation sequence, and a
+connection epoch. Reconnect catch-up reads one bounded metadata-only page and
+never stores turn items or message text. Polling remains the recovery fallback.
 
 The worker heartbeat proves recent loop progress only; it does not prove
 process identity, delivery, completion, or authority. A stale heartbeat on an
