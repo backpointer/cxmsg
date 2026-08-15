@@ -66,6 +66,10 @@ they carry different authority and delivery semantics.
 - **Inbox Cursor**: owner-private presentation state recording acknowledged
   Group sequences. It is not Delivery, read, processing, or completion
   evidence.
+- **Team Cast Plan**: an owner-private, short-lived resolution of one explicit
+  Conversation, Cluster, or Project+role selector to a frozen same-Project
+  recipient Node set. A Plan records selector evidence and a token-cost ceiling
+  but starts no Delivery and conveys no authority.
 
 ## Identity and topology
 

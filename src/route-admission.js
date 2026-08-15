@@ -245,6 +245,24 @@ export function listRouteBindings() {
     .map((state) => state.record);
 }
 
+export function listRouteBindingsStrict() {
+  if (!existsSync(ROUTE_BINDINGS_DIR)) return [];
+  const records = [];
+  for (const name of readdirSync(ROUTE_BINDINGS_DIR).sort()) {
+    if (!name.endsWith(".json")) continue;
+    const sessionName = name.slice(0, -5);
+    if (!SESSION_PATTERN.test(sessionName)) {
+      throw new Error("Route Binding Directory contains an unexpected record");
+    }
+    const state = routeBindingState(sessionName);
+    if (state.state !== "valid") {
+      throw new Error(`Route Binding failed validation: ${sessionName}`);
+    }
+    records.push(state.record);
+  }
+  return records;
+}
+
 export function planPeerReply({
   from,
   replyToMessageId: replyReference,

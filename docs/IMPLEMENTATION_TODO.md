@@ -190,12 +190,12 @@ model wake-ups and exact per-recipient evidence.
 ### T8 — Team Cast selection and wake policies
 
 - Priority: P2
-- Status: NEXT
+- Status: IN PROGRESS
 - Canonical phase: Phase 6
 
-- [ ] Add explicit selectors for Project+role, Cluster, and Conversation; a
+- [x] Add explicit selectors for Project+role, Cluster, and Conversation; a
       selector resolves to a fixed recipient set before fan-out.
-- [ ] Reject ambiguous, cross-Project, Tombstoned, and Execution Thread
+- [x] Reject ambiguous, cross-Project, Tombstoned, and Execution Thread
       recipients before committing the batch.
 - [ ] Add `mention-wake` with bounded mention syntax.
 - [ ] Add explicit `wake-all` with per-recipient fallback and token-cost

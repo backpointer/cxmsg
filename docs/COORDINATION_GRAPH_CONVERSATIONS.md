@@ -753,6 +753,14 @@ forwarding prevent silent replay and loops. Mention wake, wake-all, Team Cast
 selection, digest composition, and per-recipient scheduled wake remain the next
 gate.
 
+Team Cast selection foundation is implemented in 0.33.0. Conversation,
+Cluster, and exact Project+role selectors now resolve to a private, fixed,
+same-Project recipient plan before fan-out. The plan retains membership-version
+or binding-set evidence, a recipient-set digest, 15-minute expiry, and a visible
+upper-bound wake-turn estimate. Resolution starts zero Deliveries and zero
+turns. Mention wake, explicit wake-all, digest composition, and scheduled
+per-recipient consumption remain gated rather than inferred from the plan.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

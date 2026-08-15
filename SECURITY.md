@@ -321,6 +321,15 @@ processed, replied to, or completed anything. Group membership and messages
 remain untrusted coordination and cannot grant, delegate, approve, alter a
 permission profile, or cross a Project boundary.
 
+Team Cast selector plans are also non-authoritative owner-private metadata.
+Resolution rejects ambiguous identity, cross-Project recipients, Tombstoned
+Nodes, Execution Threads, stale route bindings, and Cluster head/snapshot
+disagreement before writing a plan. It starts no Delivery or model turn.
+Default output redacts recipient Node keys, while each plan retains only stable
+identities, selector evidence, digests, timestamps, and a wake-cost ceiling.
+Possessing a plan cannot grant, approve, delegate, dispatch, or bypass Route
+Admission. See [Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md).
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

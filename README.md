@@ -527,6 +527,26 @@ proof of model read, processing, reply, or task completion. Partial recipient
 failure remains visible per Delivery and never silently re-fans out. See
 [Group Conversation v1](docs/GROUP_CONVERSATION_V1.md).
 
+## Team Cast recipient plans
+
+Team Cast first resolves a Conversation, Cluster, or exact Project+role
+selector to a fixed same-Project recipient set. Resolution is deliberately
+separate from delivery: it starts no model turn and writes no Delivery.
+
+```bash
+cxmsg team resolve --from codex:<uuid> --conversation <uuid> --json
+cxmsg team resolve --from codex:<uuid> --cluster review-team --json
+cxmsg team resolve --from codex:<uuid> \
+  --project <project-uuid> --role reviewer --json
+cxmsg team plan <plan-uuid> --json
+```
+
+Default output exposes only the recipient count and set digest. Use
+`--recipients` for an explicit owner-local identity listing. Plans expire after
+15 minutes and cannot be rebound to a changed selector. Mention wake, wake-all,
+and scheduled fan-out are not enabled by this selector-only release. See
+[Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md).
+
 When a Directory Project exists, `cxmsg route bind` also pins the binding to
 the private Project UUID and stable Codex Node key. Reusing the same routing
 label for another Project or replacing the registered thread cannot inherit
@@ -1349,6 +1369,7 @@ not needed.
 - [Scheduled Delegation v1](docs/SCHEDULED_DELEGATION_V1.md)
 - [Direct Conversation v1](docs/DIRECT_CONVERSATION_V1.md)
 - [Group Conversation v1](docs/GROUP_CONVERSATION_V1.md)
+- [Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md)
 - [Retention policy v1](docs/RETENTION_POLICY_V1.md)
 - [Doctor JSON schema v1](docs/DOCTOR_SCHEMA_V1.md)
 - [Domain language](CONTEXT.md)

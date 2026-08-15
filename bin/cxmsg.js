@@ -96,6 +96,11 @@ import {
   storeOnlyGroupMessage,
 } from "../src/group-conversations.js";
 import {
+  publicTeamCastPlan,
+  readTeamCastPlan,
+  resolveTeamCastPlan,
+} from "../src/team-cast.js";
+import {
   activeJobsForTarget,
   createJob,
   createScheduledDelegationJob,
@@ -296,6 +301,9 @@ function usage(exitCode = 0) {
              [--logical-message-id <uuid>] [--reply-to <uuid>] [--json] -- <message...>
   cxmsg inbox list <node-key> [--limit <count>] [--all] [--json]
   cxmsg inbox ack <node-key> <conversation-id> <sequence> [--json]
+  cxmsg team resolve --from <node-key> (--conversation <id> | --cluster <id> | --project <uuid> --role <role>)
+             [--plan-id <uuid>] [--recipients] [--json]
+  cxmsg team plan <plan-id> [--recipients] [--json]
   cxmsg message info <message-id|reply-handle|content-ref> [--json]
   cxmsg message show <message-id|reply-handle|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -3377,6 +3385,85 @@ async function commandInbox(args) {
   usage(2);
 }
 
+async function commandTeam(args) {
+  const operation = args.shift();
+  if (operation === "plan") {
+    const planId = args.shift();
+    const includeRecipients = args.includes("--recipients");
+    const jsonOutput = args.includes("--json");
+    if (
+      !planId ||
+      args.some((value) => !["--recipients", "--json"].includes(value))
+    ) {
+      usage(2);
+    }
+    const plan = readTeamCastPlan(planId);
+    if (!plan) throw new Error(`unknown Team Cast plan: ${planId}`);
+    const output = publicTeamCastPlan(plan, { includeRecipients });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${output.planId}\t${output.selector.kind}\trecipients=${output.recipientCount}` +
+          `\twake-ceiling=${output.estimatedWakeTurns}\t${output.recipientSetSha256}\n`,
+    );
+    return;
+  }
+  if (operation !== "resolve") usage(2);
+  let senderNodeKey = null;
+  let planId;
+  let conversationId = null;
+  let clusterId = null;
+  let projectId = null;
+  let role = null;
+  let includeRecipients = false;
+  let jsonOutput = false;
+  while (args.length) {
+    const option = args.shift();
+    if (option === "--from") senderNodeKey = stableNodeKey(args.shift());
+    else if (option === "--plan-id") planId = args.shift();
+    else if (option === "--conversation") conversationId = args.shift();
+    else if (option === "--cluster") clusterId = args.shift();
+    else if (option === "--project") projectId = args.shift();
+    else if (option === "--role") role = args.shift();
+    else if (option === "--recipients") includeRecipients = true;
+    else if (option === "--json") jsonOutput = true;
+    else throw new Error(`unknown team resolve option: ${option}`);
+  }
+  if (!senderNodeKey) throw new Error("team resolve requires --from");
+  const selectorCount =
+    Number(Boolean(conversationId)) +
+    Number(Boolean(clusterId)) +
+    Number(Boolean(projectId || role));
+  if (
+    selectorCount !== 1 ||
+    (Boolean(projectId) !== Boolean(role))
+  ) {
+    throw new Error("team resolve requires exactly one complete selector");
+  }
+  const selector = conversationId
+    ? { kind: "conversation", id: conversationId }
+    : clusterId
+      ? { kind: "cluster", id: clusterId }
+      : { kind: "project-role", projectId, role };
+  const result = await resolveTeamCastPlan({
+    senderNodeKey,
+    selector,
+    ...(planId ? { planId } : {}),
+  });
+  const output = {
+    ...publicTeamCastPlan(result.plan, { includeRecipients }),
+    created: result.created,
+    deliveryStarted: false,
+  };
+  process.stdout.write(
+    jsonOutput
+      ? `${JSON.stringify(output, null, 2)}\n`
+      : `${result.created ? "resolved" : "unchanged"}\t${output.planId}` +
+        `\trecipients=${output.recipientCount}\twake-ceiling=${output.estimatedWakeTurns}` +
+        `\tdelivery-started=false\n`,
+  );
+}
+
 async function commandQuarantine(args) {
   const operation = args.shift();
   if (operation !== "list") usage(2);
@@ -3582,6 +3669,9 @@ async function main() {
       break;
     case "inbox":
       await commandInbox(args);
+      break;
+    case "team":
+      await commandTeam(args);
       break;
     case "retention":
       await commandRetention(args);
