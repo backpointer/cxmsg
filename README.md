@@ -733,6 +733,9 @@ Inspect the canonical read-only coordination graph from owner-private state:
 cxmsg graph show --range current --json
 cxmsg graph show --range 1h --edge communicated-with --edge delegated-to --json
 cxmsg graph show --range all --paths --json
+cxmsg graph node codex:<thread-id> --range 24h --json
+cxmsg graph conversation <conversation-id> --limit 50 --json
+cxmsg graph delivery <logical-message-id> --json
 ```
 
 The projection keeps Project, Cluster, Conversation, reachability,
@@ -748,6 +751,16 @@ Registered threads or retained Ledger identities that have not yet been synced
 into the Node Directory appear as `unresolved-directory` placeholders. They do
 not receive Project or reachability Edges, and the summary reports their count
 instead of silently inventing identity metadata.
+
+The Node detail view composes only that Node's incident relationships. The
+Conversation detail view returns current membership plus at most 200 bounded
+message metadata records. The Delivery detail view separates each recipient's
+admission, transport, evidence-state, and attempt-count summary. These detail
+views expose stable Node, Conversation, Project, and Logical Message IDs needed
+for diagnosis, but omit Message Body text and references, body digests,
+Endpoint and reply addresses, grant capabilities, Job content, and native
+attempt or turn identifiers. `--paths` remains the only explicit exception and
+applies to Project paths in Graph and Node views only.
 
 Start the loopback-only web server:
 

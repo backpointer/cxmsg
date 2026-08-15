@@ -188,6 +188,10 @@ they carry different authority and delivery semantics.
 - **Graph Projection Module**: the read-only Module that derives filtered
   topology views from the Node Directory, Delivery Ledger, Conversations,
   Jobs, and grants. It is never a source of identity or authority.
+- **Graph Detail Projection**: a bounded read-only view of one Node,
+  Conversation, or Logical Message Delivery derived from the same owner
+  Modules. It exposes correlation metadata, never Message Body or capability
+  material, and cannot mutate or dispatch.
 - **Local Graph Observer**: the owner-local observation point used as the
   source of `reachable-with` Edges. It prevents Endpoint evidence from being
   misrepresented as proof that one peer can reach another peer.

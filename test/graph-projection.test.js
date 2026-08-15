@@ -5,7 +5,12 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { buildGraphProjection } from "../src/graph-projection.js";
+import {
+  buildGraphProjection,
+  graphConversationDetail,
+  graphDeliveryDetail,
+  graphNodeDetail,
+} from "../src/graph-projection.js";
 
 const ids = {
   project: "11345678-9234-4234-8234-123456789abc",
@@ -17,6 +22,7 @@ const ids = {
   group: "71345678-9234-4234-8234-123456789abc",
   recentMessage: "81345678-9234-4234-8234-123456789abc",
   oldMessage: "91345678-9234-4234-8234-123456789abc",
+  groupMessage: "a1345678-9234-4234-8234-123456789abc",
 };
 const keys = {
   a: `codex:${ids.codexA}`,
@@ -68,16 +74,39 @@ function dependencies() {
       updatedAt: "2026-08-15T11:00:00.000Z",
     }],
     directConversations: () => [{
+      kind: "direct",
       conversationId: ids.direct,
-      projectId: ids.project,
       currentMembers: [keys.a, keys.b],
+      messages: [{
+        sequence: 1,
+        logicalMessageId: ids.recentMessage,
+        senderNodeKey: keys.a,
+        recipientNodeKey: keys.b,
+        sourceKind: "delivery-ledger",
+        replyToMessageId: null,
+        bodyRef: "cxmsg-message:private-direct-body",
+        recordedAt: "2026-08-15T11:31:00.000Z",
+      }],
       updatedAt: "2026-08-15T11:00:00.000Z",
     }],
     groupConversations: () => [{
+      kind: "group",
       conversationId: ids.group,
       projectId: ids.project,
       label: "audit-team",
       membershipSnapshots: [{ members: [keys.a, keys.b, keys.c] }],
+      messages: [{
+        sequence: 1,
+        logicalMessageId: ids.groupMessage,
+        senderNodeKey: keys.a,
+        recipientNodeKeys: [keys.b, keys.c],
+        membershipVersion: 1,
+        replyToMessageId: null,
+        hopCount: 0,
+        expiry: "2026-08-15T13:00:00.000Z",
+        bodyRef: "cxmsg-message:private-group-body",
+        recordedAt: "2026-08-15T11:32:00.000Z",
+      }],
       updatedAt: "2026-08-15T11:00:00.000Z",
     }],
     deliveries: () => [
@@ -86,10 +115,33 @@ function dependencies() {
           messageId: ids.recentMessage,
           senderNodeKey: keys.a,
           createdAt: "2026-08-15T11:30:00.000Z",
-          body: { contentRef: "cxmsg-message:redacted", privateText: "secret" },
+          route: {
+            kind: "direct",
+            project_id: ids.project,
+            conversation_id: ids.direct,
+            payload_type: "coordination",
+            wake_policy: "when-idle",
+          },
+          body: {
+            bytes: 4096,
+            sha256: "private-body-digest",
+            contentRef: "cxmsg-message:redacted",
+            privateText: "secret",
+          },
         },
         delivery: {
           targetNodeKey: keys.b,
+          admissionState: "admitted",
+          state: "transport_delivered",
+          wakePolicy: "when-idle",
+          attempts: [{
+            attemptId: "private-attempt-id",
+            transport: "app-server",
+            turnId: "private-turn-id",
+            transportResult: { private: true },
+          }],
+          evidence: [{ state: "transport_delivered", detail: "private-evidence" }],
+          replyHandle: { address: "/private/reply/socket" },
           updatedAt: "2026-08-15T11:31:00.000Z",
         },
       },
@@ -185,6 +237,67 @@ test("Graph Projection rejects unknown filters", () => {
   );
 });
 
+test("Graph Node detail composes only redacted incident relationships", () => {
+  const detail = graphNodeDetail(keys.a, { range: "1h", now }, dependencies());
+  assert.equal(detail.view, "node-detail");
+  assert.equal(detail.node.id, keys.a);
+  assert.equal(detail.project.id, `project:${ids.project}`);
+  assert.deepEqual(detail.clusters.map((record) => record.id), [`cluster:${ids.cluster}`]);
+  assert.equal(detail.conversations.length, 2);
+  assert.ok(detail.relationships.every(
+    (edge) => edge.source === keys.a || edge.target === keys.a,
+  ));
+  const serialized = JSON.stringify(detail);
+  assert.doesNotMatch(serialized, /private\/project|private\/socket|private delegated task/);
+  assert.doesNotMatch(serialized, /private-capability|:read-only|cxmsg-message/);
+});
+
+test("Graph Conversation detail returns bounded metadata without Message Body refs", () => {
+  const detail = graphConversationDetail(
+    ids.direct,
+    { range: "current", limit: 1, now },
+    dependencies(),
+  );
+  assert.equal(detail.view, "conversation-detail");
+  assert.equal(detail.conversation.id, `conversation:${ids.direct}`);
+  assert.deepEqual(detail.members, [keys.a, keys.b]);
+  assert.equal(detail.messageCount, 1);
+  assert.equal(detail.returnedMessageCount, 1);
+  assert.equal(detail.messages[0].logicalMessageId, ids.recentMessage);
+  assert.doesNotMatch(JSON.stringify(detail), /private-direct-body|bodyRef|contentRef/);
+  assert.throws(
+    () => graphConversationDetail(ids.direct, { limit: 201, now }, dependencies()),
+    /between 1 and 200/,
+  );
+
+  const group = graphConversationDetail(
+    ids.group,
+    { range: "current", limit: 1, now },
+    dependencies(),
+  );
+  assert.equal(group.conversation.conversationKind, "group");
+  assert.equal(group.messages[0].recipientCount, 2);
+  assert.doesNotMatch(JSON.stringify(group), /private-group-body|recipientNodeKeys/);
+});
+
+test("Graph Delivery detail separates recipient evidence and omits private attempt data", () => {
+  const detail = graphDeliveryDetail(ids.recentMessage, dependencies());
+  assert.equal(detail.view, "delivery-detail");
+  assert.equal(detail.logicalMessage.logicalMessageId, ids.recentMessage);
+  assert.equal(detail.logicalMessage.bodyBytes, 4096);
+  assert.equal(detail.recipientCount, 1);
+  assert.deepEqual(detail.statusCounts, { transport_delivered: 1 });
+  assert.equal(detail.recipients[0].targetNodeKey, keys.b);
+  assert.equal(detail.recipients[0].transport, "app-server");
+  assert.deepEqual(detail.recipients[0].evidenceStates, ["transport_delivered"]);
+  const serialized = JSON.stringify(detail);
+  assert.doesNotMatch(
+    serialized,
+    /private-body-digest|cxmsg-message|private-attempt-id|private-turn-id|private-evidence|private\/reply\/socket/,
+  );
+  assert.doesNotMatch(serialized, /sha256|contentRef|privateText|attemptId|turnId|replyHandle/);
+});
+
 test("graph CLI exposes the bounded read-only projection", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "cxmsg-graph-cli-"));
   try {
@@ -210,6 +323,25 @@ test("graph CLI exposes the bounded read-only projection", () => {
     assert.equal(graph.range, "1h");
     assert.deepEqual(graph.edgeKinds, ["communicated-with"]);
     assert.equal(graph.summary.edgeCount, 0);
+    assert.deepEqual(readdirSync(stateDir), []);
+
+    const rejected = spawnSync(
+      process.execPath,
+      [
+        path.resolve("bin/cxmsg.js"),
+        "graph",
+        "delivery",
+        ids.recentMessage,
+        "--range",
+        "current",
+      ],
+      {
+        encoding: "utf8",
+        env: { ...process.env, CXMSG_STATE_DIR: stateDir },
+      },
+    );
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /accepts only --json/);
     assert.deepEqual(readdirSync(stateDir), []);
   } finally {
     rmSync(stateDir, { recursive: true, force: true });

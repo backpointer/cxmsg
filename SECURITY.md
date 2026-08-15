@@ -412,6 +412,16 @@ successor evidence may appear as `unresolved-directory` placeholders when no
 live Node or Tombstone exists. Such placeholders convey neither lifecycle nor
 Project identity and remain counted for later Doctor diagnosis.
 
+Graph detail projections retain the same boundary. Node detail includes only
+incident projected Edges. Conversation detail is bounded to 200 metadata-only
+message records. Delivery detail exposes per-recipient admission, state,
+transport kind, attempt count, evidence-state names, and bounded error code,
+but not Message Body text or references, body digests, Endpoint or reply
+addresses, Job content, capability data, transport results, or native attempt
+and turn identifiers. Stable Node, Project, Conversation, and Logical Message
+IDs remain visible because they are the correlation keys the diagnostic view
+exists to explain.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

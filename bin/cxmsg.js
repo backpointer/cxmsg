@@ -63,6 +63,9 @@ import {
   buildGraphProjection,
   GRAPH_EDGE_KINDS,
   GRAPH_TIME_RANGES,
+  graphConversationDetail,
+  graphDeliveryDetail,
+  graphNodeDetail,
 } from "../src/graph-projection.js";
 import {
   cancelScheduledDelivery,
@@ -341,6 +344,9 @@ function usage(exitCode = 0) {
   cxmsg permissions <target> [--json]
   cxmsg doctor [--json] [--deep] [--target <session-name>]
   cxmsg graph show [--range current|1h|24h|all] [--edge <kind>...] [--paths] [--json]
+  cxmsg graph node <node-key> [--range current|1h|24h|all] [--paths] [--json]
+  cxmsg graph conversation <conversation-id> [--range current|1h|24h|all] [--limit <count>] [--json]
+  cxmsg graph delivery <logical-message-id> [--json]
   cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|inline]
                  [--approval never|relay|auto] [--approval-timeout <seconds>]
                  [--mirror none|summary|full] [--when-idle --expiry <timestamp>]
@@ -4115,23 +4121,43 @@ async function commandDoctor(args) {
 
 async function commandGraph(args) {
   const operation = args.shift();
-  if (operation !== "show") usage(2);
+  if (!["show", "node", "conversation", "delivery"].includes(operation)) {
+    usage(2);
+  }
+  const identity = operation === "show" ? null : args.shift();
+  if (operation !== "show" && !identity) usage(2);
   let range = "current";
   const edgeKinds = [];
   let includePaths = false;
   let jsonOutput = false;
+  let limit = 50;
+  let deliveryProjectionOption = false;
   while (args.length) {
     const option = args.shift();
     if (option === "--json") jsonOutput = true;
-    else if (option === "--paths") includePaths = true;
+    else if (option === "--paths") {
+      includePaths = true;
+      deliveryProjectionOption = true;
+    }
     else if (option === "--range") {
       range = args.shift();
       if (!range) throw new Error("--range requires a value");
+      deliveryProjectionOption = true;
     } else if (option === "--edge") {
       const kind = args.shift();
       if (!kind) throw new Error("--edge requires a value");
       edgeKinds.push(kind);
+      deliveryProjectionOption = true;
+    } else if (option === "--limit") {
+      limit = Number(args.shift());
+      deliveryProjectionOption = true;
     } else throw new Error(`unknown graph option: ${option}`);
+  }
+  if (operation === "delivery" && deliveryProjectionOption) {
+    throw new Error("Graph Delivery detail accepts only --json");
+  }
+  if (operation !== "conversation" && limit !== 50) {
+    throw new Error("Graph --limit is valid only for Conversation detail");
   }
   if (!GRAPH_TIME_RANGES.includes(range)) {
     throw new Error(`Graph time range must be: ${GRAPH_TIME_RANGES.join(", ")}`);
@@ -4139,13 +4165,44 @@ async function commandGraph(args) {
   if (edgeKinds.some((kind) => !GRAPH_EDGE_KINDS.includes(kind))) {
     throw new Error(`Graph edge kinds must be: ${GRAPH_EDGE_KINDS.join(", ")}`);
   }
-  const graph = buildGraphProjection({
+  const options = {
     range,
     edgeKinds: edgeKinds.length ? edgeKinds : GRAPH_EDGE_KINDS,
     includePaths,
-  });
+  };
+  const graph =
+    operation === "show"
+      ? buildGraphProjection(options)
+      : operation === "node"
+        ? graphNodeDetail(identity, options)
+        : operation === "conversation"
+          ? graphConversationDetail(identity, { ...options, limit })
+          : graphDeliveryDetail(identity);
   if (jsonOutput) {
     process.stdout.write(`${JSON.stringify(graph, null, 2)}\n`);
+    return;
+  }
+  if (operation === "node") {
+    process.stdout.write(
+      `node ${graph.node.id}\tlifecycle=${graph.node.lifecycle}\trelationships=${graph.relationships.length}\n`,
+    );
+    return;
+  }
+  if (operation === "conversation") {
+    process.stdout.write(
+      `conversation ${graph.conversation.id}\tmembers=${graph.members.length}\tmessages=${graph.messageCount}\n`,
+    );
+    return;
+  }
+  if (operation === "delivery") {
+    process.stdout.write(
+      `delivery ${graph.logicalMessage.logicalMessageId}\trecipients=${graph.recipientCount}\n`,
+    );
+    for (const recipient of graph.recipients) {
+      process.stdout.write(
+        `${recipient.targetNodeKey || "unknown"}\t${recipient.state}\tattempts=${recipient.attemptCount}\n`,
+      );
+    }
     return;
   }
   process.stdout.write(
