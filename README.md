@@ -255,8 +255,9 @@ coordination event log; retained bodies and endpoint paths are never included.
 `cxmsg doctor` validates the index/checkpoint and heartbeat without rebuilding,
 restarting, claiming, cancelling, or dispatching anything.
 
-This slice does not yet implement scheduled Delegation, automatic retry,
-group fan-out, or task-completion inference. The index is
+This slice does not yet implement automatic retry, group fan-out, or
+task-completion inference. Scheduled Delegation is implemented as a separate
+durable Job path and never creates ordinary Peer Message history. The index is
 bounded to 4,096 Logical Messages and is not a retention mechanism. An ambiguous
 dispatch remains `unknown`, and only positive App Server acceptance evidence
 may strengthen it to `turn_started`. The sole explicit retry path requires
@@ -1097,6 +1098,44 @@ signal.
   `status`, `wait`, or `result` calls mark the job failed with
   `failureCode: "worker_exited"` instead of leaving it running indefinitely.
 
+### Scheduled Delegation
+
+Use an explicit bounded expiry to queue authorized work until the pinned target
+is Idle:
+
+```bash
+cxmsg delegate \
+  --from coordinator \
+  --permissions :workspace \
+  --when-idle \
+  --expiry <ISO-within-7-days> \
+  worker \
+  "Run the bounded review after the current turn."
+```
+
+The expiry must be in the future and no more than seven days away. `--job-id`
+may supply a UUID idempotency key: repeating the exact enqueue is deduplicated,
+while changed task or policy data with the same ID is rejected. The same Job ID
+then correlates queueing, claim, worker activation, approval, result, and
+restart recovery.
+
+Queueing validates the current grant, named permission profile, approval mode,
+exact Codex Node, and private Project identity. The Scheduler validates them
+again before and after its lease claim, and the Delegation worker performs the
+final validation before creating an execution turn. Revocation, a blocked or
+missing permission profile, Project mismatch, successor link, or expiry fails
+the Job with zero model turns. A Busy target keeps the Job scheduled. An
+expired claim can be reclaimed, but only the worker holding the exact current
+claim can activate the Job.
+
+Scheduled Delegation remains distinct from a Scheduled Peer Message: it stores
+the task only in the owner-private Job, creates no Logical Message or Delivery
+Ledger entry, and obtains authority only from the still-valid user-created
+grant. `directory execution sync` remains the explicit migration for retained
+fork Jobs; it classifies strong Execution Thread evidence without fabricating
+ordinary communication history. See
+[Scheduled Delegation v1](docs/SCHEDULED_DELEGATION_V1.md).
+
 Each delegated job runs in a persistent fork of the target worker thread. The
 fork retains the worker's conversation context while keeping job-specific
 permission changes and approval policy away from the original worker. Empty
@@ -1230,6 +1269,7 @@ not needed.
 - [Busy delivery, scheduling, and doctor improvement plan](docs/BUSY_SCHEDULING_DOCTOR.md)
 - [Coordination graph and conversation plan](docs/COORDINATION_GRAPH_CONVERSATIONS.md)
 - [Prioritized implementation TODO](docs/IMPLEMENTATION_TODO.md)
+- [Scheduled Delegation v1](docs/SCHEDULED_DELEGATION_V1.md)
 - [Retention policy v1](docs/RETENTION_POLICY_V1.md)
 - [Doctor JSON schema v1](docs/DOCTOR_SCHEMA_V1.md)
 - [Domain language](CONTEXT.md)

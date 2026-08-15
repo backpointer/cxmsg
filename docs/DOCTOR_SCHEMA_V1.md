@@ -160,6 +160,12 @@ does not rebuild the cache. The explicit remediation is
 `cxmsg deliveries rebuild-index` after the underlying Ledger finding has been
 reviewed.
 
+Scheduled Delegation Jobs do not require a worker before claim activation.
+Doctor validates their bounded schedule and claim schema; it reports
+`EDELEGATIONEXPIRED` for an unreconciled expired Job and
+`EDELEGATIONCLAIMEXPIRED` for a reclaimable lease. Both are read-only warnings:
+Doctor does not claim, activate, expire, fail, or dispatch the Job.
+
 Scheduled Delivery findings remain read-only. `ESCHEDULERDOWN` reports queued
 Deliveries without a registered worker, `ESCHEDULERUNVERIFIED` preserves an
 `EPERM` process result, and `ESCHEDULECLAIMEXPIRED` identifies a reclaimable

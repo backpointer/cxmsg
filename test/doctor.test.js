@@ -269,6 +269,21 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   ], { processStateFn: () => "unverified" });
   assert.equal(unverified[0].status, "unknown");
   assert.equal(unverified[0].errorCode, "EPERM");
+
+  const scheduled = inspectJobs([
+    {
+      ...base,
+      jobId: "52345678-1234-4234-8234-123456789abc",
+      status: "scheduled",
+      workerPid: null,
+      schedule: {
+        expiresAt: "2026-08-14T00:02:00.000Z",
+        claim: null,
+      },
+    },
+  ], { now: Date.parse("2026-08-14T00:01:00.000Z") });
+  assert.equal(scheduled[0].status, "pass");
+  assert.equal(scheduled[0].errorCode, undefined);
 });
 
 test("Message Body Store Inspector reports private metadata, quarantine, and quota", async () => {

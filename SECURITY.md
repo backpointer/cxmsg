@@ -276,6 +276,21 @@ task, result, permission, approval, credential, or message body. Explicit
 legacy synchronization requires strong retained Job evidence and does not scan
 or promote arbitrary App Server threads.
 
+Scheduled Delegation stores timing and claim evidence in the existing private
+Job; it does not convert a Trigger into approval or create Peer Message
+authority. Enqueue and execution both require the user-created grant. The
+Scheduler checks the pinned target thread, Node, Project, permission profile,
+execution mode, approval mode, expiry, and successor state before and after
+claim, and the worker checks them once more before model input. Revocation or
+identity/policy drift fails closed with zero delegated turns.
+
+Only the exact live claim can activate a scheduled Job. A Scheduler crash before
+worker activation leaves an expiring claim that may be reclaimed; a stale
+worker cannot consume its old claim. After activation the Job is never
+automatically re-enqueued, so ambiguous worker startup cannot duplicate model
+work. Scheduled Jobs retain the same owner-only task and result protections as
+immediate Delegations and never write an ordinary Delivery Ledger record.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

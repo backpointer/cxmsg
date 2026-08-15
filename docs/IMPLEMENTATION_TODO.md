@@ -131,18 +131,18 @@ silently following names, paths, sockets, or inferred successors.
 ### T5 — Scheduled Delegation and retained Job migration
 
 - Priority: P1
-- Status: NEXT
+- Status: COMPLETE
 - Canonical phase: Phase 4
 
-- [ ] Schedule a Delegation through the Scheduler Module without treating its
+- [x] Schedule a Delegation through the Scheduler Module without treating its
       Trigger as approval.
-- [ ] Revalidate the stored grant, permission profile, approval policy, target
+- [x] Revalidate the stored grant, permission profile, approval policy, target
       Node, and Project immediately before execution.
-- [ ] Define migration for retained Jobs without inventing ordinary Peer
+- [x] Define migration for retained Jobs without inventing ordinary Peer
       Message history.
-- [ ] Preserve one Job correlation ID across queueing, execution, approval,
+- [x] Preserve one Job correlation ID across queueing, execution, approval,
       result, and restart.
-- [ ] Test grant revocation, successor mismatch, expiry, duplicate enqueue,
+- [x] Test grant revocation, successor mismatch, expiry, duplicate enqueue,
       and crash recovery.
 
 Done when a scheduled Delegation starts only under still-valid user authority
@@ -151,7 +151,7 @@ and cannot be confused with a Scheduled Peer Message.
 ### T6 — Direct Conversation
 
 - Priority: P1
-- Status: READY after T1 and T4
+- Status: NEXT
 - Canonical phase: Phase 5
 
 - [ ] Create one canonical Direct Conversation for an unordered pair of Node

@@ -1,4 +1,5 @@
 import { randomUUID, createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import {
   chmodSync,
   existsSync,
@@ -9,6 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { AppServerClient, appServerVersion } from "./app-server-client.js";
 import {
   appendDeliveryEvidence,
@@ -25,10 +27,15 @@ import {
 } from "./delivery-policy.js";
 import { readWholeMessageBody } from "./message-bodies.js";
 import {
+  claimScheduledDelegation,
   failJobIfWorkerExited,
   isPendingJob,
+  listJobs,
+  mutateJob,
   readJob,
+  releaseScheduledDelegationClaim,
 } from "./jobs.js";
+import { validateDelegationAuthority } from "./delegation-authority.js";
 import {
   deliverPeerMessageWhenIdle,
   TargetBusyError,
@@ -70,6 +77,24 @@ export {
 };
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const DELEGATION_WORKER = fileURLToPath(
+  new URL("../bin/delegation-worker.js", import.meta.url),
+);
+const DELEGATION_AUTHORITY_FAILURES = new Set([
+  "EAPPROVALPOLICY",
+  "EDELEGATIONEXPIRED",
+  "EEXECUTIONPOLICY",
+  "EGRANTREVOKED",
+  "EMIRRORPOLICY",
+  "EPERMISSIONBLOCKED",
+  "EPERMISSIONPROFILE",
+  "ESCHEDULEPOLICY",
+  "ESUCCESSORUNAVAILABLE",
+  "ETARGETIDENTITY",
+  "ETARGETNODE",
+  "ETARGETPREDECESSOR",
+  "ETARGETPROJECT",
+]);
 
 function atomicWrite(destination, value) {
   mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
@@ -246,6 +271,169 @@ async function eligibleScheduledDeliveries(
   });
 }
 
+export function eligibleScheduledDelegations(now = Date.now(), { jobs = listJobs } = {}) {
+  const firstByTarget = new Map();
+  for (const job of jobs()
+    .filter((candidate) => candidate.kind === "delegation" && candidate.status === "scheduled")
+    .sort((left, right) => {
+      const byCreation = left.createdAt.localeCompare(right.createdAt);
+      return byCreation || left.jobId.localeCompare(right.jobId);
+    })) {
+    if (!firstByTarget.has(job.target)) firstByTarget.set(job.target, job);
+  }
+  return [...firstByTarget.values()].filter((job) => {
+    const claim = job.schedule?.claim;
+    return !claim || Date.parse(claim.leaseUntil) <= now;
+  });
+}
+
+async function failScheduledDelegation(jobId, error, now) {
+  return mutateJob(jobId, (current) => {
+    if (current.status !== "scheduled") return current;
+    return {
+      ...current,
+      status: error?.code === "EDELEGATIONEXPIRED" ? "expired" : "failed",
+      failureCode: error?.code || "scheduled_delegation_failed",
+      error: error?.message || "scheduled Delegation failed authority validation",
+      completedAt: new Date(now).toISOString(),
+    };
+  });
+}
+
+function spawnScheduledDelegation(jobId, claim) {
+  const child = spawn(
+    process.execPath,
+    [DELEGATION_WORKER, jobId, "--claim", claim.claimId, claim.workerId],
+    { detached: true, stdio: "ignore" },
+  );
+  child.once("error", () => {});
+  child.unref();
+  if (!child.pid) throw new Error("failed to start scheduled Delegation worker");
+  return child.pid;
+}
+
+export async function dispatchScheduledDelegation(
+  job,
+  client,
+  workerId,
+  {
+    now = () => Date.now(),
+    authorize = validateDelegationAuthority,
+    session = readSessionRecord,
+    readThread = readThreadMetadata,
+    claim = claimScheduledDelegation,
+    releaseClaim = releaseScheduledDelegationClaim,
+    spawnWorker = spawnScheduledDelegation,
+    log = writeCoordinationEvent,
+  } = {},
+) {
+  const safeLog = async (event) => {
+    try {
+      await log(event);
+    } catch {}
+  };
+  const failAuthority = async (error) => {
+    await failScheduledDelegation(job.jobId, error, now());
+    await safeLog({
+      kind: "scheduled-delegation",
+      phase: "authority",
+      correlationId: job.jobId,
+      target: job.target,
+      outcome: error.code === "EDELEGATIONEXPIRED" ? "expired" : "failed",
+      errorCode: error.code || "ESCHEDULERUNKNOWN",
+    });
+    return {
+      state: error.code === "EDELEGATIONEXPIRED" ? "expired" : "failed",
+      jobId: job.jobId,
+      errorCode: error.code || "ESCHEDULERUNKNOWN",
+    };
+  };
+
+  if (Date.parse(job.schedule?.expiresAt || "") <= now()) {
+    const error = new Error("scheduled Delegation expired before execution");
+    error.code = "EDELEGATIONEXPIRED";
+    return failAuthority(error);
+  }
+  try {
+    await authorize(job, client, { now: now() });
+  } catch (error) {
+    if (DELEGATION_AUTHORITY_FAILURES.has(error?.code)) return failAuthority(error);
+    return { state: "blocked", jobId: job.jobId, errorCode: boundedErrorCode(error) };
+  }
+  const target = session(job.target);
+  if (!target || target.threadId !== job.targetThreadId) {
+    const error = new Error("scheduled Delegation target identity changed");
+    error.code = "ETARGETIDENTITY";
+    return failAuthority(error);
+  }
+  let observed;
+  try {
+    observed = await readThread(client, target.threadId);
+  } catch (error) {
+    return { state: "blocked", jobId: job.jobId, errorCode: boundedErrorCode(error) };
+  }
+  if (observed.status?.type === "active") return { state: "busy", jobId: job.jobId };
+
+  const claimed = await claim(job.jobId, {
+    workerId,
+    leaseMs: SCHEDULER_CLAIM_LEASE_MS,
+    now: new Date(now()).toISOString(),
+  });
+  if (!claimed.acquired) {
+    return {
+      state: claimed.expired ? "expired" : "claimed",
+      jobId: job.jobId,
+    };
+  }
+  try {
+    const current = readJob(job.jobId);
+    await authorize(current, client, { now: now() });
+    const currentTarget = session(current.target);
+    if (!currentTarget || currentTarget.threadId !== current.targetThreadId) {
+      const error = new Error("scheduled Delegation target changed after claim");
+      error.code = "ETARGETIDENTITY";
+      throw error;
+    }
+    const currentThread = await readThread(client, currentTarget.threadId);
+    if (currentThread.status?.type === "active") {
+      await releaseClaim(job.jobId, {
+        claimId: claimed.claim.claimId,
+        workerId,
+        reason: "target_busy",
+        now: new Date(now()).toISOString(),
+      });
+      return { state: "busy", jobId: job.jobId };
+    }
+    const workerPid = await spawnWorker(job.jobId, claimed.claim);
+    await safeLog({
+      kind: "scheduled-delegation",
+      phase: "dispatch",
+      correlationId: job.jobId,
+      target: job.target,
+      outcome: "worker-started",
+      errorCode: null,
+    });
+    return { state: "worker_started", jobId: job.jobId, workerPid };
+  } catch (error) {
+    if (DELEGATION_AUTHORITY_FAILURES.has(error?.code)) {
+      await releaseClaim(job.jobId, {
+        claimId: claimed.claim.claimId,
+        workerId,
+        reason: "authority_changed",
+        now: new Date(now()).toISOString(),
+      });
+      return failAuthority(error);
+    }
+    await releaseClaim(job.jobId, {
+      claimId: claimed.claim.claimId,
+      workerId,
+      reason: "dispatch_unavailable",
+      now: new Date(now()).toISOString(),
+    });
+    return { state: "blocked", jobId: job.jobId, errorCode: boundedErrorCode(error) };
+  }
+}
+
 export async function reconcileTurnLifecycle(
   client,
   {
@@ -256,7 +444,18 @@ export async function reconcileTurnLifecycle(
   } = {},
 ) {
   const targets = new Set();
+  for (const job of listJobs()) {
+    if (
+      job.kind === "delegation" &&
+      job.status === "scheduled" &&
+      job.targetThreadId
+    ) {
+      targets.add(job.targetThreadId);
+      if (targets.size >= limit) break;
+    }
+  }
   for (const record of await listDeliveryLedgerIndexed()) {
+    if (targets.size >= limit) break;
     if (
       record.delivery.admissionState === "admitted" &&
       record.delivery.state === "scheduled" &&
@@ -264,7 +463,6 @@ export async function reconcileTurnLifecycle(
       record.delivery.targetThreadId
     ) {
       targets.add(record.delivery.targetThreadId);
-      if (targets.size >= limit) break;
     }
   }
   const outcomes = [];
@@ -608,6 +806,7 @@ export async function runSchedulerPass(
   {
     now = () => Date.now(),
     dispatch = dispatchScheduledDelivery,
+    dispatchDelegation = dispatchScheduledDelegation,
     triggerReadiness = scheduledTriggerReadiness,
   } = {},
 ) {
@@ -620,6 +819,9 @@ export async function runSchedulerPass(
     outcomes.push(
       await dispatch(record, client, workerId, { now, triggerReadiness }),
     );
+  }
+  for (const job of eligibleScheduledDelegations(now())) {
+    outcomes.push(await dispatchDelegation(job, client, workerId, { now }));
   }
   return outcomes;
 }

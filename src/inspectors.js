@@ -45,6 +45,7 @@ const MAX_DIRECTORY_BYTES = 32 * 1024 * 1024;
 const MAX_DIRECTORY_RECORDS = 2048;
 const PENDING_JOB_STATES = new Set([
   "dispatching",
+  "scheduled",
   "queued",
   "running",
   "awaiting_approval",
@@ -740,6 +741,26 @@ function validAttachment(record, stem) {
 }
 
 function validJob(record, stem) {
+  const schedule = record?.schedule;
+  const claim = schedule?.claim;
+  const validSchedule =
+    schedule === undefined ||
+    schedule === null ||
+    (schedule.version === 1 &&
+      schedule.wakePolicy === "when-idle" &&
+      Number.isFinite(Date.parse(schedule.expiresAt || "")) &&
+      /^codex:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
+        schedule.targetNodeKey || "",
+      ) &&
+      UUID_PATTERN.test(schedule.targetProjectId || "") &&
+      /^[0-9a-f]{64}$/.test(schedule.enqueueFingerprint || "") &&
+      Number.isSafeInteger(schedule.attemptCount) &&
+      schedule.attemptCount >= 0 &&
+      (claim === null ||
+        (UUID_PATTERN.test(claim?.claimId || "") &&
+          UUID_PATTERN.test(claim?.workerId || "") &&
+          Number.isFinite(Date.parse(claim?.claimedAt || "")) &&
+          Number.isFinite(Date.parse(claim?.leaseUntil || "")))));
   return {
     valid: Boolean(
       record?.version === 1 &&
@@ -749,7 +770,10 @@ function validJob(record, stem) {
         (record.executionThreadId === undefined ||
           record.executionThreadId === null ||
           UUID_PATTERN.test(record.executionThreadId)) &&
-        typeof record.status === "string",
+        typeof record.status === "string" &&
+        validSchedule &&
+        (record.status !== "scheduled" ||
+          (record.kind === "delegation" && schedule)),
     ),
     errorCode: "EJOBSCHEMA",
   };
@@ -2643,6 +2667,35 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
     active += 1;
     const label = job.jobId.slice(0, 8);
     if (kind === "delegation") {
+      if (job.status === "scheduled") {
+        const expired = Date.parse(job.schedule?.expiresAt || "") <= now;
+        const claimExpired =
+          !expired &&
+          job.schedule?.claim &&
+          Date.parse(job.schedule.claim.leaseUntil) <= now;
+        checks.push(diagnosticCheck({
+          id: `jobs.delegation.${label}.schedule`,
+          scope: "jobs",
+          status: expired || claimExpired ? "warn" : "pass",
+          summary: expired
+            ? `Scheduled Delegation ${label} is past its expiry`
+            : claimExpired
+              ? `Scheduled Delegation ${label} has an expired dispatch claim`
+              : `Scheduled Delegation ${label} has valid queued metadata`,
+          verification: "record",
+          errorCode: expired
+            ? "EDELEGATIONEXPIRED"
+            : claimExpired
+              ? "EDELEGATIONCLAIMEXPIRED"
+              : null,
+          remediation:
+            expired || claimExpired
+              ? "Keep the Scheduler running so it can reconcile the retained Job"
+              : null,
+          required: false,
+        }));
+        continue;
+      }
       if (!Number.isSafeInteger(job.workerPid)) {
         const age = now - Date.parse(job.createdAt);
         checks.push(diagnosticCheck({

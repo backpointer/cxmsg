@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
   mkdirSync,
@@ -9,7 +9,11 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { withFileLock } from "./file-lock.js";
-import { finalTurnResult } from "./messaging.js";
+import {
+  finalTurnResult,
+  validateMessage,
+  validateSessionName,
+} from "./messaging.js";
 import { processState } from "./process-state.js";
 import {
   assertRetentionReadable,
@@ -94,6 +98,7 @@ function buildJob({
   approval = "never",
   mirror = "none",
   approvalTimeoutSeconds = 600,
+  schedule = null,
 }) {
   validateJobId(jobId);
   return {
@@ -117,13 +122,211 @@ function buildJob({
     approvals: [],
     workerPid: null,
     mirrorDelivery: null,
-    status: "dispatching",
+    schedule,
+    status: schedule ? "scheduled" : "dispatching",
     result: null,
     error: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     completedAt: null,
   };
+}
+
+function scheduledDelegationFingerprint(spec) {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        from: spec.from,
+        target: spec.target,
+        targetThreadId: spec.targetThreadId,
+        task: spec.task,
+        permissions: spec.permissions || null,
+        execution: spec.execution || "fork",
+        approval: spec.approval || "never",
+        mirror: spec.mirror || "none",
+        approvalTimeoutSeconds: spec.approvalTimeoutSeconds || 600,
+        wakePolicy: "when-idle",
+        expiresAt: spec.expiresAt,
+        targetNodeKey: spec.targetNodeKey,
+        targetProjectId: spec.targetProjectId,
+      }),
+    )
+    .digest("hex");
+}
+
+export async function createScheduledDelegationJob(spec) {
+  const jobId = spec.jobId || newJobId();
+  validateJobId(jobId);
+  const targetThreadId = validateJobId(spec.targetThreadId).toLowerCase();
+  const targetProjectId = validateJobId(spec.targetProjectId).toLowerCase();
+  const expiresAt = new Date(spec.expiresAt || "").toISOString();
+  const delay = Date.parse(expiresAt) - Date.now();
+  const normalized = {
+    ...spec,
+    from: validateSessionName(spec.from),
+    target: validateSessionName(spec.target),
+    targetThreadId,
+    targetProjectId,
+    task: validateMessage(spec.task),
+    expiresAt,
+  };
+  if (
+    normalized.targetNodeKey !== `codex:${targetThreadId}` ||
+    !Number.isFinite(delay) ||
+    delay <= 0 ||
+    delay > 7 * 24 * 60 * 60 * 1_000
+  ) {
+    throw new Error("invalid scheduled Delegation identity or expiry");
+  }
+  const fingerprint = scheduledDelegationFingerprint(normalized);
+  return withJobLock(jobId, async () => {
+    const existing = readJob(jobId);
+    if (existing) {
+      if (
+        existing.kind === "delegation" &&
+        existing.schedule?.enqueueFingerprint === fingerprint
+      ) {
+        return { job: existing, created: false };
+      }
+      throw new Error(`scheduled Delegation idempotency conflict: ${jobId}`);
+    }
+    const now = new Date().toISOString();
+    const job = buildJob({
+      ...normalized,
+      jobId,
+      threadId: targetThreadId,
+      schedule: {
+        version: 1,
+        wakePolicy: "when-idle",
+        expiresAt,
+        targetNodeKey: normalized.targetNodeKey,
+        targetProjectId,
+        enqueueFingerprint: fingerprint,
+        claim: null,
+        attemptCount: 0,
+        queuedAt: now,
+        dispatchAttemptedAt: null,
+        lastReleaseReason: null,
+      },
+    });
+    return { job: writeJob(job), created: true };
+  });
+}
+
+export async function claimScheduledDelegation(
+  jobId,
+  { workerId, leaseMs, now = new Date().toISOString() },
+) {
+  validateJobId(workerId);
+  if (!Number.isSafeInteger(leaseMs) || leaseMs < 1) {
+    throw new Error("scheduled Delegation lease must be a positive integer");
+  }
+  return withJobLock(jobId, async () => {
+    const current = readJob(jobId);
+    if (!current) throw new Error(`unknown job: ${jobId}`);
+    if (current.status !== "scheduled" || !current.schedule) {
+      return { acquired: false, job: current };
+    }
+    const observedAt = Date.parse(now);
+    if (!Number.isFinite(observedAt)) throw new Error("invalid claim timestamp");
+    if (Date.parse(current.schedule.expiresAt) <= observedAt) {
+      const expired = writeJob({
+        ...current,
+        status: "expired",
+        failureCode: "delegation_expired",
+        error: "scheduled Delegation expired before execution",
+        completedAt: now,
+        updatedAt: now,
+      });
+      return { acquired: false, expired: true, job: expired };
+    }
+    const activeClaim = current.schedule.claim;
+    if (activeClaim && Date.parse(activeClaim.leaseUntil) > observedAt) {
+      return { acquired: false, job: current };
+    }
+    const claim = {
+      claimId: randomUUID(),
+      workerId,
+      claimedAt: now,
+      leaseUntil: new Date(observedAt + leaseMs).toISOString(),
+    };
+    const claimed = writeJob({
+      ...current,
+      schedule: { ...current.schedule, claim },
+      updatedAt: now,
+    });
+    return { acquired: true, claim, job: claimed };
+  });
+}
+
+export async function releaseScheduledDelegationClaim(
+  jobId,
+  { claimId, workerId, reason, now = new Date().toISOString() },
+) {
+  validateJobId(claimId);
+  validateJobId(workerId);
+  return withJobLock(jobId, async () => {
+    const current = readJob(jobId);
+    if (!current) throw new Error(`unknown job: ${jobId}`);
+    const claim = current.schedule?.claim;
+    if (
+      current.status !== "scheduled" ||
+      !claim ||
+      claim.claimId !== claimId ||
+      claim.workerId !== workerId
+    ) {
+      return { released: false, job: current };
+    }
+    const released = writeJob({
+      ...current,
+      schedule: {
+        ...current.schedule,
+        claim: null,
+        lastReleaseReason: reason,
+      },
+      updatedAt: now,
+    });
+    return { released: true, job: released };
+  });
+}
+
+export async function activateScheduledDelegation(
+  jobId,
+  { claimId, workerId, workerPid = process.pid, now = new Date().toISOString() },
+) {
+  validateJobId(claimId);
+  validateJobId(workerId);
+  if (!Number.isSafeInteger(workerPid) || workerPid < 1) {
+    throw new Error("scheduled Delegation worker pid is invalid");
+  }
+  return withJobLock(jobId, async () => {
+    const current = readJob(jobId);
+    if (!current) throw new Error(`unknown job: ${jobId}`);
+    const claim = current.schedule?.claim;
+    if (
+      current.status !== "scheduled" ||
+      !claim ||
+      claim.claimId !== claimId ||
+      claim.workerId !== workerId ||
+      Date.parse(claim.leaseUntil) <= Date.parse(now)
+    ) {
+      return { activated: false, job: current };
+    }
+    const activated = writeJob({
+      ...current,
+      status: "queued",
+      workerPid,
+      workerStartedAt: now,
+      schedule: {
+        ...current.schedule,
+        claim: null,
+        attemptCount: current.schedule.attemptCount + 1,
+        dispatchAttemptedAt: now,
+      },
+      updatedAt: now,
+    });
+    return { activated: true, job: activated };
+  });
 }
 
 export function createJob(spec) {
@@ -155,7 +358,7 @@ export async function createJobOnce(spec, initialize = (job) => job) {
 }
 
 export function isPendingJob(job) {
-  return ["dispatching", "queued", "running", "awaiting_approval"].includes(
+  return ["dispatching", "scheduled", "queued", "running", "awaiting_approval"].includes(
     job?.status,
   );
 }
@@ -201,6 +404,7 @@ export async function failJobIfWorkerExited(
   if (job?.kind !== "delegation" || !isPendingJob(job)) {
     return job;
   }
+  if (job.status === "scheduled") return job;
 
   if (!Number.isSafeInteger(job.workerPid)) {
     const createdAt = Date.parse(job.createdAt);

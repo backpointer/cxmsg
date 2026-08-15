@@ -73,8 +73,14 @@ import {
   MIRROR_MODES,
 } from "../src/delegation-worker.js";
 import {
+  availablePermissionProfiles,
+  captureScheduledDelegationTarget,
+  validateDelegationAuthority,
+} from "../src/delegation-authority.js";
+import {
   activeJobsForTarget,
   createJob,
+  createScheduledDelegationJob,
   failJobIfWorkerExited,
   isPendingJob,
   listJobs,
@@ -267,7 +273,8 @@ function usage(exitCode = 0) {
   cxmsg doctor [--json] [--deep] [--target <session-name>]
   cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|inline]
                  [--approval never|relay|auto] [--approval-timeout <seconds>]
-                 [--mirror none|summary|full] <target> <task...>
+                 [--mirror none|summary|full] [--when-idle --expiry <timestamp>]
+                 [--job-id <uuid>] <target> <task...>
   cxmsg wait <job-id> [--timeout <seconds>] [--json]
   cxmsg result <job-id> [--json]
   cxmsg approvals <job-id> [--json]
@@ -1222,24 +1229,31 @@ async function commandStatus(name, jsonOutput) {
   });
   await Promise.all(activeJobsForTarget(name).map((job) => failJobIfWorkerExited(job)));
   const activeJobs = activeJobsForTarget(name);
+  const scheduledJobs = activeJobs.filter((job) => job.status === "scheduled");
+  const workingJobs = activeJobs.filter((job) => job.status !== "scheduled");
   const awaitingApprovals = activeJobs.filter(
     (job) => job.status === "awaiting_approval",
   ).length;
   state.threadActivity = state.activity;
   state.delegatedActivity = awaitingApprovals
     ? "awaiting_approval"
-    : activeJobs.length
+    : workingJobs.length
       ? "working"
+      : scheduledJobs.length
+        ? "scheduled"
       : "idle";
   state.activeJobs = activeJobs.length;
+  state.scheduledJobs = scheduledJobs.length;
   state.awaitingApprovals = awaitingApprovals;
   state.effectiveActivity =
     state.activity === "working"
       ? "working"
       : awaitingApprovals
         ? "awaiting-approval"
-        : activeJobs.length
+        : workingJobs.length
           ? "delegated-working"
+          : scheduledJobs.length
+            ? "delegation-scheduled"
           : state.activity;
 
   if (jsonOutput) {
@@ -1286,16 +1300,21 @@ async function commandPeers(jsonOutput) {
 
   for (const peer of peers) {
     const activeJobs = activeJobsForTarget(peer.name);
+    const scheduledJobs = activeJobs.filter((job) => job.status === "scheduled");
+    const workingJobs = activeJobs.filter((job) => job.status !== "scheduled");
     const awaitingApprovals = activeJobs.filter(
       (job) => job.status === "awaiting_approval",
     ).length;
     peer.threadStatus = peer.status;
     peer.activeJobs = activeJobs.length;
+    peer.scheduledJobs = scheduledJobs.length;
     peer.awaitingApprovals = awaitingApprovals;
     if (peer.status !== "active" && awaitingApprovals) {
       peer.status = "awaitingApproval";
-    } else if (peer.status !== "active" && activeJobs.length) {
+    } else if (peer.status !== "active" && workingJobs.length) {
       peer.status = "delegatedWorking";
+    } else if (peer.status !== "active" && scheduledJobs.length) {
+      peer.status = "delegationScheduled";
     }
   }
 
@@ -1783,11 +1802,6 @@ async function commandGrant(sender, target, revoke = false) {
   );
 }
 
-async function availablePermissionProfiles(client, cwd) {
-  const result = await client.request("permissionProfile/list", { cwd });
-  return result.data || [];
-}
-
 async function commandPermissions(target, jsonOutput) {
   validateSessionName(target);
   await ensureServer();
@@ -1814,6 +1828,9 @@ function parseDelegationArgs(args) {
   let approval = "never";
   let mirror = "none";
   let approvalTimeoutSeconds = 600;
+  let whenIdle = false;
+  let expiry = null;
+  let jobId = null;
   while (args[0]?.startsWith("--")) {
     const option = args.shift();
     if (option === "--from") from = args.shift() || "";
@@ -1821,6 +1838,9 @@ function parseDelegationArgs(args) {
     else if (option === "--execution") execution = args.shift() || "";
     else if (option === "--approval") approval = args.shift() || "";
     else if (option === "--mirror") mirror = args.shift() || "";
+    else if (option === "--when-idle") whenIdle = true;
+    else if (option === "--expiry") expiry = args.shift() || "";
+    else if (option === "--job-id") jobId = args.shift() || "";
     else if (option === "--approval-timeout") {
       approvalTimeoutSeconds = Number(args.shift());
     }
@@ -1845,6 +1865,17 @@ function parseDelegationArgs(args) {
   if (execution === "inline" && mirror !== "none") {
     throw new Error("inline execution already preserves context; mirror must be none");
   }
+  if (whenIdle !== Boolean(expiry)) {
+    throw new Error("scheduled Delegation requires both --when-idle and --expiry");
+  }
+  if (expiry) {
+    const parsed = new Date(expiry);
+    const delay = parsed.getTime() - Date.now();
+    if (!Number.isFinite(parsed.getTime()) || delay <= 0 || delay > 7 * 24 * 60 * 60 * 1_000) {
+      throw new Error("scheduled Delegation expiry must be in the future and no more than 7 days away");
+    }
+    expiry = parsed.toISOString();
+  }
   return {
     from: validateSessionName(from),
     permissions,
@@ -1852,6 +1883,9 @@ function parseDelegationArgs(args) {
     approval,
     mirror,
     approvalTimeoutSeconds,
+    whenIdle,
+    expiry,
+    jobId,
     target: validateSessionName(args.shift()),
     task: validateMessage(args.join(" ")),
   };
@@ -1865,6 +1899,9 @@ async function commandDelegate(args) {
     approval,
     mirror,
     approvalTimeoutSeconds,
+    whenIdle,
+    expiry,
+    jobId: requestedJobId,
     target,
     task,
   } = parseDelegationArgs([...args]);
@@ -1878,13 +1915,54 @@ async function commandDelegate(args) {
     );
   }
 
-  const jobId = newJobId();
+  if (whenIdle) {
+    const identity = captureScheduledDelegationTarget(record);
+    const jobId = requestedJobId || newJobId();
+    const spec = {
+      jobId,
+      from,
+      target,
+      targetThreadId: record.threadId,
+      task,
+      permissions,
+      execution,
+      approval,
+      mirror,
+      approvalTimeoutSeconds,
+      expiresAt: expiry,
+      ...identity,
+    };
+    await withAppServer(async (client) => {
+      await validateDelegationAuthority(
+        {
+          kind: "delegation",
+          ...spec,
+          schedule: {
+            version: 1,
+            wakePolicy: "when-idle",
+            expiresAt: expiry,
+            ...identity,
+          },
+        },
+        client,
+      );
+      await readThreadMetadata(client, record.threadId);
+    });
+    const queued = await createScheduledDelegationJob(spec);
+    await ensureScheduler();
+    process.stdout.write(
+      `${queued.created ? "scheduled" : "deduplicated"} Delegation ${jobId} to ${target} (when-idle)\n`,
+    );
+    return;
+  }
+
+  const jobId = requestedJobId || newJobId();
   const job = createJob({
     jobId,
     from,
     target,
     targetThreadId: record.threadId,
-    threadId: null,
+    threadId: record.threadId,
     task,
     permissions,
     execution,

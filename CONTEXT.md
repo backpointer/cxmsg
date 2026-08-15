@@ -94,6 +94,10 @@ they carry different authority and delivery semantics.
 
 - **Delegation**: a user-authorized, correlated job bounded by a stored grant,
   permission profile, execution mode, and approval policy.
+- **Scheduled Delegation**: a durable Delegation Job held by the Scheduler until
+  its pinned target is Idle. Its timing policy is not approval; cxmsg validates
+  the grant, permission profile, approval mode, Node, and Project again before
+  worker activation.
 - **Job**: a durable correlation record for Delegation or cross-runtime
   delivery. A Job has one stable ID and an explicit terminal state.
 - **Busy**: a Codex thread has an in-progress turn. A bridge or worker process

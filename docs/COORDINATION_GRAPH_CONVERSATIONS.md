@@ -622,8 +622,8 @@ CAS result. Identical observations coalesce and bounded compaction preserves
 the latest successful evidence for each selected transport. Default CLI and
 Doctor output never render Endpoint addresses from history.
 
-Phase 3 still has no automatic Project merge or move, successor inference, or
-web projection. Cluster identity, immutable membership snapshots, Tombstones,
+Phase 3 still has no Project merge or split, successor inference, or web
+projection. Explicit Project move, Cluster identity, immutable membership snapshots, Tombstones,
 bounded recovery, and Doctor checks are implemented; Cluster membership still
 creates no Conversation, fan-out, reachability, or authority. Execution Thread
 classification remains separate from addressable Node synchronization. An
@@ -670,6 +670,16 @@ records fail closed with bounded segment-and-line diagnostics; partial final
 lines retain the existing uncommitted-tail quarantine rule. Metadata quota
 usage is read from file sizes only, warns at 90 percent, and fails at 100
 percent without automatic deletion or repair.
+
+Scheduled Delegation is now implemented as a distinct retained Job Adapter on
+the same Scheduler. It supports explicit `when-idle` plus a seven-day-bounded
+expiry, uses one Job ID from enqueue through result, and requires an exact
+lease claim before worker activation. Grant, permission profile, approval and
+execution modes, pinned Node, private Project, expiry, and successor state are
+revalidated around claim and again in the worker before model input. It writes
+no ordinary Logical Message or Delivery record. Retained fork migration remains
+the explicit `directory execution sync` classification path and never invents
+communication history.
 
 The first Scheduler slice is now implemented. A typed `when-idle` route stores
 the full body by Content Reference, requires an explicit expiry within seven

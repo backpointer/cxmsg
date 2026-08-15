@@ -17,6 +17,19 @@ const sourceThreadId = "12345678-1234-4234-8234-123456789abc";
 const executionThreadId = "22345678-1234-4234-8234-123456789abc";
 const turnId = "32345678-1234-4234-8234-123456789abc";
 const jobId = "42345678-1234-4234-8234-123456789abc";
+const projectId = "82345678-1234-4234-8234-123456789abc";
+
+await directory.ensureProject({
+  routingId: "execution-worker",
+  root: path.resolve("."),
+  projectId,
+});
+await directory.upsertNode({
+  runtimeKind: "codex",
+  nativeId: sourceThreadId,
+  displayName: "worker",
+  projectId,
+});
 
 test.after(() => {
   rmSync(stateDir, { recursive: true, force: true });
@@ -92,11 +105,17 @@ class FallbackClient extends FixtureClient {
   }
 }
 
+class ScheduledClient extends FixtureClient {
+  static executionThreadId = "92345678-1234-4234-8234-123456789abc";
+  static turnId = "a2345678-1234-4234-8234-123456789abc";
+}
+
 test("fork Delegation classifies its Execution Thread before completion", async () => {
   registry.writeSessionRecord({
     name: "worker",
     threadId: sourceThreadId,
     cwd: path.resolve("."),
+    allowedDelegators: ["coordinator"],
   });
   jobs.createJob({
     jobId,
@@ -140,4 +159,39 @@ test("standalone fallback remains a non-addressable Execution Thread", async () 
   assert.equal(execution.creationMode, "start-fallback");
   assert.equal(execution.sourceThreadId, sourceThreadId);
   assert.equal(directory.readNode("codex", execution.threadId), null);
+});
+
+test("scheduled Delegation worker requires and consumes the exact Scheduler claim", async () => {
+  const scheduledJobId = "b2345678-1234-4234-8234-123456789abc";
+  const schedulerWorkerId = "c2345678-1234-4234-8234-123456789abc";
+  await jobs.createScheduledDelegationJob({
+    jobId: scheduledJobId,
+    from: "coordinator",
+    target: "worker",
+    targetThreadId: sourceThreadId,
+    task: "scheduled fixture task",
+    permissions: null,
+    execution: "fork",
+    approval: "never",
+    mirror: "none",
+    approvalTimeoutSeconds: 600,
+    expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    targetNodeKey: `codex:${sourceThreadId}`,
+    targetProjectId: projectId,
+  });
+  const claimed = await jobs.claimScheduledDelegation(scheduledJobId, {
+    workerId: schedulerWorkerId,
+    leaseMs: 30_000,
+  });
+  const result = await runDelegationWorker(scheduledJobId, {
+    Client: ScheduledClient,
+    scheduleClaim: {
+      claimId: claimed.claim.claimId,
+      workerId: schedulerWorkerId,
+    },
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(result.jobId, scheduledJobId);
+  assert.equal(result.schedule.attemptCount, 1);
+  assert.equal(result.executionThreadId, ScheduledClient.executionThreadId);
 });
