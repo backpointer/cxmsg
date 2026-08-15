@@ -82,9 +82,30 @@ change the recipient. It also starts zero Deliveries and zero turns; the
 subsequent multi-recipient Ledger and dispatch gates are not implemented by
 this command.
 
+Prepare the Message Body and all recipient-specific Ledger entries without
+dispatching them:
+
+```bash
+cxmsg team prepare --selection <selection-uuid> \
+  --from codex:<uuid> \
+  --logical-message-id <uuid> \
+  -- "Review handoff pointer abc123"
+```
+
+Preparation stores the bounded body by Content Reference, then commits one
+`teamCast` Ledger batch containing the exact selected recipients. Every
+recipient starts in `prepared` state with zero attempts, evidence, or Scheduler
+claims. The generic immediate Delivery API and the Scheduler cannot consume
+this state. Retrying the same Logical Message ID and content is idempotent;
+changed content, routing evidence, or recipients is a conflict.
+
+This crash-safe preparation seam reserves Ledger quota for later per-recipient
+evidence but still reports `deliveryStarted: false`. It is not transport
+delivery, model receipt, or task completion.
+
 The JSON result includes `deliveryStarted: false` when resolving. Membership,
 role, and plan possession are coordination metadata only; none authorizes work,
 grants a permission, approves a prompt, or expands a peer's authority.
 
-Mention dispatch, explicit wake-all, per-recipient scheduled policies, Delivery
-batch commit, and digest composition remain separately gated future work.
+Per-recipient mention dispatch, explicit wake-all, scheduled policies, and
+digest composition remain separately gated future work.

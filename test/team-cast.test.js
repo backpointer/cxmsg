@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +17,8 @@ const groups = await import(`../src/group-conversations.js?team=${Date.now()}`);
 const registry = await import(`../src/registry.js?team=${Date.now()}`);
 const routes = await import(`../src/route-admission.js?team=${Date.now()}`);
 const teams = await import(`../src/team-cast.js?team=${Date.now()}`);
+const bodies = await import(`../src/message-bodies.js?team=${Date.now()}`);
+const ledger = await import(`../src/delivery-ledger.js?team=${Date.now()}`);
 
 const ids = {
   firstProject: "10345678-5234-4234-8234-123456789abc",
@@ -36,6 +39,9 @@ const ids = {
   cliPlan: "11345678-6234-4234-8234-123456789abc",
   mentionSelection: "21345678-6234-4234-8234-123456789abc",
   cliSelection: "31345678-6234-4234-8234-123456789abc",
+  teamMessage: "41345678-6234-4234-8234-123456789abc",
+  preparedMessage: "51345678-6234-4234-8234-123456789abc",
+  cliPreparedMessage: "61345678-6234-4234-8234-123456789abc",
 };
 const keys = Object.fromEntries(
   ["sender", "first", "second", "cross"].map((name) => [
@@ -265,6 +271,134 @@ test("CLI mention selection remains an explicit zero-delivery operation", () => 
   assert.equal(output.deliveryStarted, false);
   assert.equal(output.recipientCount, 1);
   assert.equal("recipientNodeKeys" in output, false);
+});
+
+test("one Ledger batch prepares every selected Team Cast recipient", async () => {
+  const selection = teams.readTeamCastMentionSelection(ids.mentionSelection);
+  const message = "bounded Team Cast coordination";
+  const body = await bodies.storeMessageBody({
+    messageId: ids.teamMessage,
+    body: message,
+  });
+  const route = {
+    schema_version: 1,
+    kind: "team-cast",
+    plan_id: selection.planId,
+    selection_id: selection.selectionId,
+    project_id: selection.projectId,
+    wake_policy: "mention-wake",
+    expiry: selection.expiresAt,
+  };
+  const logicalMessage = {
+    messageId: ids.teamMessage,
+    from: keys.sender,
+    senderThreadId: ids.sender,
+    senderNodeKey: keys.sender,
+    body: {
+      messageId: ids.teamMessage,
+      bytes: Buffer.byteLength(message),
+      sha256: createHash("sha256").update(message).digest("hex"),
+      contentRef: body.contentRef,
+    },
+    route,
+    routeFingerprint: createHash("sha256")
+      .update(JSON.stringify(route))
+      .digest("hex"),
+    createdAt: selection.createdAt,
+    teamCast: {
+      version: 1,
+      planId: selection.planId,
+      selectionId: selection.selectionId,
+      projectId: selection.projectId,
+      wakePolicy: selection.wakePolicy,
+      recipientNodeKeys: selection.recipientNodeKeys,
+      recipientSetSha256: selection.recipientSetSha256,
+      expiresAt: selection.expiresAt,
+    },
+  };
+  const committed = await ledger.commitPreparedTeamCastDelivery({
+    logicalMessage,
+    recipients: selection.recipientNodeKeys.map((nodeKey) => ({
+      nodeKey,
+      targetThreadId: nodeKey.slice("codex:".length),
+    })),
+    now: selection.createdAt,
+  });
+  assert.equal(committed.created, true);
+  assert.equal(committed.record.teamDeliveries.length, 1);
+  assert.equal(committed.record.teamDeliveries[0].state, "prepared");
+  assert.equal(committed.record.teamDeliveries[0].attempts.length, 0);
+  assert.equal(committed.record.delivery.deliveryId,
+    committed.record.teamDeliveries[0].deliveryId);
+  const repeated = await ledger.commitPreparedTeamCastDelivery({
+    logicalMessage,
+    recipients: selection.recipientNodeKeys.map((nodeKey) => ({
+      nodeKey,
+      targetThreadId: nodeKey.slice("codex:".length),
+    })),
+    now: selection.createdAt,
+  });
+  assert.equal(repeated.created, false);
+  await assert.rejects(
+    ledger.beginImmediateDelivery(ids.teamMessage),
+    /already has a dispatch attempt/,
+  );
+  const rebuilt = await ledger.readDeliveryLedgerIndexed(ids.teamMessage);
+  assert.equal(rebuilt.teamDeliveries[0].state, "prepared");
+});
+
+test("Team Cast preparation persists body and batch without dispatch", async () => {
+  const result = await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.mentionSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.preparedMessage,
+    message: "review the bounded artifact pointer",
+  });
+  assert.equal(result.created, true);
+  assert.equal(result.deliveryStarted, false);
+  assert.equal(result.ledger.teamDeliveries[0].state, "prepared");
+  assert.equal(result.ledger.teamDeliveries[0].attempts.length, 0);
+  assert.match(result.body.contentRef, /^cxmsg-message:/);
+
+  const repeated = await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.mentionSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.preparedMessage,
+    message: "review the bounded artifact pointer",
+  });
+  assert.equal(repeated.created, false);
+});
+
+test("CLI prepares Team Cast evidence and reports zero delivery", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.resolve("bin/cxmsg.js"),
+      "team",
+      "prepare",
+      "--selection",
+      ids.cliSelection,
+      "--from",
+      keys.sender,
+      "--logical-message-id",
+      ids.cliPreparedMessage,
+      "--json",
+      "--",
+      "bounded",
+      "handoff",
+      "pointer",
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, CXMSG_STATE_DIR: stateDir },
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.status, "prepared");
+  assert.equal(output.deliveryStarted, false);
+  assert.equal(output.recipientCount, 1);
+  assert.equal("message" in output, false);
 });
 
 test("Project-role selector requires exact stable bindings", async () => {

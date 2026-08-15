@@ -280,10 +280,126 @@ function validGroupEnvelope(group, message) {
   return true;
 }
 
+function validTeamCastEnvelope(teamCast, message) {
+  return Boolean(
+    teamCast?.version === 1 &&
+      UUID_PATTERN.test(teamCast.planId || "") &&
+      UUID_PATTERN.test(teamCast.selectionId || "") &&
+      UUID_PATTERN.test(teamCast.projectId || "") &&
+      teamCast.wakePolicy === "mention-wake" &&
+      Array.isArray(teamCast.recipientNodeKeys) &&
+      teamCast.recipientNodeKeys.length >= 1 &&
+      teamCast.recipientNodeKeys.length <= 16 &&
+      teamCast.recipientNodeKeys.every((nodeKey) =>
+        NODE_KEY_PATTERN.test(nodeKey),
+      ) &&
+      JSON.stringify([...teamCast.recipientNodeKeys].sort()) ===
+        JSON.stringify(teamCast.recipientNodeKeys) &&
+      new Set(teamCast.recipientNodeKeys).size ===
+        teamCast.recipientNodeKeys.length &&
+      SHA256_PATTERN.test(teamCast.recipientSetSha256 || "") &&
+      teamCast.recipientSetSha256 ===
+        createHash("sha256")
+          .update(JSON.stringify(teamCast.recipientNodeKeys))
+          .digest("hex") &&
+      validTimestamp(teamCast.expiresAt) &&
+      Date.parse(teamCast.expiresAt) > Date.parse(message.createdAt) &&
+      Date.parse(teamCast.expiresAt) - Date.parse(message.createdAt) <=
+        15 * 60 * 1_000 &&
+      message.route?.kind === "team-cast" &&
+      message.route.plan_id === teamCast.planId &&
+      message.route.selection_id === teamCast.selectionId &&
+      message.route.project_id === teamCast.projectId &&
+      message.route.wake_policy === teamCast.wakePolicy &&
+      message.route.expiry === teamCast.expiresAt &&
+      Object.keys(message.route).every((field) =>
+        [
+          "schema_version",
+          "kind",
+          "plan_id",
+          "selection_id",
+          "project_id",
+          "wake_policy",
+          "expiry",
+        ].includes(field),
+      ) &&
+      message.route.schema_version === 1 &&
+      message.from === message.senderNodeKey &&
+      message.replyToMessageId === undefined &&
+      message.conversationId === undefined &&
+      message.conversationSequence === undefined &&
+      Object.keys(message).every((field) =>
+        [
+          "messageId",
+          "from",
+          "senderThreadId",
+          "senderNodeKey",
+          "body",
+          "route",
+          "routeFingerprint",
+          "createdAt",
+          "teamCast",
+        ].includes(field),
+      ) &&
+      Object.keys(message.body).every((field) =>
+        ["messageId", "bytes", "sha256", "contentRef"].includes(field),
+      ) &&
+      Object.keys(teamCast).every((field) =>
+        [
+          "version",
+          "planId",
+          "selectionId",
+          "projectId",
+          "wakePolicy",
+          "recipientNodeKeys",
+          "recipientSetSha256",
+          "expiresAt",
+        ].includes(field),
+      ),
+  );
+}
+
+function validPreparedTeamDelivery(delivery, message) {
+  const targetIdentity = NODE_KEY_PATTERN.exec(delivery?.targetNodeKey || "");
+  return Boolean(
+    targetIdentity &&
+      UUID_PATTERN.test(delivery.deliveryId || "") &&
+      delivery.target === delivery.targetNodeKey &&
+      (targetIdentity[1].toLowerCase() === "codex"
+        ? delivery.targetThreadId?.toLowerCase() ===
+          targetIdentity[2].toLowerCase()
+        : delivery.targetThreadId === null) &&
+      delivery.replyHandle === null &&
+      delivery.admissionState === "admitted" &&
+      delivery.admissionReason === "team_cast_plan" &&
+      delivery.wakePolicy === "mention-wake" &&
+      delivery.state === "prepared" &&
+      validTimestamp(delivery.createdAt) &&
+      delivery.updatedAt === delivery.createdAt &&
+      message.body.contentRef === `cxmsg-message:${message.messageId}` &&
+      Object.keys(delivery).every((field) =>
+        [
+          "deliveryId",
+          "target",
+          "targetNodeKey",
+          "targetThreadId",
+          "replyHandle",
+          "admissionState",
+          "admissionReason",
+          "wakePolicy",
+          "state",
+          "createdAt",
+          "updatedAt",
+        ].includes(field),
+      ),
+  );
+}
+
 function validBatch(record) {
   const message = record?.logicalMessage;
   const deliveries = record?.deliveries;
   const group = message?.group;
+  const teamCast = message?.teamCast;
   const common = Boolean(
     record?.schemaVersion === 1 &&
       record.recordType === "ledger-batch" &&
@@ -310,12 +426,28 @@ function validBatch(record) {
       record.deliveries.length >= 1
   );
   if (!common) return false;
-  if (group === undefined) {
+  if (group !== undefined && teamCast !== undefined) return false;
+  if (group === undefined && teamCast === undefined) {
     return deliveries.length === 1 && validInitialDelivery(deliveries[0], message);
   }
+  if (group !== undefined) {
+    if (
+      !validGroupEnvelope(group, message) ||
+      deliveries.length !== group.recipientNodeKeys.length ||
+      new Set(deliveries.map((delivery) => delivery.deliveryId)).size !==
+        deliveries.length
+    ) {
+      return false;
+    }
+    return deliveries.every(
+      (delivery, index) =>
+        delivery.targetNodeKey === group.recipientNodeKeys[index] &&
+        validInitialDelivery(delivery, message, { storeOnly: true }),
+    );
+  }
   if (
-    !validGroupEnvelope(group, message) ||
-    deliveries.length !== group.recipientNodeKeys.length ||
+    !validTeamCastEnvelope(teamCast, message) ||
+    deliveries.length !== teamCast.recipientNodeKeys.length ||
     new Set(deliveries.map((delivery) => delivery.deliveryId)).size !==
       deliveries.length
   ) {
@@ -323,8 +455,8 @@ function validBatch(record) {
   }
   return deliveries.every(
     (delivery, index) =>
-      delivery.targetNodeKey === group.recipientNodeKeys[index] &&
-      validInitialDelivery(delivery, message, { storeOnly: true }),
+      delivery.targetNodeKey === teamCast.recipientNodeKeys[index] &&
+      validPreparedTeamDelivery(delivery, message),
   );
 }
 
@@ -617,6 +749,40 @@ function indexProjectionDigest(projection) {
 function validIndexProjection(projection, messageId) {
   const delivery = projection?.delivery;
   if (!delivery || projection.logicalMessage?.messageId !== messageId) return false;
+  if (projection.teamDeliveries !== undefined) {
+    if (
+      !Array.isArray(projection.teamDeliveries) ||
+      projection.teamDeliveries.length < 1 ||
+      JSON.stringify(delivery) !== JSON.stringify(projection.teamDeliveries[0])
+    ) {
+      return false;
+    }
+    const baseBatch = {
+      schemaVersion: 1,
+      recordType: "ledger-batch",
+      batchId: projection.batchId,
+      committedAt: projection.committedAt,
+      logicalMessage: structuredClone(projection.logicalMessage),
+      deliveries: projection.teamDeliveries.map((candidate) => {
+        const { attempts, evidence, claim, claimCount, ...initial } = candidate;
+        return initial;
+      }),
+    };
+    return Boolean(
+      validBatch(baseBatch) &&
+        projection.teamDeliveries.every(
+          (candidate) =>
+            candidate.state === "prepared" &&
+            candidate.wakePolicy === "mention-wake" &&
+            Array.isArray(candidate.attempts) &&
+            candidate.attempts.length === 0 &&
+            Array.isArray(candidate.evidence) &&
+            candidate.evidence.length === 0 &&
+            candidate.claim === null &&
+            candidate.claimCount === 0,
+        ),
+    );
+  }
   if (projection.groupDeliveries !== undefined) {
     if (
       !Array.isArray(projection.groupDeliveries) ||
@@ -953,6 +1119,12 @@ function appendLedgerRecord(record, { quotaBytes, segmentBytes, reserveBytes = 0
 function reservedEvidenceBytes(messages) {
   let records = 0;
   for (const message of messages.values()) {
+    if (Array.isArray(message.teamDeliveries)) {
+      records += message.teamDeliveries.filter(
+        (delivery) => delivery.state === "prepared",
+      ).length * 4;
+      continue;
+    }
     if (Array.isArray(message.groupDeliveries)) {
       records += message.groupDeliveries.filter(
         (delivery) => delivery.state === "scheduled",
@@ -994,11 +1166,17 @@ function cloneBatch(record) {
     logicalMessage: structuredClone(record.logicalMessage),
     delivery: deliveries[0],
   };
-  if (deliveries.length > 1) projection.groupDeliveries = deliveries;
+  if (record.logicalMessage.teamCast) projection.teamDeliveries = deliveries;
+  else if (deliveries.length > 1) projection.groupDeliveries = deliveries;
   return projection;
 }
 
 function applyDeliveryEvent(projected, record) {
+  if (Array.isArray(projected?.teamDeliveries)) {
+    throw new Error(
+      `prepared Team Cast Delivery cannot accept transport evidence: ${record.messageId}`,
+    );
+  }
   if (Array.isArray(projected?.groupDeliveries)) {
     const delivery = projected.groupDeliveries.find(
       (candidate) => candidate.deliveryId === record.deliveryId,
@@ -1306,7 +1484,8 @@ export async function createDeliveryDedupTombstones(
       const message = messages.get(messageId);
       if (!message && existingTombstone) return existingTombstone;
       if (!message) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
-      const deliveries = message.groupDeliveries || [message.delivery];
+      const deliveries =
+        message.teamDeliveries || message.groupDeliveries || [message.delivery];
       const admittedTerminal = deliveries.every(
         (delivery) =>
           delivery.admissionState === "admitted" &&
@@ -1596,6 +1775,119 @@ export async function commitStoreOnlyGroupDelivery(
       })),
     };
     if (!validBatch(record)) throw new Error("invalid Group Delivery Ledger batch");
+    const projected = cloneBatch(record);
+    const after = new Map(messages);
+    after.set(logicalMessage.messageId, projected);
+    appendLedgerRecord(record, {
+      quotaBytes,
+      segmentBytes,
+      reserveBytes: reservedEvidenceBytes(after),
+    });
+    updateDeliveryIndexLocked(after, logicalMessage.messageId);
+    return { record: projected, created: true };
+  });
+}
+
+export async function commitPreparedTeamCastDelivery(
+  {
+    logicalMessage,
+    recipients,
+    now = new Date().toISOString(),
+  },
+  {
+    quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+    segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
+  } = {},
+) {
+  validateStorageOptions(quotaBytes, segmentBytes);
+  validateUuid("logical message id", logicalMessage?.messageId);
+  if (!NAME_PATTERN.test(logicalMessage?.from || "")) {
+    throw new Error("invalid Team Cast Ledger sender");
+  }
+  if (!Array.isArray(recipients) || recipients.length < 1 || recipients.length > 16) {
+    throw new Error("Team Cast Delivery requires 1-16 fixed recipients");
+  }
+  if (!validTimestamp(now)) {
+    throw new Error("invalid Team Cast Delivery timestamp");
+  }
+  const normalizedRecipients = recipients.map((recipient) => {
+    if (!NODE_KEY_PATTERN.test(recipient?.nodeKey || "")) {
+      throw new Error("Team Cast Delivery recipient must be a stable Node key");
+    }
+    const nodeKey = recipient.nodeKey.toLowerCase();
+    const runtimeKind = nodeKey.split(":", 1)[0];
+    const nativeId = nodeKey.slice(runtimeKind.length + 1);
+    const targetThreadId = recipient.targetThreadId ?? null;
+    if (
+      (runtimeKind === "codex" && targetThreadId !== nativeId) ||
+      (runtimeKind === "claude" && targetThreadId !== null)
+    ) {
+      throw new Error(
+        "Team Cast Delivery recipient runtime identity is inconsistent",
+      );
+    }
+    return { nodeKey, targetThreadId };
+  });
+  if (
+    JSON.stringify(
+      [...normalizedRecipients].sort((left, right) =>
+        left.nodeKey.localeCompare(right.nodeKey),
+      ),
+    ) !== JSON.stringify(normalizedRecipients) ||
+    new Set(normalizedRecipients.map((recipient) => recipient.nodeKey)).size !==
+      normalizedRecipients.length
+  ) {
+    throw new Error("Team Cast Delivery recipients must be sorted and unique");
+  }
+
+  return withDeliveryLedgerMutation(async () => {
+    const messages = readDeliveryIndexLocked();
+    if (readDedupTombstone(logicalMessage.messageId)) {
+      throw new Error(
+        `Delivery Ledger message was permanently purged: ${logicalMessage.messageId}`,
+      );
+    }
+    const existing = messages.get(logicalMessage.messageId);
+    if (existing) {
+      const existingRecipients = (existing.teamDeliveries || []).map(
+        (delivery) => ({
+          nodeKey: delivery.targetNodeKey,
+          targetThreadId: delivery.targetThreadId,
+        }),
+      );
+      if (
+        JSON.stringify(existing.logicalMessage) !== JSON.stringify(logicalMessage) ||
+        JSON.stringify(existingRecipients) !== JSON.stringify(normalizedRecipients)
+      ) {
+        throw new Error(
+          `Delivery Ledger idempotency conflict: ${logicalMessage.messageId}`,
+        );
+      }
+      return { record: existing, created: false };
+    }
+    const record = {
+      schemaVersion: 1,
+      recordType: "ledger-batch",
+      batchId: randomUUID(),
+      committedAt: now,
+      logicalMessage: structuredClone(logicalMessage),
+      deliveries: normalizedRecipients.map((recipient) => ({
+        deliveryId: randomUUID(),
+        target: recipient.nodeKey,
+        targetNodeKey: recipient.nodeKey,
+        targetThreadId: recipient.targetThreadId,
+        replyHandle: null,
+        admissionState: "admitted",
+        admissionReason: "team_cast_plan",
+        wakePolicy: "mention-wake",
+        state: "prepared",
+        createdAt: now,
+        updatedAt: now,
+      })),
+    };
+    if (!validBatch(record)) {
+      throw new Error("invalid prepared Team Cast Delivery Ledger batch");
+    }
     const projected = cloneBatch(record);
     const after = new Map(messages);
     after.set(logicalMessage.messageId, projected);

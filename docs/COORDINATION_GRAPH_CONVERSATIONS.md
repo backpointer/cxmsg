@@ -768,6 +768,15 @@ and out-of-plan recipients, exposes a wake-cost ceiling, and still creates zero
 Deliveries and zero turns. This deliberately avoids ambiguous display-name or
 prose parsing before the multi-recipient Ledger invariant is generalized.
 
+Version 0.35.0 adds the durable pre-dispatch boundary. A bounded Team Cast body
+is stored by Content Reference and one Ledger batch atomically fixes every
+selected recipient before transport. Recipient Deliveries remain in a new
+`prepared` state with no attempt, evidence, or claim, and are deliberately
+invisible to the existing Scheduler and generic immediate dispatch API.
+Idempotent preparation and reserved evidence quota make the subsequent
+per-recipient dispatch implementation possible without an implicit wake-all or
+partial batch creation.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

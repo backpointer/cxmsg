@@ -336,6 +336,13 @@ rechecks lifecycle and Project identity, and rejects duplicates. The selection
 remains a zero-delivery intent: its `mention-wake` label cannot itself wake a
 model, invoke a transport, or establish authority.
 
+Team Cast preparation persists the Message Body and the complete recipient
+batch before dispatch. Its `prepared` Delivery state is intentionally rejected
+by the generic immediate API and ignored by the Scheduler, so batch creation
+cannot accidentally become wake-all. Retention treats every prepared recipient
+as nonterminal and protects both Ledger and body evidence. Preparation still
+conveys no grant, approval, Delegation, permission, read, or completion claim.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

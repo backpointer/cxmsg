@@ -15,8 +15,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { readDirectConversation } from "./conversations.js";
+import { commitPreparedTeamCastDelivery } from "./delivery-ledger.js";
 import { withFileLock } from "./file-lock.js";
 import { readGroupConversation } from "./group-conversations.js";
+import { MAX_STORED_MESSAGE_BYTES, storeMessageBody } from "./message-bodies.js";
 import {
   findClusterByRoutingId,
   readCluster,
@@ -28,6 +30,7 @@ import {
 } from "./node-directory.js";
 import { readSessionRecord } from "./registry.js";
 import { listRouteBindingsStrict } from "./route-admission.js";
+import { withRetentionWriter } from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const TEAM_CAST_DIR = path.join(CXMSG_STATE_DIR, "team-casts");
@@ -706,4 +709,121 @@ export function publicTeamCastMentionSelection(
       ? { recipientNodeKeys: [...selection.recipientNodeKeys] }
       : {}),
   };
+}
+
+export async function prepareTeamCastMentionMessage(
+  {
+    selectionId,
+    senderNodeKey,
+    logicalMessageId = randomUUID(),
+    message,
+    now = new Date().toISOString(),
+  },
+  {
+    bodyStore = storeMessageBody,
+    ledgerCommit = commitPreparedTeamCastDelivery,
+  } = {},
+) {
+  selectionId = validateUuid("Team Cast selection id", selectionId);
+  logicalMessageId = validateUuid("logical message id", logicalMessageId);
+  senderNodeKey = normalizeNodeKey(senderNodeKey);
+  if (!Number.isFinite(Date.parse(now))) {
+    throw new Error("Team Cast preparation timestamp is invalid");
+  }
+  if (typeof message !== "string" || !message.trim()) {
+    throw new Error("Team Cast message must not be empty");
+  }
+  const messageBytes = Buffer.byteLength(message, "utf8");
+  if (messageBytes > MAX_STORED_MESSAGE_BYTES) {
+    throw new Error(
+      `Team Cast message exceeds ${MAX_STORED_MESSAGE_BYTES} bytes`,
+    );
+  }
+  return withRetentionWriter(async () => {
+    const selection = readTeamCastMentionSelection(selectionId);
+    if (!selection) {
+      throw new Error(`unknown Team Cast mention selection: ${selectionId}`);
+    }
+    if (selection.senderNodeKey !== senderNodeKey) {
+      throw new Error("Team Cast preparation sender does not own the selection");
+    }
+    if (Date.parse(selection.expiresAt) <= Date.parse(now)) {
+      throw new Error("Team Cast mention selection expired before preparation");
+    }
+    const senderIdentity = parseNodeKey(senderNodeKey);
+    const sender = readNode(senderIdentity.runtimeKind, senderIdentity.nativeId);
+    if (!sender || sender.projectId !== selection.projectId) {
+      throw new Error("Team Cast preparation sender is not a live Project Node");
+    }
+    for (const nodeKey of selection.recipientNodeKeys) {
+      exactLiveNode(nodeKey, selection.projectId);
+    }
+    const body = await bodyStore({
+      messageId: logicalMessageId,
+      body: message,
+    });
+    if (Date.parse(selection.expiresAt) <= Date.parse(body.createdAt)) {
+      throw new Error("Team Cast selection expired before body persistence");
+    }
+    const route = {
+      schema_version: 1,
+      kind: "team-cast",
+      plan_id: selection.planId,
+      selection_id: selection.selectionId,
+      project_id: selection.projectId,
+      wake_policy: selection.wakePolicy,
+      expiry: selection.expiresAt,
+    };
+    const logicalMessage = {
+      messageId: logicalMessageId,
+      from: senderNodeKey,
+      senderThreadId: senderNodeKey.startsWith("codex:")
+        ? senderIdentity.nativeId
+        : null,
+      senderNodeKey,
+      body: {
+        messageId: logicalMessageId,
+        bytes: body.bodyBytes,
+        sha256: body.bodySha256,
+        contentRef: body.contentRef,
+      },
+      route,
+      routeFingerprint: createHash("sha256")
+        .update(JSON.stringify(route))
+        .digest("hex"),
+      createdAt: body.createdAt,
+      teamCast: {
+        version: 1,
+        planId: selection.planId,
+        selectionId: selection.selectionId,
+        projectId: selection.projectId,
+        wakePolicy: selection.wakePolicy,
+        recipientNodeKeys: selection.recipientNodeKeys,
+        recipientSetSha256: selection.recipientSetSha256,
+        expiresAt: selection.expiresAt,
+      },
+    };
+    const ledger = await ledgerCommit({
+      logicalMessage,
+      recipients: selection.recipientNodeKeys.map((nodeKey) => ({
+        nodeKey,
+        targetThreadId: nodeKey.startsWith("codex:")
+          ? nodeKey.slice("codex:".length)
+          : null,
+      })),
+      now: body.createdAt,
+    });
+    return {
+      selection: publicTeamCastMentionSelection(selection),
+      logicalMessageId,
+      body: {
+        bytes: body.bodyBytes,
+        sha256: body.bodySha256,
+        contentRef: body.contentRef,
+      },
+      ledger: ledger.record,
+      created: ledger.created,
+      deliveryStarted: false,
+    };
+  });
 }

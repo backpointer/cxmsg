@@ -172,7 +172,8 @@ export function planRetention(
   if (include("ledger")) {
     for (const record of ledger) {
       const messageId = record.logicalMessage.messageId;
-      const deliveries = record.groupDeliveries || [record.delivery];
+      const deliveries =
+        record.teamDeliveries || record.groupDeliveries || [record.delivery];
       const deliveryUpdatedAt = deliveries.reduce(
         (latest, delivery) =>
           delivery.updatedAt > latest ? delivery.updatedAt : latest,
@@ -185,6 +186,7 @@ export function planRetention(
       }
       const reasons = [];
       const coupledQuarantine =
+        !record.teamDeliveries &&
         !record.groupDeliveries &&
         record.delivery.admissionState === "quarantined" &&
         coupledQuarantineIds.has(messageId);
@@ -228,10 +230,15 @@ export function planRetention(
       }
       const reasons = [];
       const linked = ledgerById.get(body.messageId);
+      const linkedDeliveries = linked
+        ? linked.teamDeliveries || linked.groupDeliveries || [linked.delivery]
+        : [];
       if (
-        linked &&
-        (linked.delivery.admissionState !== "admitted" ||
-          !TERMINAL_DELIVERY_STATES.has(linked.delivery.state))
+        linkedDeliveries.some(
+          (delivery) =>
+            delivery.admissionState !== "admitted" ||
+            !TERMINAL_DELIVERY_STATES.has(delivery.state),
+        )
       ) {
         addReason(reasons, "delivery_not_terminal");
       }

@@ -98,6 +98,7 @@ import {
 import {
   publicTeamCastMentionSelection,
   publicTeamCastPlan,
+  prepareTeamCastMentionMessage,
   readTeamCastMentionSelection,
   readTeamCastPlan,
   resolveTeamCastMentionSelection,
@@ -311,6 +312,8 @@ function usage(exitCode = 0) {
              --mention <node-key> [--mention <node-key>...] [--selection-id <uuid>]
              [--recipients] [--json]
   cxmsg team selection <selection-id> [--recipients] [--json]
+  cxmsg team prepare --selection <selection-id> --from <node-key>
+             [--logical-message-id <uuid>] [--json] -- <message...>
   cxmsg message info <message-id|reply-handle|content-ref> [--json]
   cxmsg message show <message-id|reply-handle|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -628,6 +631,46 @@ async function commandScheduler(action) {
 }
 
 function deliveryProjection(record) {
+  if (Array.isArray(record.teamDeliveries)) {
+    const states = {};
+    for (const delivery of record.teamDeliveries) {
+      states[delivery.state] = (states[delivery.state] || 0) + 1;
+    }
+    return {
+      logicalMessageId: record.logicalMessage.messageId,
+      kind: "team-cast",
+      planId: record.logicalMessage.teamCast.planId,
+      selectionId: record.logicalMessage.teamCast.selectionId,
+      projectId: record.logicalMessage.teamCast.projectId,
+      from: record.logicalMessage.from,
+      target: `team:${record.logicalMessage.teamCast.selectionId}`,
+      replyToMessageId: null,
+      admissionState: "admitted",
+      admissionReason: "team_cast_plan",
+      wakePolicy: record.logicalMessage.teamCast.wakePolicy,
+      status: Object.keys(states).length === 1 ? Object.keys(states)[0] : "partial",
+      recipientCount: record.teamDeliveries.length,
+      states,
+      recipients: record.teamDeliveries.map((delivery) => ({
+        deliveryId: delivery.deliveryId,
+        targetNodeKey: delivery.targetNodeKey,
+        status: delivery.state,
+        errorCode: delivery.errorCode || null,
+      })),
+      createdAt: record.logicalMessage.createdAt,
+      updatedAt: record.teamDeliveries.reduce(
+        (latest, delivery) =>
+          delivery.updatedAt > latest ? delivery.updatedAt : latest,
+        record.logicalMessage.createdAt,
+      ),
+      expiry: record.logicalMessage.teamCast.expiresAt,
+      body: {
+        bytes: record.logicalMessage.body.bytes,
+        sha256: record.logicalMessage.body.sha256,
+        contentRef: record.logicalMessage.body.contentRef,
+      },
+    };
+  }
   if (Array.isArray(record.groupDeliveries)) {
     const states = {};
     for (const delivery of record.groupDeliveries) {
@@ -3394,6 +3437,52 @@ async function commandInbox(args) {
 
 async function commandTeam(args) {
   const operation = args.shift();
+  if (operation === "prepare") {
+    let selectionId = null;
+    let senderNodeKey = null;
+    let logicalMessageId;
+    let jsonOutput = false;
+    let message = null;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--") {
+        message = args.join(" ");
+        args.length = 0;
+      } else if (option === "--selection") selectionId = args.shift();
+      else if (option === "--from") senderNodeKey = stableNodeKey(args.shift());
+      else if (option === "--logical-message-id") logicalMessageId = args.shift();
+      else if (option === "--json") jsonOutput = true;
+      else throw new Error(`unknown Team Cast prepare option: ${option}`);
+    }
+    if (!selectionId || !senderNodeKey || !message) {
+      throw new Error(
+        "team prepare requires --selection, --from, and -- <message>",
+      );
+    }
+    const result = await prepareTeamCastMentionMessage({
+      selectionId,
+      senderNodeKey,
+      message,
+      ...(logicalMessageId ? { logicalMessageId } : {}),
+    });
+    const output = {
+      logicalMessageId: result.logicalMessageId,
+      selectionId: result.selection.selectionId,
+      recipientCount: result.selection.recipientCount,
+      wakePolicy: result.selection.wakePolicy,
+      status: "prepared",
+      created: result.created,
+      deliveryStarted: false,
+      body: result.body,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.created ? "prepared" : "unchanged"}\t${output.logicalMessageId}` +
+          `\trecipients=${output.recipientCount}\tdelivery-started=false\n`,
+    );
+    return;
+  }
   if (operation === "selection") {
     const selectionId = args.shift();
     const includeRecipients = args.includes("--recipients");
