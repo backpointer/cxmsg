@@ -65,6 +65,16 @@ candidate revalidation under a mutation lock, recoverable segment backups, an
 audit receipt, and exact-generation restore. Quota exhaustion, Peer Messages,
 ACKs, Triggers, replies, and Doctor findings cannot authorize deletion.
 
+Retention-sensitive writers use owner-private leases behind one Retention
+Mutation Barrier. A future purge must acquire its exclusive mutation lease and
+drain those writers before replanning. The barrier is ordered before Route,
+Job, Message Body, and Delivery Ledger locks; it is released during App Server
+dispatch and model work. A writer cannot upgrade itself into a mutation.
+Delivery Dedup Tombstones require the exclusive mutation context, accept only
+terminal admitted Deliveries without active claims, contain no Message Body,
+and permanently reject reuse as either a Logical Message ID or reply target.
+No CLI creates them before the recoverable purge transaction is complete.
+
 Redacted coordination events are stored in an owner-only segmented JSONL set:
 one 1 MiB active segment and four retained archives. Rotation uses an
 owner-only lock. The event set is operational evidence rather than a complete

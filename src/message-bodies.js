@@ -18,6 +18,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { withFileLock } from "./file-lock.js";
+import { withRetentionWriter } from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const MAX_STORED_MESSAGE_BYTES = 256 * 1024;
@@ -238,45 +239,47 @@ export async function storeMessageBody(
     throw new Error("message body segment size is invalid");
   }
 
-  ensureStore();
-  return withFileLock(MESSAGE_BODY_LOCK_PATH, async () => {
-    const bodySha256 = createHash("sha256").update(body).digest("hex");
-    const existing = listRecords().find(
-      (record) => record.messageId === messageId,
-    );
-    if (existing) {
-      if (existing.bodyBytes !== bodyBytes || existing.bodySha256 !== bodySha256) {
-        throw new Error(`message body idempotency conflict: ${messageId}`);
+  return withRetentionWriter(() => {
+    ensureStore();
+    return withFileLock(MESSAGE_BODY_LOCK_PATH, async () => {
+      const bodySha256 = createHash("sha256").update(body).digest("hex");
+      const existing = listRecords().find(
+        (record) => record.messageId === messageId,
+      );
+      if (existing) {
+        if (existing.bodyBytes !== bodyBytes || existing.bodySha256 !== bodySha256) {
+          throw new Error(`message body idempotency conflict: ${messageId}`);
+        }
+        return bodyReference(existing);
       }
-      return bodyReference(existing);
-    }
 
-    const record = {
-      schemaVersion: 1,
-      recordType: "message-body",
-      messageId,
-      createdAt: new Date().toISOString(),
-      bodyBytes,
-      bodySha256,
-      bodyBase64: Buffer.from(body, "utf8").toString("base64"),
-    };
-    const encoded = `${JSON.stringify(record)}\n`;
-    const encodedBytes = Buffer.byteLength(encoded, "utf8");
-    if (currentStoreBytes() + encodedBytes > quotaBytes) {
-      throw new Error("message body store quota exceeded; no content was deleted");
-    }
+      const record = {
+        schemaVersion: 1,
+        recordType: "message-body",
+        messageId,
+        createdAt: new Date().toISOString(),
+        bodyBytes,
+        bodySha256,
+        bodyBase64: Buffer.from(body, "utf8").toString("base64"),
+      };
+      const encoded = `${JSON.stringify(record)}\n`;
+      const encodedBytes = Buffer.byteLength(encoded, "utf8");
+      if (currentStoreBytes() + encodedBytes > quotaBytes) {
+        throw new Error("message body store quota exceeded; no content was deleted");
+      }
 
-    const active = segmentPaths(MESSAGE_BODY_SEGMENTS_DIR).at(-1) || null;
-    let destination = active;
-    if (destination && quarantinePartialSegment(destination)) destination = null;
-    if (
-      !destination ||
-      statSync(destination).size + encodedBytes > segmentBytes
-    ) {
-      destination = nextSegmentPath();
-    }
-    appendRecord(destination, encoded);
-    return bodyReference(record);
+      const active = segmentPaths(MESSAGE_BODY_SEGMENTS_DIR).at(-1) || null;
+      let destination = active;
+      if (destination && quarantinePartialSegment(destination)) destination = null;
+      if (
+        !destination ||
+        statSync(destination).size + encodedBytes > segmentBytes
+      ) {
+        destination = nextSegmentPath();
+      }
+      appendRecord(destination, encoded);
+      return bodyReference(record);
+    });
   });
 }
 

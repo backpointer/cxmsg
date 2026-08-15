@@ -40,6 +40,11 @@ they carry different authority and delivery semantics.
 - **Delivery Ledger**: the durable evidence history for Logical Messages and
   their recipient-specific Deliveries. It records only states that cxmsg can
   prove.
+- **Delivery Dedup Tombstone**: owner-private immutable evidence that a
+  terminal Logical Message was explicitly selected for Retention purge. It
+  permanently reserves that Logical Message ID and its immutable fingerprint
+  so no retry, reply, or direct Ledger caller can wake it again. It contains no
+  Message Body or Endpoint and is distinct from a Node Directory Tombstone.
 - **Conversation**: a durable ordered context for Logical Messages and replies.
   A Conversation is either Direct or Group and never conveys user authority.
 - **Direct Conversation**: the canonical Conversation between exactly two
@@ -94,6 +99,11 @@ they carry different authority and delivery semantics.
   evidence-protected, or purge-eligible. Its default Interface is read-only;
   any purge uses a separate explicit mutation with durable dedup Tombstones,
   recoverable backups, and an audit receipt.
+- **Retention Mutation Barrier Module**: the Module that admits concurrent
+  ordinary state writers through owner-private leases and grants one exclusive
+  Retention mutation only after those writers drain. It is always acquired
+  before Route, Job, Message Body, or Delivery Ledger locks and creates no
+  deletion or task authority by itself.
 - **Peer Message Context Projection Module**: the Module that converts an
   admitted Peer Message into the minimal model-visible untrusted marker,
   display alias, Message Body or preview, and Reply Handle. Routing, scheduling,

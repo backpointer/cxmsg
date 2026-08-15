@@ -11,6 +11,7 @@ import path from "node:path";
 import { withFileLock } from "./file-lock.js";
 import { finalTurnResult } from "./messaging.js";
 import { processState } from "./process-state.js";
+import { withRetentionWriter } from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import { findThreadTurn } from "./thread-activity.js";
 
@@ -60,15 +61,17 @@ export function listJobs() {
 }
 
 export function writeJob(job) {
-  validateJobId(job.jobId);
-  ensureJobsDirectory();
-  const destination = jobPath(job.jobId);
-  const temporary = `${destination}.${randomUUID()}.tmp`;
-  writeFileSync(temporary, `${JSON.stringify(job, null, 2)}\n`, {
-    mode: 0o600,
+  return withRetentionWriter(() => {
+    validateJobId(job.jobId);
+    ensureJobsDirectory();
+    const destination = jobPath(job.jobId);
+    const temporary = `${destination}.${randomUUID()}.tmp`;
+    writeFileSync(temporary, `${JSON.stringify(job, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    renameSync(temporary, destination);
+    return job;
   });
-  renameSync(temporary, destination);
-  return job;
 }
 
 function buildJob({

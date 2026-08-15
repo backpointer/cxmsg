@@ -59,6 +59,10 @@ and no uncommitted implementation work is mixed into the next slice.
       terminal evidence, and Quarantine.
 - [x] Define quota ownership and behavior at warning and hard limits.
 - [x] Add a read-only purge plan and dry-run output.
+- [x] Add the shared Retention Mutation Barrier to Ledger, Message Body, Job,
+      and Route Admission writers without holding it over model dispatch.
+- [x] Add owner-private Delivery Dedup Tombstones that require the mutation
+      barrier and prevent Logical Message ID or reply-target resurrection.
 - [ ] Add an explicit, recoverable purge mutation with exact selection and an
       audit receipt; automatic deletion remains disabled.
 - [ ] Preserve records referenced by active schedules, Jobs, replies,

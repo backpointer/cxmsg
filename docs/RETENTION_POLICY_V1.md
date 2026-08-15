@@ -7,9 +7,11 @@ Message Bodies, and Route Admission Quarantine without reading Message Body
 text into its plan or starting model work. Retention never creates authority,
 changes a Delivery state, retries a message, or resolves Quarantine.
 
-Version 1 first ships a read-only plan. Automatic deletion and mutation are
-disabled until the purge transaction, dedup Tombstones, backup restoration,
-and crash tests described below are implemented together.
+Version 1 first shipped a read-only plan. The Retention Mutation Barrier and
+Delivery Dedup Tombstone foundations are now implemented, but automatic
+deletion and the purge command remain disabled until segment replacement,
+backup restoration, receipts, and crash tests described below are implemented
+together.
 
 ## Fixed minimum ages
 
@@ -96,6 +98,26 @@ following as one coherent slice:
 A partial implementation must not expose a `purge` command. In particular,
 deleting Message Body or Ledger segment files directly is not an acceptable
 Retention Module implementation.
+
+## Mutation barrier and Tombstone foundation
+
+Every Delivery Ledger truth mutation, Message Body append, Job write, and
+Route Admission prepare transaction enters the Retention Mutation Barrier
+before acquiring its existing store locks. Ordinary writers may run
+concurrently. An exclusive Retention mutation first blocks new writers and
+then drains existing owner-private writer leases. A writer may not upgrade its
+lease to a mutation, and malformed or unverifiable leases fail closed.
+
+The lock order is Retention barrier, Route message lock, Job lock, Message Body
+lock, then Delivery Ledger lock. App Server dispatch and model work occur
+outside the barrier; only durable prepare and evidence mutations enter it.
+
+Delivery Dedup Tombstones live outside swappable Ledger segment directories.
+They require an exclusive Retention mutation, accept only admitted terminal
+Deliveries without an active claim, and permanently block reuse of their
+Logical Message IDs and reply targets. They contain a digest rather than a
+Message Body. Creating Tombstones alone does not delete Ledger records and is
+not exposed as a CLI operation.
 
 ## Privacy and authority
 

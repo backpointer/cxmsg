@@ -25,6 +25,10 @@ import {
   SCHEDULED_WAKE_POLICIES,
 } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
+import {
+  assertRetentionMutation,
+  withRetentionWriter,
+} from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const DELIVERY_LEDGER_SEGMENT_BYTES = 8 * 1024 * 1024;
@@ -47,6 +51,10 @@ export const DELIVERY_LEDGER_INDEX_DIR = path.join(
   DELIVERY_LEDGER_DIR,
   "index",
 );
+export const DELIVERY_LEDGER_TOMBSTONES_DIR = path.join(
+  DELIVERY_LEDGER_DIR,
+  "tombstones",
+);
 export const DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH = path.join(
   DELIVERY_LEDGER_INDEX_DIR,
   "checkpoint.json",
@@ -60,6 +68,7 @@ const REPLY_HANDLE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 export const REPLY_HANDLE_PATTERN = /^m:[0-9A-HJKMNP-TV-Z]{10}$/;
 const CLAIM_RELEASE_REASONS = new Set(["target_busy", "worker_stopping", "dispatch_unavailable"]);
 const INDEX_SHARD_PATTERN = /^([0-9a-f-]{36})\.json$/i;
+const TOMBSTONE_PATTERN = /^([0-9a-f-]{36})\.json$/i;
 const DELIVERY_LEDGER_MAX_INDEX_RECORDS = 4096;
 
 function validateUuid(label, value) {
@@ -97,6 +106,7 @@ function ensureStore() {
   ensurePrivateDirectory(DELIVERY_LEDGER_SEGMENTS_DIR);
   ensurePrivateDirectory(DELIVERY_LEDGER_QUARANTINE_DIR);
   ensurePrivateDirectory(DELIVERY_LEDGER_INDEX_DIR);
+  ensurePrivateDirectory(DELIVERY_LEDGER_TOMBSTONES_DIR);
 }
 
 function assertPrivateRegularFile(filename) {
@@ -374,11 +384,72 @@ function assertPrivateIndexFile(filename) {
 function atomicWriteIndex(filename, value) {
   const temporary = `${filename}.${randomUUID()}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+  const fileDescriptor = openSync(
+    temporary,
+    constants.O_RDONLY | (constants.O_NOFOLLOW || 0),
+  );
+  try {
+    fsyncSync(fileDescriptor);
+  } finally {
+    closeSync(fileDescriptor);
+  }
   renameSync(temporary, filename);
+  const directoryDescriptor = openSync(path.dirname(filename), constants.O_RDONLY);
+  try {
+    fsyncSync(directoryDescriptor);
+  } finally {
+    closeSync(directoryDescriptor);
+  }
 }
 
 function indexShardPath(messageId) {
   return path.join(DELIVERY_LEDGER_INDEX_DIR, `${validateUuid("logical message id", messageId)}.json`);
+}
+
+function tombstonePath(messageId) {
+  return path.join(
+    DELIVERY_LEDGER_TOMBSTONES_DIR,
+    `${validateUuid("logical message id", messageId)}.json`,
+  );
+}
+
+function validDedupTombstone(record, messageId) {
+  return Boolean(
+    record?.schemaVersion === 1 &&
+      record.recordType === "delivery-dedup-tombstone" &&
+      record.messageId === messageId &&
+      SHA256_PATTERN.test(record.deliveryFingerprintSha256 || "") &&
+      validTimestamp(record.purgedAt) &&
+      UUID_PATTERN.test(record.backupId || "")
+  );
+}
+
+function readDedupTombstone(messageId) {
+  const filename = tombstonePath(messageId);
+  if (!existsSync(filename)) return null;
+  assertPrivateIndexFile(filename);
+  let record;
+  try {
+    record = JSON.parse(readFileSync(filename, "utf8"));
+  } catch {
+    throw new Error(`Delivery dedup Tombstone is malformed: ${messageId}`);
+  }
+  if (!validDedupTombstone(record, messageId)) {
+    throw new Error(`Delivery dedup Tombstone failed validation: ${messageId}`);
+  }
+  return record;
+}
+
+function writeDedupTombstone(record) {
+  const existing = readDedupTombstone(record.messageId);
+  if (existing) {
+    if (JSON.stringify(existing) !== JSON.stringify(record)) {
+      throw new Error(`Delivery dedup Tombstone conflict: ${record.messageId}`);
+    }
+    return existing;
+  }
+  atomicWriteIndex(tombstonePath(record.messageId), record);
+  return record;
 }
 
 function indexProjectionDigest(projection) {
@@ -802,6 +873,13 @@ function validateStorageOptions(quotaBytes, segmentBytes) {
   }
 }
 
+function withDeliveryLedgerMutation(callback) {
+  return withRetentionWriter(() => {
+    ensureStore();
+    return withFileLock(DELIVERY_LEDGER_LOCK_PATH, callback);
+  });
+}
+
 export function readDeliveryLedger(messageId) {
   return ledgerState(messageId);
 }
@@ -854,10 +932,64 @@ export async function readDeliveryLedgerIndexed(messageId) {
 }
 
 export async function rebuildDeliveryLedgerIndex() {
-  ensureStore();
-  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+  return withDeliveryLedgerMutation(async () => {
     const messages = rebuildDeliveryIndexLocked();
     return { messageCount: messages.size, manifestSha256: manifestDigest(ledgerManifest()) };
+  });
+}
+
+export function listDeliveryDedupTombstones() {
+  ensureStore();
+  return readdirSync(DELIVERY_LEDGER_TOMBSTONES_DIR)
+    .filter((name) => TOMBSTONE_PATTERN.test(name))
+    .sort()
+    .map((name) => readDedupTombstone(name.slice(0, -5)));
+}
+
+export async function createDeliveryDedupTombstones(
+  { messageIds, backupId, purgedAt = new Date().toISOString() },
+) {
+  assertRetentionMutation();
+  if (!Array.isArray(messageIds) || messageIds.length < 1) {
+    throw new Error("Delivery dedup Tombstones require at least one message id");
+  }
+  validateUuid("Retention backup id", backupId);
+  if (!validTimestamp(purgedAt)) throw new Error("invalid Delivery purge timestamp");
+  const unique = [...new Set(messageIds.map((messageId) =>
+    validateUuid("logical message id", messageId),
+  ))].sort();
+  ensureStore();
+  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+    const messages = readDeliveryIndexLocked();
+    const records = unique.map((messageId) => {
+      const message = messages.get(messageId);
+      if (!message) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
+      if (
+        message.delivery.admissionState !== "admitted" ||
+        !["turn_started", "expired", "cancelled"].includes(message.delivery.state) ||
+        message.delivery.claim
+      ) {
+        throw new Error(`Delivery is not terminal and purgeable: ${messageId}`);
+      }
+      return {
+        schemaVersion: 1,
+        recordType: "delivery-dedup-tombstone",
+        messageId,
+        deliveryFingerprintSha256: createHash("sha256")
+          .update(JSON.stringify({
+            logicalMessage: message.logicalMessage,
+            target: message.delivery.target,
+            targetThreadId: message.delivery.targetThreadId,
+            admissionState: message.delivery.admissionState,
+            admissionReason: message.delivery.admissionReason,
+            wakePolicy: message.delivery.wakePolicy,
+          }))
+          .digest("hex"),
+        purgedAt,
+        backupId,
+      };
+    });
+    return records.map(writeDedupTombstone);
   });
 }
 
@@ -901,9 +1033,21 @@ export async function commitSingleRecipientDelivery(
     throw new Error("reply handle factory must be a function");
   }
 
-  ensureStore();
-  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+  return withDeliveryLedgerMutation(async () => {
     const messages = readDeliveryIndexLocked();
+    if (readDedupTombstone(logicalMessage.messageId)) {
+      throw new Error(
+        `Delivery Ledger message was permanently purged: ${logicalMessage.messageId}`,
+      );
+    }
+    if (
+      logicalMessage.replyToMessageId &&
+      readDedupTombstone(logicalMessage.replyToMessageId)
+    ) {
+      throw new Error(
+        `peer reply references a permanently purged message: ${logicalMessage.replyToMessageId}`,
+      );
+    }
     const existing = messages.get(logicalMessage.messageId);
     if (existing) {
       if (
@@ -1001,8 +1145,7 @@ export async function beginImmediateDelivery(messageId, options = {}) {
   const quotaBytes = options.quotaBytes ?? DELIVERY_LEDGER_QUOTA_BYTES;
   const segmentBytes = options.segmentBytes ?? DELIVERY_LEDGER_SEGMENT_BYTES;
   validateStorageOptions(quotaBytes, segmentBytes);
-  ensureStore();
-  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+  return withDeliveryLedgerMutation(async () => {
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
@@ -1057,8 +1200,7 @@ export async function claimScheduledDelivery(
   }
   if (!validTimestamp(now)) throw new Error("invalid Delivery claim timestamp");
   validateStorageOptions(quotaBytes, segmentBytes);
-  ensureStore();
-  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+  return withDeliveryLedgerMutation(async () => {
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
@@ -1116,8 +1258,7 @@ export async function releaseScheduledDeliveryClaim(
   if (!CLAIM_RELEASE_REASONS.has(reason)) throw new Error("invalid Delivery claim release reason");
   if (!validTimestamp(now)) throw new Error("invalid Delivery claim release timestamp");
   validateStorageOptions(quotaBytes, segmentBytes);
-  ensureStore();
-  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+  return withDeliveryLedgerMutation(async () => {
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
@@ -1167,8 +1308,7 @@ export async function beginScheduledDelivery(
   validateUuid("scheduler worker id", workerId);
   if (!validTimestamp(now)) throw new Error("invalid scheduled Delivery timestamp");
   validateStorageOptions(quotaBytes, segmentBytes);
-  ensureStore();
-  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+  return withDeliveryLedgerMutation(async () => {
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
@@ -1218,8 +1358,7 @@ export async function cancelScheduledDelivery(
   validateUuid("logical message id", messageId);
   if (!validTimestamp(now)) throw new Error("invalid scheduled Delivery cancellation timestamp");
   validateStorageOptions(quotaBytes, segmentBytes);
-  ensureStore();
-  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+  return withDeliveryLedgerMutation(async () => {
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
@@ -1284,8 +1423,7 @@ export async function appendDeliveryEvidence(
   const quotaBytes = options.quotaBytes ?? DELIVERY_LEDGER_QUOTA_BYTES;
   const segmentBytes = options.segmentBytes ?? DELIVERY_LEDGER_SEGMENT_BYTES;
   validateStorageOptions(quotaBytes, segmentBytes);
-  ensureStore();
-  return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
+  return withDeliveryLedgerMutation(async () => {
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);

@@ -38,6 +38,7 @@ import {
 } from "./node-directory.js";
 import { writeCoordinationEvent } from "./observability.js";
 import { readSessionRecord } from "./registry.js";
+import { withRetentionWriter } from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const ROUTE_BINDINGS_DIR = path.join(CXMSG_STATE_DIR, "route-bindings");
@@ -500,6 +501,12 @@ function deliveryLockPath(messageId) {
   return path.join(ROUTE_DELIVERIES_DIR, `${validateUuid("logical message id", messageId)}.lock`);
 }
 
+function withRouteMutation(messageId, callback) {
+  return withRetentionWriter(() =>
+    withFileLock(deliveryLockPath(messageId), callback),
+  );
+}
+
 function validLegacyRouteDeliveryRecord(record, messageId) {
   return Boolean(
     record?.version === 1 &&
@@ -702,7 +709,7 @@ export async function routePeerMessage(
   ensureDirectory(ROUTE_DELIVERIES_DIR);
 
   let prepared;
-  await withFileLock(deliveryLockPath(logicalMessageId), async () => {
+  await withRouteMutation(logicalMessageId, async () => {
     const deliveryState = routeDeliveryState(logicalMessageId);
     if (deliveryState.state === "invalid") {
       throw new Error(`Route Delivery failed validation: ${logicalMessageId}`);
@@ -931,7 +938,7 @@ export async function reconcileRouteDelivery(
   const accepted =
     evidence?.state === "accepted" && UUID_PATTERN.test(evidence.turnId || "");
   const reconciledAt = new Date(now).toISOString();
-  const updated = await withFileLock(deliveryLockPath(logicalMessageId), async () => {
+  const updated = await withRouteMutation(logicalMessageId, async () => {
     const state = routeDeliveryState(logicalMessageId);
     if (state.state !== "valid") {
       throw new Error(`Route Delivery changed or failed validation: ${logicalMessageId}`);
