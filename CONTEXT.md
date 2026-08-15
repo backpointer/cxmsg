@@ -70,6 +70,9 @@ they carry different authority and delivery semantics.
   Conversation, Cluster, or Project+role selector to a frozen same-Project
   recipient Node set. A Plan records selector evidence and a token-cost ceiling
   but starts no Delivery and conveys no authority.
+- **Team Cast Mention Selection**: a bounded immutable subset of an unexpired
+  Team Cast Plan chosen by exact stable Node keys. It estimates possible wake
+  turns but is not itself a Delivery or wake operation.
 
 ## Identity and topology
 

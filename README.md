@@ -539,12 +539,16 @@ cxmsg team resolve --from codex:<uuid> --cluster review-team --json
 cxmsg team resolve --from codex:<uuid> \
   --project <project-uuid> --role reviewer --json
 cxmsg team plan <plan-uuid> --json
+cxmsg team select-mentions --plan <plan-uuid> \
+  --from codex:<uuid> --mention codex:<uuid> --json
 ```
 
 Default output exposes only the recipient count and set digest. Use
 `--recipients` for an explicit owner-local identity listing. Plans expire after
-15 minutes and cannot be rebound to a changed selector. Mention wake, wake-all,
-and scheduled fan-out are not enabled by this selector-only release. See
+15 minutes and cannot be rebound to a changed selector. Explicit mentions use
+stable Node keys only and produce another zero-delivery fixed subset; they do
+not parse names from prose. Mention dispatch, wake-all, and scheduled fan-out
+are not enabled by this selector-only release. See
 [Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md).
 
 When a Directory Project exists, `cxmsg route bind` also pins the binding to

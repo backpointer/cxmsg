@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -34,6 +34,8 @@ const ids = {
   crossPlan: "e0345678-5234-4234-8234-123456789abc",
   tombstonePlan: "f0345678-5234-4234-8234-123456789abc",
   cliPlan: "11345678-6234-4234-8234-123456789abc",
+  mentionSelection: "21345678-6234-4234-8234-123456789abc",
+  cliSelection: "31345678-6234-4234-8234-123456789abc",
 };
 const keys = Object.fromEntries(
   ["sender", "first", "second", "cross"].map((name) => [
@@ -182,6 +184,86 @@ test("CLI exposes a redacted resolution plan and starts no delivery", () => {
   const output = JSON.parse(result.stdout);
   assert.equal(output.deliveryStarted, false);
   assert.equal(output.recipientCount, 2);
+  assert.equal("recipientNodeKeys" in output, false);
+});
+
+test("mention metadata selects only an explicit bounded plan subset", async () => {
+  const result = await teams.resolveTeamCastMentionSelection({
+    planId: ids.groupPlan,
+    senderNodeKey: keys.sender,
+    mentionedNodeKeys: [keys.second],
+    selectionId: ids.mentionSelection,
+  });
+  assert.equal(result.created, true);
+  assert.deepEqual(result.selection.recipientNodeKeys, [keys.second]);
+  const output = teams.publicTeamCastMentionSelection(result.selection);
+  assert.equal(output.wakePolicy, "mention-wake");
+  assert.equal(output.recipientCount, 1);
+  assert.equal(output.estimatedWakeTurns, 1);
+  assert.equal("recipientNodeKeys" in output, false);
+  assert.equal(existsSync(path.join(stateDir, "delivery-ledger")), false);
+  assert.equal(statSync(teams.TEAM_CAST_SELECTIONS_DIR).mode & 0o777, 0o700);
+  assert.equal(
+    statSync(
+      path.join(
+        teams.TEAM_CAST_SELECTIONS_DIR,
+        `${ids.mentionSelection}.json`,
+      ),
+    ).mode & 0o777,
+    0o600,
+  );
+
+  const repeated = await teams.resolveTeamCastMentionSelection({
+    planId: ids.groupPlan,
+    senderNodeKey: keys.sender,
+    mentionedNodeKeys: [keys.second],
+    selectionId: ids.mentionSelection,
+  });
+  assert.equal(repeated.created, false);
+  await assert.rejects(
+    teams.resolveTeamCastMentionSelection({
+      planId: ids.groupPlan,
+      senderNodeKey: keys.sender,
+      mentionedNodeKeys: [keys.cross],
+    }),
+    /outside the fixed plan/,
+  );
+  await assert.rejects(
+    teams.resolveTeamCastMentionSelection({
+      planId: ids.groupPlan,
+      senderNodeKey: keys.sender,
+      mentionedNodeKeys: [keys.second, keys.second],
+    }),
+    /duplicate recipients/,
+  );
+});
+
+test("CLI mention selection remains an explicit zero-delivery operation", () => {
+  const result = spawnSync(
+    process.execPath,
+    [
+      path.resolve("bin/cxmsg.js"),
+      "team",
+      "select-mentions",
+      "--plan",
+      ids.groupPlan,
+      "--from",
+      keys.sender,
+      "--mention",
+      keys.first,
+      "--selection-id",
+      ids.cliSelection,
+      "--json",
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, CXMSG_STATE_DIR: stateDir },
+    },
+  );
+  assert.equal(result.status, 0, result.stderr);
+  const output = JSON.parse(result.stdout);
+  assert.equal(output.deliveryStarted, false);
+  assert.equal(output.recipientCount, 1);
   assert.equal("recipientNodeKeys" in output, false);
 });
 

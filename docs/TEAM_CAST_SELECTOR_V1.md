@@ -63,9 +63,28 @@ cxmsg team plan <plan-uuid> --json
 cxmsg team plan <plan-uuid> --recipients --json
 ```
 
+Resolve explicit mention metadata to a bounded subset of an unexpired plan:
+
+```bash
+cxmsg team select-mentions --plan <plan-uuid> \
+  --from codex:<uuid> \
+  --mention codex:<uuid> \
+  --mention claude:<uuid> \
+  --json
+cxmsg team selection <selection-uuid> --json
+```
+
+Mention selection accepts 1–16 exact stable Node keys, rejects duplicates and
+identities outside the frozen plan, and rechecks each selected Node's lifecycle
+and Project. It stores only an immutable recipient subset and digest. It does
+not parse prose or infer `@name` aliases, so a display-name collision cannot
+change the recipient. It also starts zero Deliveries and zero turns; the
+subsequent multi-recipient Ledger and dispatch gates are not implemented by
+this command.
+
 The JSON result includes `deliveryStarted: false` when resolving. Membership,
 role, and plan possession are coordination metadata only; none authorizes work,
 grants a permission, approves a prompt, or expands a peer's authority.
 
-Mention wake, explicit wake-all, per-recipient scheduled policies, Delivery
+Mention dispatch, explicit wake-all, per-recipient scheduled policies, Delivery
 batch commit, and digest composition remain separately gated future work.

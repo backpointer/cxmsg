@@ -32,12 +32,15 @@ import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const TEAM_CAST_DIR = path.join(CXMSG_STATE_DIR, "team-casts");
 export const TEAM_CAST_PLANS_DIR = path.join(TEAM_CAST_DIR, "plans");
+export const TEAM_CAST_SELECTIONS_DIR = path.join(TEAM_CAST_DIR, "selections");
 const TEAM_CAST_LOCK_PATH = path.join(TEAM_CAST_DIR, "plans.lock");
+const TEAM_CAST_SELECTION_LOCK_PATH = path.join(TEAM_CAST_DIR, "selections.lock");
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const NODE_KEY_PATTERN = /^(codex|claude):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
 const IDENTIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const PLAN_LIMIT = 2_048;
 const RECIPIENT_LIMIT = 64;
+const MENTION_LIMIT = 16;
 const PLAN_TTL_MS = 15 * 60 * 1_000;
 const PLAN_MAX_BYTES = 64 * 1024;
 const PLAN_FIELDS = new Set([
@@ -46,6 +49,19 @@ const PLAN_FIELDS = new Set([
   "senderNodeKey",
   "projectId",
   "selector",
+  "recipientNodeKeys",
+  "recipientSetSha256",
+  "estimatedWakeTurns",
+  "createdAt",
+  "expiresAt",
+]);
+const SELECTION_FIELDS = new Set([
+  "version",
+  "selectionId",
+  "planId",
+  "senderNodeKey",
+  "projectId",
+  "wakePolicy",
   "recipientNodeKeys",
   "recipientSetSha256",
   "estimatedWakeTurns",
@@ -76,6 +92,11 @@ function parseNodeKey(value) {
 
 function ensureDirectory(directory) {
   if (!existsSync(directory)) mkdirSync(directory, { mode: 0o700 });
+  assertPrivateDirectory(directory);
+  chmodSync(directory, 0o700);
+}
+
+function assertPrivateDirectory(directory) {
   const metadata = lstatSync(directory);
   if (
     !metadata.isDirectory() ||
@@ -84,12 +105,15 @@ function ensureDirectory(directory) {
   ) {
     throw new Error("Team Cast storage must be owner-controlled");
   }
-  chmodSync(directory, 0o700);
+  if ((metadata.mode & 0o077) !== 0) {
+    throw new Error("Team Cast storage failed privacy validation");
+  }
 }
 
 function ensureStorage() {
   ensureDirectory(TEAM_CAST_DIR);
   ensureDirectory(TEAM_CAST_PLANS_DIR);
+  ensureDirectory(TEAM_CAST_SELECTIONS_DIR);
 }
 
 function planPath(planId) {
@@ -170,6 +194,38 @@ function validPlan(plan) {
   );
 }
 
+function validMentionSelection(selection) {
+  return Boolean(
+    selection?.version === 1 &&
+      UUID_PATTERN.test(selection.selectionId || "") &&
+      UUID_PATTERN.test(selection.planId || "") &&
+      NODE_KEY_PATTERN.test(selection.senderNodeKey || "") &&
+      UUID_PATTERN.test(selection.projectId || "") &&
+      selection.wakePolicy === "mention-wake" &&
+      Array.isArray(selection.recipientNodeKeys) &&
+      selection.recipientNodeKeys.length >= 1 &&
+      selection.recipientNodeKeys.length <= MENTION_LIMIT &&
+      selection.recipientNodeKeys.every((nodeKey) =>
+        NODE_KEY_PATTERN.test(nodeKey),
+      ) &&
+      JSON.stringify([...selection.recipientNodeKeys].sort()) ===
+        JSON.stringify(selection.recipientNodeKeys) &&
+      new Set(selection.recipientNodeKeys).size ===
+        selection.recipientNodeKeys.length &&
+      !selection.recipientNodeKeys.includes(selection.senderNodeKey) &&
+      /^[0-9a-f]{64}$/.test(selection.recipientSetSha256 || "") &&
+      selection.recipientSetSha256 ===
+        createHash("sha256")
+          .update(JSON.stringify(selection.recipientNodeKeys))
+          .digest("hex") &&
+      selection.estimatedWakeTurns === selection.recipientNodeKeys.length &&
+      Number.isFinite(Date.parse(selection.createdAt || "")) &&
+      Number.isFinite(Date.parse(selection.expiresAt || "")) &&
+      Date.parse(selection.expiresAt) > Date.parse(selection.createdAt) &&
+      Object.keys(selection).every((field) => SELECTION_FIELDS.has(field)),
+  );
+}
+
 function secureRead(filename) {
   try {
     const metadata = lstatSync(filename);
@@ -220,6 +276,70 @@ function writePlan(plan) {
     closeSync(directoryDescriptor);
   }
   return plan;
+}
+
+function selectionPath(selectionId) {
+  return path.join(
+    TEAM_CAST_SELECTIONS_DIR,
+    `${validateUuid("Team Cast selection id", selectionId)}.json`,
+  );
+}
+
+function secureReadSelection(filename) {
+  try {
+    const metadata = lstatSync(filename);
+    if (
+      !metadata.isFile() ||
+      metadata.isSymbolicLink() ||
+      metadata.nlink !== 1 ||
+      metadata.uid !== process.getuid() ||
+      (metadata.mode & 0o077) !== 0 ||
+      metadata.size > PLAN_MAX_BYTES
+    ) {
+      return null;
+    }
+    const selection = JSON.parse(readFileSync(filename, "utf8"));
+    return validMentionSelection(selection) ? selection : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeSelection(selection) {
+  if (!validMentionSelection(selection)) {
+    throw new Error("invalid Team Cast mention selection");
+  }
+  const serialized = `${JSON.stringify(selection, null, 2)}\n`;
+  if (Buffer.byteLength(serialized, "utf8") > PLAN_MAX_BYTES) {
+    throw new Error("Team Cast mention selection exceeds its bounded size");
+  }
+  const destination = selectionPath(selection.selectionId);
+  const temporary = `${destination}.${randomUUID()}.tmp`;
+  const descriptor = openSync(
+    temporary,
+    constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_WRONLY |
+      constants.O_NOFOLLOW,
+    0o600,
+  );
+  try {
+    writeFileSync(descriptor, serialized);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+  renameSync(temporary, destination);
+  const directoryDescriptor = openSync(
+    TEAM_CAST_SELECTIONS_DIR,
+    constants.O_RDONLY,
+  );
+  try {
+    fsyncSync(directoryDescriptor);
+  } finally {
+    closeSync(directoryDescriptor);
+  }
+  return selection;
 }
 
 function exactLiveNode(nodeKey, projectId) {
@@ -432,15 +552,7 @@ export async function resolveTeamCastPlan({
 export function readTeamCastPlan(planId) {
   if (!existsSync(TEAM_CAST_PLANS_DIR)) return null;
   for (const directory of [TEAM_CAST_DIR, TEAM_CAST_PLANS_DIR]) {
-    const metadata = lstatSync(directory);
-    if (
-      !metadata.isDirectory() ||
-      metadata.isSymbolicLink() ||
-      metadata.uid !== process.getuid() ||
-      (metadata.mode & 0o077) !== 0
-    ) {
-      throw new Error("Team Cast storage failed privacy validation");
-    }
+    assertPrivateDirectory(directory);
   }
   const plan = secureRead(planPath(planId));
   if (!plan && existsSync(planPath(planId))) {
@@ -465,6 +577,133 @@ export function publicTeamCastPlan(plan, { includeRecipients = false } = {}) {
     expired: Date.parse(plan.expiresAt) <= Date.now(),
     ...(includeRecipients
       ? { recipientNodeKeys: [...plan.recipientNodeKeys] }
+      : {}),
+  };
+}
+
+export async function resolveTeamCastMentionSelection({
+  planId,
+  senderNodeKey,
+  mentionedNodeKeys,
+  selectionId = randomUUID(),
+  now = new Date().toISOString(),
+}) {
+  planId = validateUuid("Team Cast plan id", planId);
+  selectionId = validateUuid("Team Cast selection id", selectionId);
+  senderNodeKey = normalizeNodeKey(senderNodeKey);
+  if (!Number.isFinite(Date.parse(now))) {
+    throw new Error("Team Cast selection timestamp is invalid");
+  }
+  const plan = readTeamCastPlan(planId);
+  if (!plan) throw new Error(`unknown Team Cast plan: ${planId}`);
+  if (plan.senderNodeKey !== senderNodeKey) {
+    throw new Error("Team Cast selection sender does not own the plan");
+  }
+  if (Date.parse(plan.expiresAt) <= Date.parse(now)) {
+    throw new Error("Team Cast plan expired before mention selection");
+  }
+  if (
+    !Array.isArray(mentionedNodeKeys) ||
+    mentionedNodeKeys.length < 1 ||
+    mentionedNodeKeys.length > MENTION_LIMIT
+  ) {
+    throw new Error(`mention-wake requires 1-${MENTION_LIMIT} explicit mentions`);
+  }
+  const normalized = mentionedNodeKeys.map(normalizeNodeKey);
+  if (new Set(normalized).size !== normalized.length) {
+    throw new Error("mention-wake contains duplicate recipients");
+  }
+  const recipients = normalized.sort();
+  for (const nodeKey of recipients) {
+    if (!plan.recipientNodeKeys.includes(nodeKey)) {
+      throw new Error(`mention-wake recipient is outside the fixed plan: ${nodeKey}`);
+    }
+    exactLiveNode(nodeKey, plan.projectId);
+  }
+  const selection = {
+    version: 1,
+    selectionId,
+    planId,
+    senderNodeKey,
+    projectId: plan.projectId,
+    wakePolicy: "mention-wake",
+    recipientNodeKeys: recipients,
+    recipientSetSha256: createHash("sha256")
+      .update(JSON.stringify(recipients))
+      .digest("hex"),
+    estimatedWakeTurns: recipients.length,
+    createdAt: now,
+    expiresAt: plan.expiresAt,
+  };
+  ensureStorage();
+  return withFileLock(TEAM_CAST_SELECTION_LOCK_PATH, async () => {
+    const names = readdirSync(TEAM_CAST_SELECTIONS_DIR).filter((name) =>
+      name.endsWith(".json"),
+    );
+    if (names.length > PLAN_LIMIT) {
+      throw new Error("Team Cast mention selection limit exceeded");
+    }
+    const existing = secureReadSelection(selectionPath(selectionId));
+    if (existing) {
+      if (
+        existing.planId !== selection.planId ||
+        existing.senderNodeKey !== selection.senderNodeKey ||
+        existing.recipientSetSha256 !== selection.recipientSetSha256
+      ) {
+        throw new Error(
+          `Team Cast mention selection idempotency conflict: ${selectionId}`,
+        );
+      }
+      return { selection: existing, created: false };
+    }
+    if (existsSync(selectionPath(selectionId))) {
+      throw new Error(
+        `Team Cast mention selection failed validation: ${selectionId}`,
+      );
+    }
+    if (names.length >= PLAN_LIMIT) {
+      throw new Error("Team Cast mention selection limit reached");
+    }
+    return { selection: writeSelection(selection), created: true };
+  });
+}
+
+export function readTeamCastMentionSelection(selectionId) {
+  if (!existsSync(TEAM_CAST_SELECTIONS_DIR)) return null;
+  for (const directory of [TEAM_CAST_DIR, TEAM_CAST_SELECTIONS_DIR]) {
+    assertPrivateDirectory(directory);
+  }
+  const selection = secureReadSelection(selectionPath(selectionId));
+  if (!selection && existsSync(selectionPath(selectionId))) {
+    throw new Error(
+      `Team Cast mention selection failed validation: ${selectionId}`,
+    );
+  }
+  return selection;
+}
+
+export function publicTeamCastMentionSelection(
+  selection,
+  { includeRecipients = false } = {},
+) {
+  if (!validMentionSelection(selection)) {
+    throw new Error("invalid Team Cast mention selection");
+  }
+  return {
+    version: selection.version,
+    selectionId: selection.selectionId,
+    planId: selection.planId,
+    senderNodeKey: selection.senderNodeKey,
+    projectId: selection.projectId,
+    wakePolicy: selection.wakePolicy,
+    recipientCount: selection.recipientNodeKeys.length,
+    recipientSetSha256: selection.recipientSetSha256,
+    estimatedWakeTurns: selection.estimatedWakeTurns,
+    createdAt: selection.createdAt,
+    expiresAt: selection.expiresAt,
+    expired: Date.parse(selection.expiresAt) <= Date.now(),
+    ...(includeRecipients
+      ? { recipientNodeKeys: [...selection.recipientNodeKeys] }
       : {}),
   };
 }

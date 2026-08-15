@@ -761,6 +761,13 @@ upper-bound wake-turn estimate. Resolution starts zero Deliveries and zero
 turns. Mention wake, explicit wake-all, digest composition, and scheduled
 per-recipient consumption remain gated rather than inferred from the plan.
 
+Version 0.34.0 adds the next non-dispatch gate: 1–16 explicit stable-Node
+mentions resolve to an immutable subset of an unexpired Team Cast plan. The
+selection revalidates Node lifecycle and Project identity, rejects duplicates
+and out-of-plan recipients, exposes a wake-cost ceiling, and still creates zero
+Deliveries and zero turns. This deliberately avoids ambiguous display-name or
+prose parsing before the multi-recipient Ledger invariant is generalized.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

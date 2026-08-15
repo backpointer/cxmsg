@@ -96,8 +96,11 @@ import {
   storeOnlyGroupMessage,
 } from "../src/group-conversations.js";
 import {
+  publicTeamCastMentionSelection,
   publicTeamCastPlan,
+  readTeamCastMentionSelection,
   readTeamCastPlan,
+  resolveTeamCastMentionSelection,
   resolveTeamCastPlan,
 } from "../src/team-cast.js";
 import {
@@ -304,6 +307,10 @@ function usage(exitCode = 0) {
   cxmsg team resolve --from <node-key> (--conversation <id> | --cluster <id> | --project <uuid> --role <role>)
              [--plan-id <uuid>] [--recipients] [--json]
   cxmsg team plan <plan-id> [--recipients] [--json]
+  cxmsg team select-mentions --plan <plan-id> --from <node-key>
+             --mention <node-key> [--mention <node-key>...] [--selection-id <uuid>]
+             [--recipients] [--json]
+  cxmsg team selection <selection-id> [--recipients] [--json]
   cxmsg message info <message-id|reply-handle|content-ref> [--json]
   cxmsg message show <message-id|reply-handle|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -3387,6 +3394,74 @@ async function commandInbox(args) {
 
 async function commandTeam(args) {
   const operation = args.shift();
+  if (operation === "selection") {
+    const selectionId = args.shift();
+    const includeRecipients = args.includes("--recipients");
+    const jsonOutput = args.includes("--json");
+    if (
+      !selectionId ||
+      args.some((value) => !["--recipients", "--json"].includes(value))
+    ) {
+      usage(2);
+    }
+    const selection = readTeamCastMentionSelection(selectionId);
+    if (!selection) {
+      throw new Error(`unknown Team Cast mention selection: ${selectionId}`);
+    }
+    const output = publicTeamCastMentionSelection(selection, {
+      includeRecipients,
+    });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${output.selectionId}\tmention-wake\trecipients=${output.recipientCount}` +
+          `\twake-ceiling=${output.estimatedWakeTurns}\t${output.recipientSetSha256}\n`,
+    );
+    return;
+  }
+  if (operation === "select-mentions") {
+    let planId = null;
+    let senderNodeKey = null;
+    let selectionId;
+    const mentionedNodeKeys = [];
+    let includeRecipients = false;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--plan") planId = args.shift();
+      else if (option === "--from") senderNodeKey = stableNodeKey(args.shift());
+      else if (option === "--mention") {
+        mentionedNodeKeys.push(stableNodeKey(args.shift()));
+      } else if (option === "--selection-id") selectionId = args.shift();
+      else if (option === "--recipients") includeRecipients = true;
+      else if (option === "--json") jsonOutput = true;
+      else throw new Error(`unknown Team Cast mention option: ${option}`);
+    }
+    if (!planId || !senderNodeKey) {
+      throw new Error("team select-mentions requires --plan and --from");
+    }
+    const result = await resolveTeamCastMentionSelection({
+      planId,
+      senderNodeKey,
+      mentionedNodeKeys,
+      ...(selectionId ? { selectionId } : {}),
+    });
+    const output = {
+      ...publicTeamCastMentionSelection(result.selection, {
+        includeRecipients,
+      }),
+      created: result.created,
+      deliveryStarted: false,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.created ? "selected" : "unchanged"}\t${output.selectionId}` +
+          `\trecipients=${output.recipientCount}\twake-ceiling=${output.estimatedWakeTurns}` +
+          `\tdelivery-started=false\n`,
+    );
+    return;
+  }
   if (operation === "plan") {
     const planId = args.shift();
     const includeRecipients = args.includes("--recipients");

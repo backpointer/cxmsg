@@ -197,6 +197,8 @@ model wake-ups and exact per-recipient evidence.
       selector resolves to a fixed recipient set before fan-out.
 - [x] Reject ambiguous, cross-Project, Tombstoned, and Execution Thread
       recipients before committing the batch.
+- [x] Resolve 1–16 explicit stable-Node mentions to an immutable subset of an
+      unexpired plan without parsing display-name aliases or starting Delivery.
 - [ ] Add `mention-wake` with bounded mention syntax.
 - [ ] Add explicit `wake-all` with per-recipient fallback and token-cost
       visibility.

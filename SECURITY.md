@@ -330,6 +330,12 @@ identities, selector evidence, digests, timestamps, and a wake-cost ceiling.
 Possessing a plan cannot grant, approve, delegate, dispatch, or bypass Route
 Admission. See [Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md).
 
+Mention selection is explicit metadata, not an `@display-name` parser. It
+accepts at most 16 exact stable Node keys already present in an unexpired plan,
+rechecks lifecycle and Project identity, and rejects duplicates. The selection
+remains a zero-delivery intent: its `mention-wake` label cannot itself wake a
+model, invoke a transport, or establish authority.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.
