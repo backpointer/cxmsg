@@ -152,6 +152,25 @@ test("Claude bridge returns native downstream status without turning it into an 
     status: "delivered",
   });
   assert.equal(events[0].phase, "status-returned");
+
+  const failedEvents = [];
+  const failed = await returnClaudePeerStatus(
+    "coordinator",
+    {
+      fromSocket: "/tmp/cc-socks/12345.sock",
+      messageId: MESSAGE_ID,
+    },
+    "denied",
+    {
+      send: async () => {
+        throw Object.assign(new Error("blocked"), { code: "EPERM" });
+      },
+      log: async (event) => failedEvents.push(event),
+    },
+  );
+  assert.equal(failed, false);
+  assert.equal(failedEvents[0].phase, "status-return");
+  assert.equal(failedEvents[0].errorCode, "EPERM");
 });
 
 test("Claude cross-session frames reject malformed stable sender identity", () => {

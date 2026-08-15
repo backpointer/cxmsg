@@ -1038,6 +1038,10 @@ the model ACK, mark the task complete, or wake Codex. Previously these control
 frames were rejected as invalid peer frames.
 The control-frame shape is compatibility-tested against Claude Code 2.1.232;
 an unknown or malformed status frame fails closed instead of being inferred.
+The native control frame carries no sender identity. cxmsg therefore treats it
+as unauthenticated same-user advisory evidence correlated by the random
+transport message ID. Native receipt state never gates routing, retry, wake,
+ACK, completion, permission, or approval.
 
 In the opposite direction, after a Claude-originated Peer Message is admitted
 and handed to the Codex delivery path, the bridge returns a native `delivered`

@@ -407,7 +407,10 @@ task completion remain separate evidence.
 Claude native `peer_message_status` receipts are matched only to an exact
 outbound transport message ID and retained as bounded transport evidence.
 `held`, `denied`, `expired`, and `delivered` never become a model ACK or cause
-a wake. An ordinary reply correlation additionally requires an exact
+a wake. The native control frame has no sender identity, so the evidence is
+explicitly unauthenticated and advisory within the same-user trust boundary;
+it never gates a state transition, retry, routing, wake, permission, or
+approval. An ordinary reply correlation additionally requires an exact
 envelope-level `in-reply-to` UUID and the same stable-session/address source
 check as an ACK. It remains untrusted Peer Message evidence, changes no ACK or
 completion state, and cannot grant, approve, delegate, or escalate. Correlation

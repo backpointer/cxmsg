@@ -153,7 +153,16 @@ export async function recordClaudeNativeDeliveryReceipt(
       job.kind === "claude-delivery" &&
       job.delivery?.messageIds?.includes(receipt.messageId),
   );
-  if (matches.length === 0) return null;
+  if (matches.length === 0) {
+    await log({
+      kind: "claude-delivery",
+      phase: "native-receipt-unmatched",
+      correlationId: receipt.messageId,
+      outcome: "ignored",
+      errorCode: "unknown_message",
+    });
+    return null;
+  }
   if (matches.length > 1) {
     throw Object.assign(
       new Error("Claude native receipt matches multiple deliveries"),
@@ -204,7 +213,7 @@ export async function recordClaudeNativeDeliveryReceipt(
       correlationId: updated.jobId,
       target: updated.target,
       attempt: updated.delivery?.attempt,
-      outcome: receipt.status,
+      outcome: `native_${receipt.status}`,
       late: ["ack_timeout", "completion_timeout"].includes(updated.status),
     });
   }
