@@ -37,8 +37,8 @@ Age alone never makes a record purgeable. The read-only plan protects:
   Quarantine record is handled by one transaction;
 - both sides of a reply chain;
 - Logical Message IDs referenced by a retained cross-runtime Delivery Job;
-- any future Conversation or Group fan-out reference before those Modules add
-  their retention adapters.
+- every retained Direct or Group Conversation reference through the installed
+  Conversation retention adapters.
 
 `unknown` is ambiguous transport evidence, not an old terminal result. It is
 never made purgeable by time and never authorizes replay.

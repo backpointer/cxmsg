@@ -27,7 +27,7 @@ import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const CONVERSATIONS_DIR = path.join(CXMSG_STATE_DIR, "conversations");
 export const DIRECT_CONVERSATIONS_DIR = path.join(CONVERSATIONS_DIR, "direct");
-const CONVERSATIONS_LOCK_PATH = path.join(CONVERSATIONS_DIR, "direct.lock");
+export const CONVERSATIONS_LOCK_PATH = path.join(CONVERSATIONS_DIR, "mutation.lock");
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const NODE_KEY_PATTERN = /^(codex|claude):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
 const CONVERSATION_LIMIT = 2_048;

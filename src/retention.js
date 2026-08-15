@@ -4,6 +4,7 @@ import { listJobs } from "./jobs.js";
 import { listMessageBodies } from "./message-bodies.js";
 import { listQuarantineForRetention } from "./route-admission.js";
 import { listConversationMessageIds } from "./conversations.js";
+import { listGroupConversationMessageIds } from "./group-conversations.js";
 
 export const DELIVERY_RETENTION_MIN_AGE_MS = 90 * 24 * 60 * 60 * 1_000;
 export const MESSAGE_BODY_RETENTION_MIN_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -171,26 +172,43 @@ export function planRetention(
   if (include("ledger")) {
     for (const record of ledger) {
       const messageId = record.logicalMessage.messageId;
-      const updatedAt = timestamp("Delivery updatedAt", record.delivery.updatedAt);
+      const deliveries = record.groupDeliveries || [record.delivery];
+      const deliveryUpdatedAt = deliveries.reduce(
+        (latest, delivery) =>
+          delivery.updatedAt > latest ? delivery.updatedAt : latest,
+        record.logicalMessage.createdAt,
+      );
+      const updatedAt = timestamp("Delivery updatedAt", deliveryUpdatedAt);
       if (updatedAt >= cutoff) {
         categories.ledger.retainedByAge += 1;
         continue;
       }
       const reasons = [];
       const coupledQuarantine =
+        !record.groupDeliveries &&
         record.delivery.admissionState === "quarantined" &&
         coupledQuarantineIds.has(messageId);
-      if (record.delivery.admissionState !== "admitted" && !coupledQuarantine) {
+      if (
+        deliveries.some((delivery) => delivery.admissionState !== "admitted") &&
+        !coupledQuarantine
+      ) {
         addReason(reasons, "quarantined_delivery");
       }
-      if (!coupledQuarantine && !TERMINAL_DELIVERY_STATES.has(record.delivery.state)) {
-        addReason(reasons, `nonterminal_${record.delivery.state}`);
+      if (!coupledQuarantine) {
+        for (const delivery of deliveries) {
+          if (!TERMINAL_DELIVERY_STATES.has(delivery.state)) {
+            addReason(reasons, `nonterminal_${delivery.state}`);
+          }
+        }
       }
       for (const reason of protectedIds.get(messageId) || []) addReason(reasons, reason);
       const candidate = {
         messageId,
-        state: record.delivery.state,
-        updatedAt: record.delivery.updatedAt,
+        state:
+          deliveries.length === 1
+            ? deliveries[0].state
+            : [...new Set(deliveries.map((delivery) => delivery.state))].join(","),
+        updatedAt: deliveryUpdatedAt,
         estimatedBytes: Buffer.byteLength(JSON.stringify(record), "utf8"),
       };
       if (reasons.length) categories.ledger.blocked.push({ ...candidate, reasons });
@@ -265,7 +283,10 @@ export async function buildRetentionPlan(
     bodyReader = listMessageBodies,
     quarantineReader = listQuarantineForRetention,
     jobReader = listJobs,
-    conversationReader = listConversationMessageIds,
+    conversationReader = () => [
+      ...listConversationMessageIds(),
+      ...listGroupConversationMessageIds(),
+    ],
     now = Date.now(),
   } = {},
 ) {

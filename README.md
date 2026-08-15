@@ -255,8 +255,9 @@ coordination event log; retained bodies and endpoint paths are never included.
 `cxmsg doctor` validates the index/checkpoint and heartbeat without rebuilding,
 restarting, claiming, cancelling, or dispatching anything.
 
-This slice does not yet implement automatic retry, group fan-out, or
-task-completion inference. Scheduled Delegation is implemented as a separate
+This slice does not yet implement automatic retry, group wake, or
+task-completion inference. Store-only Group fan-out is recorded without model
+wake. Scheduled Delegation is implemented as a separate
 durable Job path and never creates ordinary Peer Message history. The index is
 bounded to 4,096 Logical Messages and is not a retention mechanism. An ambiguous
 dispatch remains `unknown`, and only positive App Server acceptance evidence
@@ -484,6 +485,47 @@ Original members remain visible when Tombstoned; migration changes only the
 current member projection. Retention protects Ledger and Message Body records
 referenced by Conversation history. See
 [Direct Conversation v1](docs/DIRECT_CONVERSATION_V1.md).
+
+## Group Conversations and store-only inbox
+
+Group membership is explicitly versioned and independent from Clusters. The
+initial Group implementation requires 3–65 live Nodes in one exact Project.
+Every send freezes the current membership version and recipient set, stores the
+body by Content Reference, and commits all recipient-specific Deliveries in one
+Ledger batch.
+
+```bash
+cxmsg conversation group ensure review-team \
+  codex:<uuid> codex:<uuid> claude:<uuid>
+cxmsg conversation group list --json
+cxmsg conversation group show <conversation-id> --members --history --json
+cxmsg conversation group member add <conversation-id> codex:<uuid>
+```
+
+The v1 send policy is always `store-only`: it creates zero model turns, zero
+Scheduler claims, and no automatic forwarding. An explicit expiry within seven
+days is required.
+
+```bash
+cxmsg conversation group send <conversation-id> \
+  --from codex:<uuid> \
+  --expiry <ISO-within-7-days> \
+  -- "Review handoff pointer abc123"
+```
+
+Inspect a recipient's bounded metadata-only inbox and acknowledge presentation
+separately:
+
+```bash
+cxmsg inbox list claude:<uuid> --json
+cxmsg inbox ack claude:<uuid> <conversation-id> <sequence>
+```
+
+Inbox output contains a Content Reference and per-recipient Delivery status,
+not body text. Acknowledgement is only a local presentation cursor; it is not
+proof of model read, processing, reply, or task completion. Partial recipient
+failure remains visible per Delivery and never silently re-fans out. See
+[Group Conversation v1](docs/GROUP_CONVERSATION_V1.md).
 
 When a Directory Project exists, `cxmsg route bind` also pins the binding to
 the private Project UUID and stable Codex Node key. Reusing the same routing
@@ -1306,6 +1348,7 @@ not needed.
 - [Prioritized implementation TODO](docs/IMPLEMENTATION_TODO.md)
 - [Scheduled Delegation v1](docs/SCHEDULED_DELEGATION_V1.md)
 - [Direct Conversation v1](docs/DIRECT_CONVERSATION_V1.md)
+- [Group Conversation v1](docs/GROUP_CONVERSATION_V1.md)
 - [Retention policy v1](docs/RETENTION_POLICY_V1.md)
 - [Doctor JSON schema v1](docs/DOCTOR_SCHEMA_V1.md)
 - [Domain language](CONTEXT.md)

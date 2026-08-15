@@ -306,6 +306,21 @@ subsystem. Malformed, linked, non-owner, overly permissive, oversized, or
 identity-inconsistent Conversation storage fails closed. Retention preserves
 Ledger and body records referenced by Conversation history.
 
+Group Conversation v1 is same-Project and store-only. It validates every
+member as a live stable Node before a new membership version or Logical Message
+is created, freezes recipients at send time, and starts no model turn. One
+owner-private Ledger batch contains all recipient Deliveries. A recipient
+failure changes only that Delivery and cannot become whole-group success,
+automatic retry, or automatic re-fan-out.
+
+Group records and inbox cursors are owner-only local state. Inbox output is
+bounded and metadata-only; it exposes Content References rather than message
+bodies and never includes paths, Endpoints, grants, or capability data. Cursor
+acknowledgement is presentation state, not evidence that a model read,
+processed, replied to, or completed anything. Group membership and messages
+remain untrusted coordination and cannot grant, delegate, approve, alter a
+permission profile, or cross a Project boundary.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

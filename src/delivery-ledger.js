@@ -64,6 +64,7 @@ export const DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH = path.join(
 const DELIVERY_LEDGER_LOCK_PATH = path.join(DELIVERY_LEDGER_DIR, "append.lock");
 const SEGMENT_PATTERN = /^segment-(\d{8})(?:\.partial-[0-9a-f-]+)?\.jsonl$/i;
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const NODE_KEY_PATTERN = /^(codex|claude):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const REPLY_HANDLE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
@@ -177,10 +178,113 @@ function validConversationProjection(message) {
   );
 }
 
+function validInitialDelivery(delivery, message, { storeOnly = false } = {}) {
+  const common = Boolean(
+    UUID_PATTERN.test(delivery?.deliveryId || "") &&
+      NAME_PATTERN.test(delivery?.target || "") &&
+      (delivery.targetThreadId === null ||
+        UUID_PATTERN.test(delivery.targetThreadId || "")) &&
+      (delivery.replyHandle === undefined ||
+        delivery.replyHandle === null ||
+        (delivery.admissionState === "admitted" &&
+          REPLY_HANDLE_PATTERN.test(delivery.replyHandle))) &&
+      ["admitted", "quarantined"].includes(delivery.admissionState) &&
+      typeof delivery.admissionReason === "string" &&
+      validTimestamp(delivery.createdAt) &&
+      delivery.createdAt === delivery.updatedAt,
+  );
+  if (!common) return false;
+  if (storeOnly) {
+    const targetIdentity = NODE_KEY_PATTERN.exec(delivery.targetNodeKey || "");
+    return Boolean(
+      targetIdentity &&
+      delivery.target === delivery.targetNodeKey &&
+        (targetIdentity[1].toLowerCase() === "codex"
+          ? delivery.targetThreadId?.toLowerCase() ===
+            targetIdentity[2].toLowerCase()
+          : delivery.targetThreadId === null) &&
+        delivery.replyHandle === null &&
+        delivery.admissionState === "admitted" &&
+        delivery.admissionReason === "group_membership" &&
+        delivery.wakePolicy === "store-only" &&
+        delivery.state === "scheduled" &&
+        message.body.contentRef === `cxmsg-message:${message.messageId}`,
+    );
+  }
+  return Boolean(
+    delivery.targetNodeKey === undefined &&
+      ["immediate", ...SCHEDULED_WAKE_POLICIES].includes(delivery.wakePolicy) &&
+      delivery.state ===
+        (delivery.wakePolicy === "immediate" ? "created" : "scheduled") &&
+      (delivery.wakePolicy === "immediate" ||
+        ((delivery.admissionState === "quarantined"
+          ? message.body.contentRef === null
+          : message.body.contentRef === `cxmsg-message:${message.messageId}`) &&
+          message.route?.wake_policy === delivery.wakePolicy &&
+          validTimestamp(message.route.expiry) &&
+          Date.parse(message.route.expiry) > Date.parse(message.createdAt) &&
+          Date.parse(message.route.expiry) - Date.parse(message.createdAt) <=
+            MAX_WHEN_IDLE_DELAY_MS &&
+          (delivery.wakePolicy === "after-turn"
+            ? UUID_PATTERN.test(message.route.trigger_turn_id || "") &&
+              message.route.trigger_job_id === undefined
+            : message.route.trigger_turn_id === undefined) &&
+          (delivery.wakePolicy === "after-job"
+            ? UUID_PATTERN.test(message.route.trigger_job_id || "") &&
+              message.route.trigger_turn_id === undefined
+            : message.route.trigger_job_id === undefined))),
+  );
+}
+
+function validGroupEnvelope(group, message) {
+  if (
+    group?.version !== 1 ||
+    !UUID_PATTERN.test(group.conversationId || "") ||
+    !Number.isSafeInteger(group.sequence) ||
+    group.sequence < 1 ||
+    !Number.isSafeInteger(group.membershipVersion) ||
+    group.membershipVersion < 1 ||
+    !Array.isArray(group.recipientNodeKeys) ||
+    group.recipientNodeKeys.length < 2 ||
+    group.recipientNodeKeys.length > 64 ||
+    group.recipientNodeKeys.some((nodeKey) => !NODE_KEY_PATTERN.test(nodeKey)) ||
+    JSON.stringify([...group.recipientNodeKeys].sort()) !==
+      JSON.stringify(group.recipientNodeKeys) ||
+    new Set(group.recipientNodeKeys).size !== group.recipientNodeKeys.length ||
+    !validTimestamp(group.expiry) ||
+    Date.parse(group.expiry) <= Date.parse(message.createdAt) ||
+    Date.parse(group.expiry) - Date.parse(message.createdAt) >
+      MAX_WHEN_IDLE_DELAY_MS ||
+    !Number.isSafeInteger(group.hopCount) ||
+    group.hopCount < 0 ||
+    group.hopCount > 8 ||
+    (group.parentMessageId !== null &&
+      (!UUID_PATTERN.test(group.parentMessageId || "") ||
+        group.parentMessageId === message.messageId)) ||
+    group.parentMessageId !== (message.replyToMessageId || null) ||
+    !Object.keys(group).every((field) =>
+      [
+        "version",
+        "conversationId",
+        "sequence",
+        "membershipVersion",
+        "recipientNodeKeys",
+        "expiry",
+        "hopCount",
+        "parentMessageId",
+      ].includes(field),
+    )
+  ) {
+    return false;
+  }
+  return true;
+}
+
 function validBatch(record) {
   const message = record?.logicalMessage;
-  const delivery = record?.deliveries?.[0];
-  return Boolean(
+  const deliveries = record?.deliveries;
+  const group = message?.group;
+  const common = Boolean(
     record?.schemaVersion === 1 &&
       record.recordType === "ledger-batch" &&
       UUID_PATTERN.test(record.batchId || "") &&
@@ -203,37 +307,24 @@ function validBatch(record) {
         createHash("sha256").update(JSON.stringify(message.route ?? null)).digest("hex") &&
       validTimestamp(message.createdAt) &&
       Array.isArray(record.deliveries) &&
-      record.deliveries.length === 1 &&
-      UUID_PATTERN.test(delivery?.deliveryId || "") &&
-      NAME_PATTERN.test(delivery?.target || "") &&
-      (delivery.targetThreadId === null || UUID_PATTERN.test(delivery.targetThreadId || "")) &&
-      (delivery.replyHandle === undefined ||
-        delivery.replyHandle === null ||
-        (delivery.admissionState === "admitted" &&
-          REPLY_HANDLE_PATTERN.test(delivery.replyHandle))) &&
-      ["admitted", "quarantined"].includes(delivery.admissionState) &&
-      typeof delivery.admissionReason === "string" &&
-      ["immediate", ...SCHEDULED_WAKE_POLICIES].includes(delivery.wakePolicy) &&
-      delivery.state === (delivery.wakePolicy === "immediate" ? "created" : "scheduled") &&
-      (delivery.wakePolicy === "immediate" ||
-        ((delivery.admissionState === "quarantined"
-          ? message.body.contentRef === null
-          : message.body.contentRef === `cxmsg-message:${message.messageId}`) &&
-          message.route?.wake_policy === delivery.wakePolicy &&
-          validTimestamp(message.route.expiry) &&
-          Date.parse(message.route.expiry) > Date.parse(message.createdAt) &&
-          Date.parse(message.route.expiry) - Date.parse(message.createdAt) <=
-            MAX_WHEN_IDLE_DELAY_MS &&
-          (delivery.wakePolicy === "after-turn"
-            ? UUID_PATTERN.test(message.route.trigger_turn_id || "") &&
-              message.route.trigger_job_id === undefined
-            : message.route.trigger_turn_id === undefined) &&
-          (delivery.wakePolicy === "after-job"
-            ? UUID_PATTERN.test(message.route.trigger_job_id || "") &&
-              message.route.trigger_turn_id === undefined
-            : message.route.trigger_job_id === undefined))) &&
-      validTimestamp(delivery.createdAt) &&
-      delivery.createdAt === delivery.updatedAt
+      record.deliveries.length >= 1
+  );
+  if (!common) return false;
+  if (group === undefined) {
+    return deliveries.length === 1 && validInitialDelivery(deliveries[0], message);
+  }
+  if (
+    !validGroupEnvelope(group, message) ||
+    deliveries.length !== group.recipientNodeKeys.length ||
+    new Set(deliveries.map((delivery) => delivery.deliveryId)).size !==
+      deliveries.length
+  ) {
+    return false;
+  }
+  return deliveries.every(
+    (delivery, index) =>
+      delivery.targetNodeKey === group.recipientNodeKeys[index] &&
+      validInitialDelivery(delivery, message, { storeOnly: true }),
   );
 }
 
@@ -340,11 +431,26 @@ function validEvidence(record) {
   return ["turn_started", "unknown"].includes(record.state);
 }
 
+function validGroupEvidence(record) {
+  return Boolean(
+    record?.schemaVersion === 1 &&
+      record.recordType === "group-delivery-evidence" &&
+      UUID_PATTERN.test(record.messageId || "") &&
+      UUID_PATTERN.test(record.deliveryId || "") &&
+      ["failed", "expired", "cancelled"].includes(record.state) &&
+      /^[A-Z0-9_]{1,32}$/.test(record.errorCode || "") &&
+      validTimestamp(record.observedAt),
+  );
+}
+
 export function validDeliveryLedgerRecord(record) {
   if (record?.recordType === "ledger-batch") return validBatch(record);
   if (record?.recordType === "delivery-claim") return validClaim(record);
   if (record?.recordType === "delivery-attempt") return validAttempt(record);
   if (record?.recordType === "delivery-evidence") return validEvidence(record);
+  if (record?.recordType === "group-delivery-evidence") {
+    return validGroupEvidence(record);
+  }
   return false;
 }
 
@@ -511,6 +617,65 @@ function indexProjectionDigest(projection) {
 function validIndexProjection(projection, messageId) {
   const delivery = projection?.delivery;
   if (!delivery || projection.logicalMessage?.messageId !== messageId) return false;
+  if (projection.groupDeliveries !== undefined) {
+    if (
+      !Array.isArray(projection.groupDeliveries) ||
+      projection.groupDeliveries.length < 1 ||
+      JSON.stringify(delivery) !== JSON.stringify(projection.groupDeliveries[0])
+    ) {
+      return false;
+    }
+    const baseBatch = {
+      schemaVersion: 1,
+      recordType: "ledger-batch",
+      batchId: projection.batchId,
+      committedAt: projection.committedAt,
+      logicalMessage: structuredClone(projection.logicalMessage),
+      deliveries: projection.groupDeliveries.map((candidate) => {
+        const {
+          attempts,
+          evidence,
+          claim,
+          claimCount,
+          turnId,
+          transportResult,
+          errorCode,
+          ...initial
+        } = candidate;
+        initial.state = "scheduled";
+        initial.updatedAt = initial.createdAt;
+        return initial;
+      }),
+    };
+    return Boolean(
+      validBatch(baseBatch) &&
+        projection.groupDeliveries.every(
+          (candidate) =>
+            ["scheduled", "failed", "expired", "cancelled"].includes(
+              candidate.state,
+            ) &&
+            candidate.wakePolicy === "store-only" &&
+            Array.isArray(candidate.attempts) &&
+            candidate.attempts.length === 0 &&
+            Array.isArray(candidate.evidence) &&
+            candidate.evidence.every(
+              (record) =>
+                validGroupEvidence(record) &&
+                record.messageId === messageId &&
+                record.deliveryId === candidate.deliveryId,
+            ) &&
+            candidate.claim === null &&
+            candidate.claimCount === 0 &&
+            (candidate.evidence.length === 0
+              ? candidate.state === "scheduled" &&
+                candidate.updatedAt === candidate.createdAt
+              : candidate.evidence.length === 1 &&
+                candidate.state === candidate.evidence[0].state &&
+                candidate.errorCode === candidate.evidence[0].errorCode &&
+                candidate.updatedAt === candidate.evidence[0].observedAt),
+        ),
+    );
+  }
   const initialState = delivery.wakePolicy === "immediate" ? "created" : "scheduled";
   const baseDelivery = {
     ...structuredClone(delivery),
@@ -788,6 +953,12 @@ function appendLedgerRecord(record, { quotaBytes, segmentBytes, reserveBytes = 0
 function reservedEvidenceBytes(messages) {
   let records = 0;
   for (const message of messages.values()) {
+    if (Array.isArray(message.groupDeliveries)) {
+      records += message.groupDeliveries.filter(
+        (delivery) => delivery.state === "scheduled",
+      ).length;
+      continue;
+    }
     const delivery = message.delivery;
     if (delivery.admissionState !== "admitted") continue;
     if (["turn_started", "failed", "expired", "cancelled"].includes(delivery.state)) continue;
@@ -809,22 +980,48 @@ function reservedEvidenceBytes(messages) {
 }
 
 function cloneBatch(record) {
-  return {
+  const deliveries = record.deliveries.map((delivery) => ({
+    ...structuredClone(delivery),
+    attempts: [],
+    evidence: [],
+    claim: null,
+    claimCount: 0,
+  }));
+  const projection = {
     schemaVersion: record.schemaVersion,
     batchId: record.batchId,
     committedAt: record.committedAt,
     logicalMessage: structuredClone(record.logicalMessage),
-    delivery: {
-      ...structuredClone(record.deliveries[0]),
-      attempts: [],
-      evidence: [],
-      claim: null,
-      claimCount: 0,
-    },
+    delivery: deliveries[0],
   };
+  if (deliveries.length > 1) projection.groupDeliveries = deliveries;
+  return projection;
 }
 
 function applyDeliveryEvent(projected, record) {
+  if (Array.isArray(projected?.groupDeliveries)) {
+    const delivery = projected.groupDeliveries.find(
+      (candidate) => candidate.deliveryId === record.deliveryId,
+    );
+    if (
+      !delivery ||
+      !validGroupEvidence(record) ||
+      delivery.wakePolicy !== "store-only" ||
+      delivery.state !== "scheduled" ||
+      delivery.attempts.length !== 0 ||
+      delivery.evidence.length !== 0
+    ) {
+      throw new Error(`invalid Group Delivery evidence: ${record.messageId}`);
+    }
+    delivery.state = record.state;
+    delivery.errorCode = record.errorCode;
+    delivery.updatedAt = record.observedAt;
+    delivery.evidence.push(structuredClone(record));
+    if (projected.delivery.deliveryId === delivery.deliveryId) {
+      projected.delivery = delivery;
+    }
+    return projected;
+  }
   if (!projected || projected.delivery.deliveryId !== record.deliveryId) {
     throw new Error(`orphaned Delivery Ledger record: ${record.messageId}`);
   }
@@ -965,14 +1162,18 @@ export function rebuildDeliveryLedgerRecords(records) {
       const messageId = record.logicalMessage.messageId;
       if (
         messages.has(messageId) ||
-        deliveryIds.has(record.deliveries[0].deliveryId) ||
+        record.deliveries.some((delivery) =>
+          deliveryIds.has(delivery.deliveryId),
+        ) ||
         batchIds.has(record.batchId)
       ) {
         throw new Error(`duplicate Delivery Ledger batch identity: ${messageId}`);
       }
       const projected = cloneBatch(record);
       messages.set(messageId, projected);
-      deliveryIds.set(projected.delivery.deliveryId, projected);
+      for (const delivery of record.deliveries) {
+        deliveryIds.set(delivery.deliveryId, projected);
+      }
       batchIds.add(record.batchId);
       continue;
     }
@@ -1105,14 +1306,22 @@ export async function createDeliveryDedupTombstones(
       const message = messages.get(messageId);
       if (!message && existingTombstone) return existingTombstone;
       if (!message) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
-      const admittedTerminal =
-        message.delivery.admissionState === "admitted" &&
-        ["turn_started", "failed", "expired", "cancelled"].includes(message.delivery.state);
+      const deliveries = message.groupDeliveries || [message.delivery];
+      const admittedTerminal = deliveries.every(
+        (delivery) =>
+          delivery.admissionState === "admitted" &&
+          ["turn_started", "failed", "expired", "cancelled"].includes(
+            delivery.state,
+          ),
+      );
       const quarantinedCoupled =
         message.delivery.admissionState === "quarantined" &&
         coupledQuarantine.has(messageId) &&
         ["created", "scheduled"].includes(message.delivery.state);
-      if ((!admittedTerminal && !quarantinedCoupled) || message.delivery.claim) {
+      if (
+        (!admittedTerminal && !quarantinedCoupled) ||
+        deliveries.some((delivery) => delivery.claim)
+      ) {
         throw new Error(`Delivery is not terminal and purgeable: ${messageId}`);
       }
       return {
@@ -1122,11 +1331,13 @@ export async function createDeliveryDedupTombstones(
         deliveryFingerprintSha256: createHash("sha256")
           .update(JSON.stringify({
             logicalMessage: message.logicalMessage,
-            target: message.delivery.target,
-            targetThreadId: message.delivery.targetThreadId,
-            admissionState: message.delivery.admissionState,
-            admissionReason: message.delivery.admissionReason,
-            wakePolicy: message.delivery.wakePolicy,
+            deliveries: deliveries.map((delivery) => ({
+              target: delivery.target,
+              targetThreadId: delivery.targetThreadId,
+              admissionState: delivery.admissionState,
+              admissionReason: delivery.admissionReason,
+              wakePolicy: delivery.wakePolicy,
+            })),
           }))
           .digest("hex"),
         purgedAt,
@@ -1282,6 +1493,180 @@ export async function commitSingleRecipientDelivery(
     });
     updateDeliveryIndexLocked(after, logicalMessage.messageId);
     return { record: projected, created: true };
+  });
+}
+
+export async function commitStoreOnlyGroupDelivery(
+  {
+    logicalMessage,
+    recipients,
+    now = new Date().toISOString(),
+  },
+  {
+    quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+    segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
+  } = {},
+) {
+  validateStorageOptions(quotaBytes, segmentBytes);
+  validateUuid("logical message id", logicalMessage?.messageId);
+  if (!NAME_PATTERN.test(logicalMessage?.from || "")) {
+    throw new Error("invalid Group Ledger sender");
+  }
+  if (!Array.isArray(recipients) || recipients.length < 2 || recipients.length > 64) {
+    throw new Error("Group Delivery requires 2-64 fixed recipients");
+  }
+  if (!validTimestamp(now)) throw new Error("invalid Group Delivery timestamp");
+  const normalizedRecipients = recipients.map((recipient) => {
+    if (!NODE_KEY_PATTERN.test(recipient?.nodeKey || "")) {
+      throw new Error("Group Delivery recipient must be a stable Node key");
+    }
+    const nodeKey = recipient.nodeKey.toLowerCase();
+    const runtimeKind = nodeKey.split(":", 1)[0];
+    const nativeId = nodeKey.slice(runtimeKind.length + 1);
+    const targetThreadId = recipient.targetThreadId ?? null;
+    if (
+      (runtimeKind === "codex" && targetThreadId !== nativeId) ||
+      (runtimeKind === "claude" && targetThreadId !== null)
+    ) {
+      throw new Error("Group Delivery recipient runtime identity is inconsistent");
+    }
+    return { nodeKey, targetThreadId };
+  });
+  if (
+    JSON.stringify([...normalizedRecipients].sort((left, right) =>
+      left.nodeKey.localeCompare(right.nodeKey),
+    )) !== JSON.stringify(normalizedRecipients) ||
+    new Set(normalizedRecipients.map((recipient) => recipient.nodeKey)).size !==
+      normalizedRecipients.length
+  ) {
+    throw new Error("Group Delivery recipients must be sorted and unique");
+  }
+
+  return withDeliveryLedgerMutation(async () => {
+    const messages = readDeliveryIndexLocked();
+    if (readDedupTombstone(logicalMessage.messageId)) {
+      throw new Error(
+        `Delivery Ledger message was permanently purged: ${logicalMessage.messageId}`,
+      );
+    }
+    if (
+      logicalMessage.replyToMessageId &&
+      readDedupTombstone(logicalMessage.replyToMessageId)
+    ) {
+      throw new Error(
+        `peer reply references a permanently purged message: ${logicalMessage.replyToMessageId}`,
+      );
+    }
+    const existing = messages.get(logicalMessage.messageId);
+    if (existing) {
+      const existingRecipients = (existing.groupDeliveries || []).map(
+        (delivery) => ({
+          nodeKey: delivery.targetNodeKey,
+          targetThreadId: delivery.targetThreadId,
+        }),
+      );
+      if (
+        JSON.stringify(existing.logicalMessage) !== JSON.stringify(logicalMessage) ||
+        JSON.stringify(existingRecipients) !== JSON.stringify(normalizedRecipients)
+      ) {
+        throw new Error(
+          `Delivery Ledger idempotency conflict: ${logicalMessage.messageId}`,
+        );
+      }
+      return { record: existing, created: false };
+    }
+    const record = {
+      schemaVersion: 1,
+      recordType: "ledger-batch",
+      batchId: randomUUID(),
+      committedAt: now,
+      logicalMessage: structuredClone(logicalMessage),
+      deliveries: normalizedRecipients.map((recipient) => ({
+        deliveryId: randomUUID(),
+        target: recipient.nodeKey,
+        targetNodeKey: recipient.nodeKey,
+        targetThreadId: recipient.targetThreadId,
+        replyHandle: null,
+        admissionState: "admitted",
+        admissionReason: "group_membership",
+        wakePolicy: "store-only",
+        state: "scheduled",
+        createdAt: now,
+        updatedAt: now,
+      })),
+    };
+    if (!validBatch(record)) throw new Error("invalid Group Delivery Ledger batch");
+    const projected = cloneBatch(record);
+    const after = new Map(messages);
+    after.set(logicalMessage.messageId, projected);
+    appendLedgerRecord(record, {
+      quotaBytes,
+      segmentBytes,
+      reserveBytes: reservedEvidenceBytes(after),
+    });
+    updateDeliveryIndexLocked(after, logicalMessage.messageId);
+    return { record: projected, created: true };
+  });
+}
+
+export async function appendStoreOnlyGroupDeliveryEvidence(
+  messageId,
+  {
+    targetNodeKey,
+    state,
+    errorCode,
+    now = new Date().toISOString(),
+    quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+    segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
+  },
+) {
+  messageId = validateUuid("logical message id", messageId);
+  if (!NODE_KEY_PATTERN.test(targetNodeKey || "")) {
+    throw new Error("Group Delivery evidence target must be a stable Node key");
+  }
+  targetNodeKey = targetNodeKey.toLowerCase();
+  if (!["failed", "expired", "cancelled"].includes(state)) {
+    throw new Error("Group Delivery evidence state is invalid");
+  }
+  if (!/^[A-Z0-9_]{1,32}$/.test(errorCode || "")) {
+    throw new Error("Group Delivery evidence error code is invalid");
+  }
+  if (!validTimestamp(now)) throw new Error("Group Delivery evidence timestamp is invalid");
+  validateStorageOptions(quotaBytes, segmentBytes);
+  return withDeliveryLedgerMutation(async () => {
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
+    const delivery = record?.groupDeliveries?.find(
+      (candidate) => candidate.targetNodeKey === targetNodeKey,
+    );
+    if (!delivery) throw new Error("unknown Group recipient Delivery");
+    if (delivery.state !== "scheduled") {
+      if (delivery.state === state && delivery.errorCode === errorCode) {
+        return { record: structuredClone(record), created: false };
+      }
+      throw new Error("Group recipient Delivery already has terminal evidence");
+    }
+    const event = {
+      schemaVersion: 1,
+      recordType: "group-delivery-evidence",
+      messageId,
+      deliveryId: delivery.deliveryId,
+      state,
+      errorCode,
+      observedAt: now,
+    };
+    if (!validGroupEvidence(event)) throw new Error("invalid Group Delivery evidence");
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
+    appendLedgerRecord(event, {
+      quotaBytes,
+      segmentBytes,
+      reserveBytes: reservedEvidenceBytes(after),
+    });
+    updateDeliveryIndexLocked(after, messageId);
+    return { record: structuredClone(projected), created: true };
   });
 }
 

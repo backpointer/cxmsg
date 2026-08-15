@@ -739,6 +739,20 @@ Membership remains non-authoritative.
 - add mention wake, explicit wake-all with per-recipient fallback, digest
   bounds, expiry, and loop guards.
 
+Initial implementation status: the store-only gate is complete in 0.32.0.
+Group Conversations retain same-Project membership as bounded immutable
+versions independent from Clusters. Each send freezes its membership version
+and explicit recipient set, stores the body by Content Reference, and appends
+one Ledger batch containing every recipient Delivery before any possible
+dispatch. Store-only Deliveries are never discovered by the Scheduler, start
+zero turns, and expose independent terminal failure/expiry/cancellation
+evidence. A bounded metadata-only inbox and separate acknowledgement cursor
+create no read or completion claim. Logical Message idempotency, seven-day
+expiry, same-Conversation reply parents, an eight-hop bound, and no automatic
+forwarding prevent silent replay and loops. Mention wake, wake-all, Team Cast
+selection, digest composition, and per-recipient scheduled wake remain the next
+gate.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

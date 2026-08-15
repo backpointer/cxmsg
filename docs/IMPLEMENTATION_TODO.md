@@ -170,19 +170,19 @@ while Endpoint changes and retries do not fork history.
 ### T7 — Group Conversation, store-only first
 
 - Priority: P2
-- Status: NEXT
+- Status: COMPLETE
 - Canonical phase: Phase 6
 
-- [ ] Add versioned Group Conversation membership independent from Cluster
+- [x] Add versioned Group Conversation membership independent from Cluster
       membership.
-- [ ] Freeze the recipient set and membership version at send time.
-- [ ] Commit one Logical Message and every recipient-specific Delivery in one
+- [x] Freeze the recipient set and membership version at send time.
+- [x] Commit one Logical Message and every recipient-specific Delivery in one
       crash-consistent fan-out batch before dispatch.
-- [ ] Implement `store-only` delivery and an explicit bounded inbox before any
+- [x] Implement `store-only` delivery and an explicit bounded inbox before any
       group wake policy.
-- [ ] Record partial failure per recipient; never collapse it into whole-group
+- [x] Record partial failure per recipient; never collapse it into whole-group
       success or silently re-fan-out.
-- [ ] Add message deduplication, expiry, hop limits, and loop prevention.
+- [x] Add message deduplication, expiry, hop limits, and loop prevention.
 
 Done when a Group message can be stored for a fixed recipient set with zero
 model wake-ups and exact per-recipient evidence.
@@ -190,7 +190,7 @@ model wake-ups and exact per-recipient evidence.
 ### T8 — Team Cast selection and wake policies
 
 - Priority: P2
-- Status: BLOCKED on T7
+- Status: NEXT
 - Canonical phase: Phase 6
 
 - [ ] Add explicit selectors for Project+role, Cluster, and Conversation; a

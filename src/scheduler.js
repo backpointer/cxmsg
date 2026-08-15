@@ -458,6 +458,9 @@ export async function reconcileTurnLifecycle(
     if (targets.size >= limit) break;
     if (
       record.delivery.admissionState === "admitted" &&
+      ["when-idle", "after-turn", "after-job"].includes(
+        record.delivery.wakePolicy,
+      ) &&
       record.delivery.state === "scheduled" &&
       record.delivery.attempts.length === 0 &&
       record.delivery.targetThreadId

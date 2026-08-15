@@ -86,6 +86,16 @@ import {
   readDirectConversation,
 } from "../src/conversations.js";
 import {
+  acknowledgeGroupInbox,
+  changeGroupMember,
+  ensureGroupConversation,
+  listGroupConversations,
+  listGroupInbox,
+  publicGroupConversation,
+  readGroupConversation,
+  storeOnlyGroupMessage,
+} from "../src/group-conversations.js";
+import {
   activeJobsForTarget,
   createJob,
   createScheduledDelegationJob,
@@ -278,6 +288,14 @@ function usage(exitCode = 0) {
   cxmsg conversation show <conversation-id> [--json]
   cxmsg conversation history <conversation-id> [--limit <count>] [--before <sequence>] [--json]
   cxmsg conversation migrate <conversation-id> <codex|claude> <predecessor-id> <codex|claude> <successor-id> [--json]
+  cxmsg conversation group ensure <label> <node-key> <node-key> <node-key...> [--id <uuid>] [--json]
+  cxmsg conversation group list [--json] [--members]
+  cxmsg conversation group show <conversation-id> [--json] [--members] [--history]
+  cxmsg conversation group member <add|remove> <conversation-id> <node-key> [--json] [--members]
+  cxmsg conversation group send <conversation-id> --from <node-key> --expiry <timestamp>
+             [--logical-message-id <uuid>] [--reply-to <uuid>] [--json] -- <message...>
+  cxmsg inbox list <node-key> [--limit <count>] [--all] [--json]
+  cxmsg inbox ack <node-key> <conversation-id> <sequence> [--json]
   cxmsg message info <message-id|reply-handle|content-ref> [--json]
   cxmsg message show <message-id|reply-handle|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -595,6 +613,46 @@ async function commandScheduler(action) {
 }
 
 function deliveryProjection(record) {
+  if (Array.isArray(record.groupDeliveries)) {
+    const states = {};
+    for (const delivery of record.groupDeliveries) {
+      states[delivery.state] = (states[delivery.state] || 0) + 1;
+    }
+    return {
+      logicalMessageId: record.logicalMessage.messageId,
+      kind: "group",
+      conversationId: record.logicalMessage.group.conversationId,
+      conversationSequence: record.logicalMessage.group.sequence,
+      membershipVersion: record.logicalMessage.group.membershipVersion,
+      from: record.logicalMessage.from,
+      target: `group:${record.logicalMessage.group.conversationId}`,
+      replyToMessageId: record.logicalMessage.replyToMessageId || null,
+      admissionState: "admitted",
+      admissionReason: "group_membership",
+      wakePolicy: "store-only",
+      status: Object.keys(states).length === 1 ? Object.keys(states)[0] : "partial",
+      recipientCount: record.groupDeliveries.length,
+      states,
+      recipients: record.groupDeliveries.map((delivery) => ({
+        deliveryId: delivery.deliveryId,
+        targetNodeKey: delivery.targetNodeKey,
+        status: delivery.state,
+        errorCode: delivery.errorCode || null,
+      })),
+      createdAt: record.logicalMessage.createdAt,
+      updatedAt: record.groupDeliveries.reduce(
+        (latest, delivery) =>
+          delivery.updatedAt > latest ? delivery.updatedAt : latest,
+        record.logicalMessage.createdAt,
+      ),
+      expiry: record.logicalMessage.group.expiry,
+      body: {
+        bytes: record.logicalMessage.body.bytes,
+        sha256: record.logicalMessage.body.sha256,
+        contentRef: record.logicalMessage.body.contentRef,
+      },
+    };
+  }
   const delivery = record.delivery;
   const activeAttempt = delivery.attempts.at(-1) || null;
   const status =
@@ -3021,8 +3079,166 @@ function conversationNodeKey(runtimeKind, nativeId) {
   return `${runtimeKind}:${nativeId.toLowerCase()}`;
 }
 
+function stableNodeKey(value) {
+  const match = /^(codex|claude):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.exec(
+    value || "",
+  );
+  if (!match) throw new Error("stable Node key must be codex:<uuid> or claude:<uuid>");
+  return `${match[1].toLowerCase()}:${match[2].toLowerCase()}`;
+}
+
+async function commandGroupConversation(args) {
+  const operation = args.shift();
+  if (operation === "ensure") {
+    const label = args.shift();
+    let conversationId = null;
+    let jsonOutput = false;
+    const members = [];
+    while (args.length) {
+      const value = args.shift();
+      if (value === "--json") jsonOutput = true;
+      else if (value === "--id") {
+        conversationId = args.shift();
+        if (!conversationId) throw new Error("group ensure --id requires a UUID");
+      } else if (value.startsWith("--")) {
+        throw new Error(`unknown group ensure option: ${value}`);
+      } else members.push(stableNodeKey(value));
+    }
+    const result = await ensureGroupConversation({
+      conversationId,
+      label,
+      members,
+    });
+    const output = {
+      ...publicGroupConversation(result.conversation, { members: true }),
+      created: result.created,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.created ? "created" : "found"} Group Conversation ${output.conversationId}\n`,
+    );
+    return;
+  }
+  if (operation === "list") {
+    const jsonOutput = args.includes("--json");
+    const includeMembers = args.includes("--members");
+    if (args.some((value) => !["--json", "--members"].includes(value))) usage(2);
+    const records = listGroupConversations().map((record) =>
+      publicGroupConversation(record, { members: includeMembers }),
+    );
+    jsonOrLines(
+      records,
+      jsonOutput,
+      (record) =>
+        `${record.conversationId}\t${record.label}\tmembers=${record.memberCount}\tmessages=${record.messageCount}`,
+    );
+    return;
+  }
+  if (operation === "show") {
+    const conversationId = args.shift();
+    const jsonOutput = args.includes("--json");
+    const includeMembers = args.includes("--members");
+    const includeHistory = args.includes("--history");
+    if (
+      !conversationId ||
+      args.some(
+        (value) => !["--json", "--members", "--history"].includes(value),
+      )
+    ) {
+      usage(2);
+    }
+    const record = readGroupConversation(conversationId);
+    if (!record) throw new Error(`unknown Group Conversation: ${conversationId}`);
+    const output = publicGroupConversation(record, {
+      members: includeMembers,
+      history: includeHistory,
+    });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${output.conversationId}\t${output.label}\tmembers=${output.memberCount}\tmessages=${output.messageCount}\n`,
+    );
+    return;
+  }
+  if (operation === "member") {
+    const action = args.shift();
+    const conversationId = args.shift();
+    const nodeKey = stableNodeKey(args.shift());
+    const jsonOutput = args.includes("--json");
+    const includeMembers = args.includes("--members");
+    if (args.some((value) => !["--json", "--members"].includes(value))) usage(2);
+    const result = await changeGroupMember({ conversationId, action, nodeKey });
+    const output = {
+      ...publicGroupConversation(result.conversation, {
+        members: includeMembers,
+      }),
+      changed: result.changed,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.changed ? "changed" : "unchanged"} Group Conversation ${output.conversationId} membership=${output.membershipVersion}\n`,
+    );
+    return;
+  }
+  if (operation === "send") {
+    const separator = args.indexOf("--");
+    if (separator < 0) {
+      throw new Error("group send requires -- before the message body");
+    }
+    const options = args.slice(0, separator);
+    const message = args.slice(separator + 1).join(" ");
+    const conversationId = options.shift();
+    let senderNodeKey = null;
+    let expiry = null;
+    let logicalMessageId = randomUUID();
+    let replyToMessageId = null;
+    let jsonOutput = false;
+    while (options.length) {
+      const option = options.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--from") senderNodeKey = stableNodeKey(options.shift());
+      else if (option === "--expiry") expiry = options.shift();
+      else if (option === "--logical-message-id") {
+        logicalMessageId = options.shift();
+      } else if (option === "--reply-to") replyToMessageId = options.shift();
+      else throw new Error(`unknown group send option: ${option}`);
+    }
+    if (!conversationId || !senderNodeKey || !expiry || !message) usage(2);
+    const result = await storeOnlyGroupMessage({
+      conversationId,
+      senderNodeKey,
+      message,
+      logicalMessageId,
+      replyToMessageId,
+      expiry,
+    });
+    const output = {
+      conversationId,
+      logicalMessageId: result.message.logicalMessageId,
+      sequence: result.message.sequence,
+      membershipVersion: result.message.membershipVersion,
+      recipientCount: result.message.recipientNodeKeys.length,
+      wakePolicy: "store-only",
+      created: result.created,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.created ? "stored" : "deduplicated"} ${output.logicalMessageId}\trecipients=${output.recipientCount}\twake=store-only\n`,
+    );
+    return;
+  }
+  usage(2);
+}
+
 async function commandConversation(args) {
   const operation = args.shift();
+  if (operation === "group") {
+    await commandGroupConversation(args);
+    return;
+  }
   if (operation === "direct") {
     if (args.shift() !== "ensure") usage(2);
     const first = conversationNodeKey(args.shift(), args.shift());
@@ -3110,6 +3326,51 @@ async function commandConversation(args) {
       jsonOutput
         ? `${JSON.stringify(output, null, 2)}\n`
         : `${result.migrated ? "migrated" : "unchanged"} Direct Conversation ${conversationId}\n`,
+    );
+    return;
+  }
+  usage(2);
+}
+
+async function commandInbox(args) {
+  const operation = args.shift();
+  if (operation === "list") {
+    const nodeKey = stableNodeKey(args.shift());
+    let limit = 50;
+    let includeAcknowledged = false;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--all") includeAcknowledged = true;
+      else if (option === "--limit") limit = Number(args.shift());
+      else throw new Error(`unknown inbox list option: ${option}`);
+    }
+    const records = listGroupInbox(nodeKey, { limit, includeAcknowledged });
+    jsonOrLines(
+      records,
+      jsonOutput,
+      (record) =>
+        `${record.conversationId}\t${record.sequence}\t${record.logicalMessageId}\t${record.status}\t${record.acknowledged ? "acknowledged" : "unread"}`,
+    );
+    return;
+  }
+  if (operation === "ack") {
+    const nodeKey = stableNodeKey(args.shift());
+    const conversationId = args.shift();
+    const sequence = Number(args.shift());
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const result = await acknowledgeGroupInbox({
+      nodeKey,
+      conversationId,
+      sequence,
+    });
+    const output = { nodeKey, conversationId, sequence, changed: result.changed };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.changed ? "acknowledged" : "unchanged"} ${conversationId}:${sequence}\n`,
     );
     return;
   }
@@ -3318,6 +3579,9 @@ async function main() {
       break;
     case "conversation":
       await commandConversation(args);
+      break;
+    case "inbox":
+      await commandInbox(args);
       break;
     case "retention":
       await commandRetention(args);

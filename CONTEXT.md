@@ -58,8 +58,14 @@ they carry different authority and delivery semantics.
 - **Direct Conversation**: the canonical owner-private Conversation for an
   unordered pair of stable Node identities. It orders retained metadata and
   replies but never injects history or conveys authority.
-- **Group Conversation**: a Conversation with explicitly versioned membership
-  and recipient-specific fan-out.
+- **Group Conversation**: a same-Project Conversation with explicitly versioned
+  membership and a recipient set frozen for each Logical Message.
+- **Store-only Delivery**: a recipient-specific Group Delivery retained for an
+  explicit bounded inbox. It starts no model turn and acquires no Scheduler
+  claim merely because it exists.
+- **Inbox Cursor**: owner-private presentation state recording acknowledged
+  Group sequences. It is not Delivery, read, processing, or completion
+  evidence.
 
 ## Identity and topology
 
