@@ -89,6 +89,11 @@ they carry different authority and delivery semantics.
 - **Message Body Store Module**: the owner-private Module that appends bounded
   Message Bodies, verifies their digest, quarantines partial segments, and
   exposes bounded range reads through opaque Content References.
+- **Retention Module**: the Module that classifies owner-private Delivery
+  metadata, Message Bodies, and Route Admission Quarantine as age-retained,
+  evidence-protected, or purge-eligible. Its default Interface is read-only;
+  any purge uses a separate explicit mutation with durable dedup Tombstones,
+  recoverable backups, and an audit receipt.
 - **Peer Message Context Projection Module**: the Module that converts an
   admitted Peer Message into the minimal model-visible untrusted marker,
   display alias, Message Body or preview, and Reply Handle. Routing, scheduling,

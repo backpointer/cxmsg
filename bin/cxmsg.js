@@ -182,6 +182,7 @@ import {
 import { SCHEDULER_HEARTBEAT_STALE_MS } from "../src/delivery-policy.js";
 import { withFileLock } from "../src/file-lock.js";
 import { writeCoordinationEvent } from "../src/observability.js";
+import { buildRetentionPlan } from "../src/retention.js";
 
 const codexBin = process.env.CODEX_BIN || "codex";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -198,6 +199,7 @@ function usage(exitCode = 0) {
   cxmsg deliveries show <logical-message-id> [--json]
   cxmsg deliveries cancel <logical-message-id> [--json]
   cxmsg deliveries rebuild-index [--json]
+  cxmsg retention plan --before <ISO timestamp> [--scope all|ledger|bodies|quarantine] [--json]
   cxmsg open <name> [-- <codex resume options>]
   cxmsg attach <name> [-- <codex resume options>]
   cxmsg detach <name>
@@ -2902,6 +2904,36 @@ async function commandDoctor(args) {
   process.exitCode = doctorExitCode(report);
 }
 
+async function commandRetention(args) {
+  const operation = args.shift();
+  if (operation !== "plan") usage(2);
+  let before = null;
+  let scope = "all";
+  let jsonOutput = false;
+  while (args.length) {
+    const option = args.shift();
+    if (option === "--before") before = args.shift() || null;
+    else if (option === "--scope") scope = args.shift() || "";
+    else if (option === "--json") jsonOutput = true;
+    else throw new Error(`unknown retention plan option: ${option}`);
+  }
+  if (!before) throw new Error("retention plan requires --before <ISO timestamp>");
+  const plan = await buildRetentionPlan({ before, scope });
+  if (jsonOutput) {
+    process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(
+    `retention plan only; automatic deletion=false, mutation=false, cutoff=${plan.cutoff}\n`,
+  );
+  for (const [kind, category] of Object.entries(plan.categories)) {
+    process.stdout.write(
+      `${kind}\teligible=${category.eligible.length}\tblocked=${category.blocked.length}` +
+        `\tretained-by-age=${category.retainedByAge}\testimated-bytes=${category.estimatedBytes}\n`,
+    );
+  }
+}
+
 async function main() {
   const [command, ...args] = process.argv.slice(2);
   switch (command) {
@@ -2913,6 +2945,9 @@ async function main() {
       break;
     case "deliveries":
       await commandDeliveries(args);
+      break;
+    case "retention":
+      await commandRetention(args);
       break;
     case "create":
       await commandCreate(args[0]);

@@ -56,6 +56,15 @@ change permission profiles, or answer approvals. An `unknown` or
 cleanup. Doctor output omits message, task, result, error-body, approval-body,
 capability-token, and full socket-path data.
 
+The Retention Module is also read-only by default. Its plan uses explicit
+cutoffs, fixed minimum ages, bounded reason codes, and owner-private metadata;
+it never reads Message Body text into output or starts model work. An eligible
+candidate is not deletion authority. No purge Interface is exposed until the
+same implementation provides durable Logical Message dedup Tombstones,
+candidate revalidation under a mutation lock, recoverable segment backups, an
+audit receipt, and exact-generation restore. Quota exhaustion, Peer Messages,
+ACKs, Triggers, replies, and Doctor findings cannot authorize deletion.
+
 Redacted coordination events are stored in an owner-only segmented JSONL set:
 one 1 MiB active segment and four retained archives. Rotation uses an
 owner-only lock. The event set is operational evidence rather than a complete

@@ -52,13 +52,13 @@ and no uncommitted implementation work is mixed into the next slice.
 ### T1 — Delivery retention and explicit purge
 
 - Priority: P0
-- Status: NEXT — policy decisions first
+- Status: IN PROGRESS — read-only plan implemented; mutation remains gated
 - Canonical phase: Phase 4
 
-- [ ] Fix separate retention policies for Delivery metadata, Message Bodies,
+- [x] Fix separate retention policies for Delivery metadata, Message Bodies,
       terminal evidence, and Quarantine.
-- [ ] Define quota ownership and behavior at warning and hard limits.
-- [ ] Add a read-only purge plan and dry-run output.
+- [x] Define quota ownership and behavior at warning and hard limits.
+- [x] Add a read-only purge plan and dry-run output.
 - [ ] Add an explicit, recoverable purge mutation with exact selection and an
       audit receipt; automatic deletion remains disabled.
 - [ ] Preserve records referenced by active schedules, Jobs, replies,

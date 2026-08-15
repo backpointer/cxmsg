@@ -298,6 +298,14 @@ export function messageBodyInfo(reference) {
   return bodyReference(record);
 }
 
+export function listMessageBodies() {
+  ensureStore();
+  return listRecords().map((record) => {
+    verifiedBody(record);
+    return bodyReference(record);
+  });
+}
+
 export function readMessageBody(
   reference,
   { offset = 0, limit = DEFAULT_MESSAGE_READ_BYTES } = {},

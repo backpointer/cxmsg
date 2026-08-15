@@ -1160,6 +1160,7 @@ not needed.
 - [Busy delivery, scheduling, and doctor improvement plan](docs/BUSY_SCHEDULING_DOCTOR.md)
 - [Coordination graph and conversation plan](docs/COORDINATION_GRAPH_CONVERSATIONS.md)
 - [Prioritized implementation TODO](docs/IMPLEMENTATION_TODO.md)
+- [Retention policy v1](docs/RETENTION_POLICY_V1.md)
 - [Doctor JSON schema v1](docs/DOCTOR_SCHEMA_V1.md)
 - [Domain language](CONTEXT.md)
 
