@@ -85,6 +85,8 @@ const ids = {
   replyLegacy: "f9345678-1234-4234-8234-123456789abc",
   routedReplyOriginal: "ac345678-1234-4234-8234-123456789abc",
   routedReply: "bc345678-1234-4234-8234-123456789abc",
+  claudeReplyOriginal: "cc345678-1234-4234-8234-123456789abc",
+  claudeReply: "dc345678-1234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -144,17 +146,25 @@ test("peer replies invert pinned thread identities and preserve correlation", as
       message: "which result passed?",
       logicalMessageId: ids.replyOriginal,
     },
-    async () => ({
-      delivery: "started",
-      turnId: "da345678-1234-4234-8234-123456789abc",
-    }),
+    async ({ replyHandle }) => {
+      assert.match(replyHandle, /^m:[0-9A-HJKMNP-TV-Z]{10}$/);
+      return {
+        delivery: "started",
+        turnId: "da345678-1234-4234-8234-123456789abc",
+      };
+    },
   );
+
+  const replyHandle = routes.readRouteDelivery(ids.replyOriginal).replyHandle;
+  assert.match(replyHandle, /^m:[0-9A-HJKMNP-TV-Z]{10}$/);
 
   const reply = routes.planPeerReply({
     from: "reply-responder",
-    replyToMessageId: ids.replyOriginal,
+    replyToMessageId: replyHandle,
     logicalMessageId: ids.reply,
   });
+  assert.equal(reply.replyReference, replyHandle);
+  assert.equal(reply.replyToMessageId, ids.replyOriginal);
   assert.equal(reply.target, "reply-requester");
   assert.equal(reply.expectedSenderThreadId, "c9345678-1234-4234-8234-123456789abc");
   assert.equal(reply.expectedTargetThreadId, "b9345678-1234-4234-8234-123456789abc");
@@ -175,14 +185,20 @@ test("peer replies invert pinned thread identities and preserve correlation", as
   assert.equal(outcome.status, "turn_started");
   assert.equal(dispatches, 1);
   assert.equal(routes.readRouteDelivery(ids.reply).replyToMessageId, ids.replyOriginal);
+  const uuidReply = routes.planPeerReply({
+    from: "reply-responder",
+    replyToMessageId: ids.replyOriginal,
+    logicalMessageId: "f9345678-2234-4234-8234-123456789abc",
+  });
+  assert.equal(uuidReply.replyToMessageId, ids.replyOriginal);
   assert.throws(
     () =>
       routes.planPeerReply({
         from: "reply-requester",
-        replyToMessageId: ids.replyOriginal,
+        replyToMessageId: replyHandle,
         logicalMessageId: "fa345678-1234-4234-8234-123456789abc",
       }),
-    /not the original recipient/,
+    /unknown peer message/,
   );
 
   registry.writeSessionRecord({
@@ -194,7 +210,7 @@ test("peer replies invert pinned thread identities and preserve correlation", as
     () =>
       routes.planPeerReply({
         from: "reply-responder",
-        replyToMessageId: ids.replyOriginal,
+        replyToMessageId: replyHandle,
         logicalMessageId: "bb345678-1234-4234-8234-123456789abc",
       }),
     /target thread identity changed/,
@@ -214,6 +230,7 @@ test("strict replies reject legacy messages without a pinned sender thread", asy
       turnId: "ca345678-1234-4234-8234-123456789abc",
     }),
   );
+  assert.equal(routes.readRouteDelivery(ids.replyLegacy).replyHandle, null);
   assert.throws(
     () =>
       routes.planPeerReply({
@@ -221,8 +238,46 @@ test("strict replies reject legacy messages without a pinned sender thread", asy
         replyToMessageId: ids.replyLegacy,
         logicalMessageId: "cb345678-1234-4234-8234-123456789abc",
       }),
-    /lacks pinned bidirectional thread identity/,
+    /lacks a pinned reverse-route Node identity/,
   );
+});
+
+test("cross-runtime replies resolve a Claude Node without retaining its endpoint", async () => {
+  await routes.routePeerMessage(
+    {
+      from: "claude-reviewer",
+      target: "reply-responder",
+      message: "review completed",
+      logicalMessageId: ids.claudeReplyOriginal,
+      senderNode: {
+        runtimeKind: "claude",
+        nativeId: "7c345678-1234-4234-8234-123456789abc",
+      },
+    },
+    async ({ replyHandle }) => ({
+      delivery: "started",
+      turnId: "8c345678-1234-4234-8234-123456789abc",
+      replyHandle,
+    }),
+  );
+  const original = routes.readRouteDelivery(ids.claudeReplyOriginal);
+  assert.match(original.replyHandle, /^m:[0-9A-HJKMNP-TV-Z]{10}$/);
+  assert.equal(
+    original.senderNodeKey,
+    "claude:7c345678-1234-4234-8234-123456789abc",
+  );
+  assert.equal(JSON.stringify(original).includes("cc-socks"), false);
+
+  const reply = routes.planPeerReply({
+    from: "reply-responder",
+    replyToMessageId: original.replyHandle,
+    logicalMessageId: ids.claudeReply,
+  });
+  assert.equal(reply.targetRuntime, "claude");
+  assert.equal(reply.targetNativeId, "7c345678-1234-4234-8234-123456789abc");
+  assert.equal(reply.replyToMessageId, ids.claudeReplyOriginal);
+  assert.equal(reply.expectedSenderThreadId, "c9345678-1234-4234-8234-123456789abc");
+  assert.equal(reply.expectedTargetThreadId, null);
 });
 
 test("routed replies invert project roles and reject altered response routes", async () => {

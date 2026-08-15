@@ -351,6 +351,13 @@ export async function dispatchScheduledDelivery(
         message,
         messageId,
         replyTo: record.logicalMessage.replyToMessageId || null,
+        replyHandle: delivery.replyHandle || null,
+        legacyReplyMessageId:
+          !delivery.replyHandle &&
+          record.logicalMessage.senderThreadId &&
+          delivery.targetThreadId
+            ? messageId
+            : null,
         route: record.logicalMessage.route,
       },
       {

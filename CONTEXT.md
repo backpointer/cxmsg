@@ -27,6 +27,10 @@ they carry different authority and delivery semantics.
 - **Content Reference**: an opaque local identifier plus byte count and digest
   used to retrieve and verify a retained Message Body. It is neither a path nor
   authority to execute work.
+- **Reply Handle**: a short opaque identifier assigned to one admitted Logical
+  Message within its recipient Node. It resolves only for that pinned recipient
+  thread and maps to the Delivery Ledger's reverse route. It is neither global
+  identity nor authority.
 - **Route Admission**: the pre-injection decision that compares a typed Peer
   Message route with the target Node's externally owned Project and role
   binding. It is separate from Delivery evidence.
@@ -85,6 +89,14 @@ they carry different authority and delivery semantics.
 - **Message Body Store Module**: the owner-private Module that appends bounded
   Message Bodies, verifies their digest, quarantines partial segments, and
   exposes bounded range reads through opaque Content References.
+- **Peer Message Context Projection Module**: the Module that converts an
+  admitted Peer Message into the minimal model-visible untrusted marker,
+  display alias, Message Body or preview, and Reply Handle. Routing, scheduling,
+  identity, and Delivery evidence remain outside model context.
+- **Cross-runtime Reply Adapter**: the Adapter that resolves a recipient-scoped
+  Reply Handle to a stable Node of another runtime, revalidates that Node's
+  current Endpoint, and creates correlated Delivery evidence without exposing
+  the Endpoint in model context. It never turns an ACK into task completion.
 - **Node Directory Module**: the Module that owns Node, Endpoint, Project,
   Cluster, alias, successor, and Tombstone identity rules.
 - **Conversation Module**: the Module that owns Direct and Group Conversation

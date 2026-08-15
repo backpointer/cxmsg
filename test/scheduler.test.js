@@ -21,6 +21,7 @@ const ids = {
   message: "12345678-2234-4234-8234-123456789abc",
   race: "22345678-2234-4234-8234-123456789abc",
   targetThread: "32345678-2234-4234-8234-123456789abc",
+  sourceThread: "33345678-2234-4234-8234-123456789abc",
   worker: "42345678-2234-4234-8234-123456789abc",
   turn: "52345678-2234-4234-8234-123456789abc",
   expired: "62345678-2234-4234-8234-123456789abc",
@@ -239,6 +240,7 @@ test("a trigger that becomes unverifiable after claim releases without an attemp
 
 test("when-idle stays queued while busy and starts exactly once after idle", async () => {
   const record = await scheduledRecord(ids.message, "scheduled coordination");
+  record.logicalMessage.senderThreadId = ids.sourceThread;
   let active = true;
   let starts = 0;
   const events = [];
@@ -252,6 +254,8 @@ test("when-idle stays queued while busy and starts exactly once after idle", asy
     deliver: async (_client, _thread, payload, options) => {
       starts += 1;
       assert.equal(payload.message, "scheduled coordination");
+      assert.equal(payload.replyHandle, null);
+      assert.equal(payload.legacyReplyMessageId, ids.message);
       await options.beforeStart();
       return { delivery: "started", turnId: ids.turn };
     },
@@ -268,8 +272,10 @@ test("when-idle stays queued while busy and starts exactly once after idle", asy
   assert.equal(ledger.readDeliveryLedger(ids.message).delivery.claimCount, 0);
 
   active = false;
+  const legacyRecord = ledger.readDeliveryLedger(ids.message);
+  legacyRecord.logicalMessage.senderThreadId = ids.sourceThread;
   const started = await scheduler.dispatchScheduledDelivery(
-    ledger.readDeliveryLedger(ids.message),
+    legacyRecord,
     {},
     ids.worker,
     dependencies,

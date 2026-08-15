@@ -61,8 +61,10 @@ import {
 } from "../src/doctor.js";
 import {
   cancelScheduledDelivery,
+  findDeliveryByReplyHandle,
   listDeliveryLedgerIndexed,
   readDeliveryLedgerIndexed,
+  REPLY_HANDLE_PATTERN,
   rebuildDeliveryLedgerIndex,
 } from "../src/delivery-ledger.js";
 import {
@@ -212,7 +214,7 @@ function usage(exitCode = 0) {
              [--after-turn <turn-id>|--after-job <job-id>]
              [--] <target> <message...>
   cxmsg reply [--from <name>] [--logical-message-id <uuid>]
-              <reply-to-message-id> <message...>
+              <reply-to-message-id|reply-handle> <message...>
   cxmsg route bind <session> --project <id> --role <role>
   cxmsg route show <session> [--json]
   cxmsg route list [--json]
@@ -237,8 +239,8 @@ function usage(exitCode = 0) {
   cxmsg directory execution sync [--json]
   cxmsg directory execution-threads [--json]
   cxmsg directory execution-thread show <thread-id> [--json]
-  cxmsg message info <message-id|content-ref> [--json]
-  cxmsg message show <message-id|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
+  cxmsg message info <message-id|reply-handle|content-ref> [--json]
+  cxmsg message show <message-id|reply-handle|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
   cxmsg revoke <sender> <target>
   cxmsg permissions <target> [--json]
@@ -551,6 +553,7 @@ function deliveryProjection(record) {
     deliveryId: delivery.deliveryId,
     from: record.logicalMessage.from,
     target: delivery.target,
+    replyHandle: delivery.replyHandle || null,
     replyToMessageId: record.logicalMessage.replyToMessageId || null,
     admissionState: delivery.admissionState,
     admissionReason: delivery.admissionReason,
@@ -1419,27 +1422,31 @@ async function commandClaudePeers(jsonOutput) {
   }
 }
 
-async function commandClaudeSend(args) {
-  let from = process.env.CODEX_SESSION_NAME || "";
-  if (args[0] === "--from") {
-    from = args[1] || "";
-    args = args.slice(2);
-  }
+async function sendClaudeFromCodex({
+  from,
+  target,
+  message,
+  logicalMessageId = null,
+  replyToMessageId = null,
+}) {
   validateSessionName(from);
-  const target = args.shift();
-  const message = validateMessage(args.join(" "));
+  validateMessage(message);
   const sourceRecord = readSessionRecord(from);
   if (!sourceRecord) throw new Error(`unknown Codex session: ${from}`);
   const relaySend = async (jobId = null) => {
     try {
       const delivery = await hostRelayRequest("/v1/claude/send", {
         method: "POST",
-        body: { from, target, message, jobId },
+        body: {
+          from,
+          target,
+          message,
+          jobId,
+          logicalMessageId,
+          replyToMessageId,
+        },
       });
-      process.stdout.write(
-        `queued Claude delivery ${delivery.jobId} via host relay (${delivery.status}, attempt ${delivery.attempt})\n`,
-      );
-      return;
+      return { ...delivery, via: "host-relay" };
     } catch (error) {
       const sandboxHint = ["EPERM", "EACCES"].includes(error.code)
         ? " The current sandbox also blocks loopback TCP; invoke cxmsg through an allowed host-side tool"
@@ -1452,35 +1459,51 @@ async function commandClaudeSend(args) {
   const bridge = await claudeBridgeState(from);
   if (!bridge.running) {
     if (bridge.status === "unreachable") {
-      await relaySend();
-      return;
+      return relaySend();
     }
     throw new Error(`Claude bridge for ${from} is ${bridge.status}`);
   }
 
   const peer = resolveClaudePeer(await listClaudePeers(), target);
   if (peer.status === "unreachable") {
-    await relaySend();
-    return;
+    return relaySend();
   }
   let job = await createClaudeDeliveryJob({
     from,
     sourceRecord,
     peer,
     message,
+    logicalMessageId,
+    replyToMessageId,
   });
+  if (job.deduplicated) {
+    return { ...job, via: "deduplicated", peerName: peer.name };
+  }
   job = await sendClaudeDeliveryJob(bridge.record, sourceRecord, job);
   if (job.status === "unreachable" && job.delivery?.errorCode === "EPERM") {
-    await relaySend(job.jobId);
-    return;
+    return relaySend(job.jobId);
   }
   if (job.status !== "transport_delivered") {
     throw new Error(
       `Claude delivery ${job.jobId} failed: ${job.error || job.status}`,
     );
   }
+  return { ...job, via: "claude-uds", peerName: peer.name };
+}
+
+async function commandClaudeSend(args) {
+  let from = process.env.CODEX_SESSION_NAME || "";
+  if (args[0] === "--from") {
+    from = args[1] || "";
+    args = args.slice(2);
+  }
+  const target = args.shift();
+  const message = validateMessage(args.join(" "));
+  const delivery = await sendClaudeFromCodex({ from, target, message });
   process.stdout.write(
-    `queued Claude delivery ${job.jobId} to ${peer.name} (transport_delivered, awaiting ACK)\n`,
+    delivery.via === "host-relay"
+      ? `queued Claude delivery ${delivery.jobId} via host relay (${delivery.status}, attempt ${delivery.attempt})\n`
+      : `queued Claude delivery ${delivery.jobId} to ${delivery.peerName} (transport_delivered, awaiting ACK)\n`,
   );
 }
 
@@ -2062,7 +2085,7 @@ async function commandSend(args) {
 
   const outcome = await routePeerMessage(
     { from, target, message, route, ...(logicalMessageId ? { logicalMessageId } : {}) },
-    async ({ logicalMessageId: messageId, route: admittedRoute }) => {
+    async ({ logicalMessageId: messageId, route: admittedRoute, replyHandle }) => {
       await ensureServer();
       return withAppServer(async (client) => {
         const thread = await readThreadMetadata(client, targetRecord.threadId);
@@ -2070,6 +2093,7 @@ async function commandSend(args) {
           from,
           message,
           messageId,
+          replyHandle,
           route: admittedRoute,
         }, {
           allowResume: sessionAllowsAppServerResume(targetRecord),
@@ -2122,6 +2146,21 @@ async function commandReply(args) {
   const replyToMessageId = args.shift();
   const message = validateStoredMessage(args.join(" "));
   const reply = planPeerReply({ from, replyToMessageId, logicalMessageId });
+  if (reply.targetRuntime === "claude") {
+    validateMessage(message);
+    const delivery = await sendClaudeFromCodex({
+      from,
+      target: reply.targetNativeId,
+      message,
+      logicalMessageId: reply.logicalMessageId,
+      replyToMessageId: reply.replyToMessageId,
+    });
+    process.stdout.write(
+      `replied ${reply.logicalMessageId} to ${replyToMessageId} for ${reply.target} ` +
+        `(Claude delivery ${delivery.jobId}, ${delivery.status})\n`,
+    );
+    return;
+  }
   const targetRecord = readSessionRecord(reply.target);
 
   const outcome = await routePeerMessage(
@@ -2130,6 +2169,7 @@ async function commandReply(args) {
       logicalMessageId: messageId,
       route: admittedRoute,
       replyToMessageId: admittedReplyTo,
+      replyHandle,
     }) => {
       await ensureServer();
       return withAppServer(async (client) => {
@@ -2139,6 +2179,7 @@ async function commandReply(args) {
           message,
           messageId,
           replyTo: admittedReplyTo,
+          replyHandle,
           route: admittedRoute,
         }, {
           allowResume: sessionAllowsAppServerResume(targetRecord),
@@ -2769,7 +2810,7 @@ function parseBodyReadInteger(option, value, { allowZero = false } = {}) {
 
 async function commandMessage(args) {
   const operation = args.shift();
-  const reference = args.shift();
+  let reference = args.shift();
   if (!reference || !["info", "show"].includes(operation)) usage(2);
   let jsonOutput = false;
   let offset = 0;
@@ -2784,6 +2825,20 @@ async function commandMessage(args) {
     } else {
       throw new Error(`unknown message option: ${option}`);
     }
+  }
+
+  if (REPLY_HANDLE_PATTERN.test(reference)) {
+    const current = process.env.CODEX_SESSION_NAME || "";
+    validateSessionName(current);
+    const record = readSessionRecord(current);
+    if (!record) throw new Error(`unknown Codex session: ${current}`);
+    const delivery = findDeliveryByReplyHandle({
+      replyHandle: reference,
+      target: current,
+      targetThreadId: record.threadId,
+    });
+    if (!delivery) throw new Error(`unknown peer reply handle: ${reference}`);
+    reference = delivery.logicalMessage.messageId;
   }
 
   if (operation === "info") {

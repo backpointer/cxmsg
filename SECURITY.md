@@ -22,6 +22,33 @@ malicious process running as that user.
 - Session rollouts and `~/.codex/cxmsg/` runtime state can contain sensitive
   prompts, results, paths, and tokens. Never commit or publish them.
 
+For Codex-to-Codex delivery, the Peer Message Context Projection Module emits a leading `[untrusted-peer]`
+header, a bounded display alias, an optional recipient-scoped Reply Handle, and
+the body or bounded preview. The marker is descriptive defense in depth, not an
+authorization check; only a marker assembled in the header position by cxmsg
+has this meaning. Peer-controlled occurrences in a Message Body are ordinary
+text. Project, role, stable Node identity, schedule, trigger, expiry, claim,
+attempt, digest, and Delivery evidence remain in Route Admission, the Delivery
+Ledger, and other owner-private Modules rather than model context.
+
+Reply Handles use 10 Crockford Base32 characters and are unique within a pinned
+recipient thread. They are not capability tokens. Resolution requires the
+current registered session name and exact recipient thread identity, then uses
+the original Ledger record's pinned reverse route. Handles are never silently
+reassigned; missing, ambiguous, stale-thread, quarantined, and unpinned records
+fail closed. Existing Logical Message UUID replies remain supported for
+backward compatibility.
+
+Claude-to-Codex ingress with a valid native session ID binds a Reply Handle to
+the stable Claude Node and exact recipient Codex thread. The reverse route
+resolves only the same Claude native session ID against a current live endpoint;
+it never reinterprets a display name or trusts a retained socket address.
+Malformed session IDs are rejected. Legacy frames with no `from-session` get no
+Reply Handle and retain their exact reply address as a temporary compatibility
+field. That field must not be removed until the sender supplies stable Node
+identity. Reply correlation is owner-private and does not collapse transport
+ACK, model reply, or task completion into one state.
+
 The Doctor Module is read-only. Default and `--deep` diagnosis must not signal
 processes, delete or rewrite records, start model turns, grant authority,
 change permission profiles, or answer approvals. An `unknown` or

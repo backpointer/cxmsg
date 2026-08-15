@@ -71,7 +71,7 @@ export function writeJob(job) {
   return job;
 }
 
-export function createJob({
+function buildJob({
   jobId = newJobId(),
   from,
   target,
@@ -87,8 +87,8 @@ export function createJob({
   mirror = "none",
   approvalTimeoutSeconds = 600,
 }) {
-  if (readJob(jobId)) throw new Error(`job already exists: ${jobId}`);
-  return writeJob({
+  validateJobId(jobId);
+  return {
     version: 1,
     jobId,
     from,
@@ -115,6 +115,32 @@ export function createJob({
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     completedAt: null,
+  };
+}
+
+export function createJob(spec) {
+  const job = buildJob(spec);
+  if (readJob(job.jobId)) throw new Error(`job already exists: ${job.jobId}`);
+  return writeJob(job);
+}
+
+export async function createJobOnce(spec, initialize = (job) => job) {
+  const jobId = spec.jobId || newJobId();
+  if (typeof initialize !== "function") {
+    throw new Error("job initializer must be a function");
+  }
+  return withJobLock(jobId, async () => {
+    const existing = readJob(jobId);
+    if (existing) return { job: existing, created: false };
+    const candidate = initialize(buildJob({ ...spec, jobId }));
+    if (
+      !candidate ||
+      candidate.version !== 1 ||
+      candidate.jobId !== jobId
+    ) {
+      throw new Error("job initializer changed immutable identity");
+    }
+    return { job: writeJob(candidate), created: true };
   });
 }
 

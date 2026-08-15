@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import {
   chmodSync,
   closeSync,
@@ -56,6 +56,8 @@ const SEGMENT_PATTERN = /^segment-(\d{8})(?:\.partial-[0-9a-f-]+)?\.jsonl$/i;
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const REPLY_HANDLE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+export const REPLY_HANDLE_PATTERN = /^m:[0-9A-HJKMNP-TV-Z]{10}$/;
 const CLAIM_RELEASE_REASONS = new Set(["target_busy", "worker_stopping", "dispatch_unavailable"]);
 const INDEX_SHARD_PATTERN = /^([0-9a-f-]{36})\.json$/i;
 const DELIVERY_LEDGER_MAX_INDEX_RECORDS = 4096;
@@ -63,6 +65,18 @@ const DELIVERY_LEDGER_MAX_INDEX_RECORDS = 4096;
 function validateUuid(label, value) {
   if (!UUID_PATTERN.test(value || "")) throw new Error(`${label} must be a UUID`);
   return value;
+}
+
+export function createReplyHandle(random = randomBytes) {
+  const bytes = random(10);
+  if (!Buffer.isBuffer(bytes) || bytes.length < 10) {
+    throw new Error("reply handle entropy source returned too few bytes");
+  }
+  let encoded = "";
+  for (let index = 0; index < 10; index += 1) {
+    encoded += REPLY_HANDLE_ALPHABET[bytes[index] & 31];
+  }
+  return `m:${encoded}`;
 }
 
 function ensurePrivateDirectory(directory) {
@@ -128,6 +142,18 @@ function validBody(body, messageId) {
   );
 }
 
+function validSenderNode(message) {
+  if (message.senderNodeKey === undefined) return true;
+  const match = /^(codex|claude):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.exec(
+    message.senderNodeKey || "",
+  );
+  if (!match) return false;
+  if (match[1].toLowerCase() === "codex") {
+    return message.senderThreadId?.toLowerCase() === match[2].toLowerCase();
+  }
+  return message.senderThreadId === null || message.senderThreadId === undefined;
+}
+
 function validBatch(record) {
   const message = record?.logicalMessage;
   const delivery = record?.deliveries?.[0];
@@ -142,6 +168,7 @@ function validBatch(record) {
       (message.senderThreadId === undefined ||
         message.senderThreadId === null ||
         UUID_PATTERN.test(message.senderThreadId || "")) &&
+      validSenderNode(message) &&
       (message.replyToMessageId === undefined ||
         (UUID_PATTERN.test(message.replyToMessageId || "") &&
           message.replyToMessageId !== message.messageId)) &&
@@ -156,6 +183,10 @@ function validBatch(record) {
       UUID_PATTERN.test(delivery?.deliveryId || "") &&
       NAME_PATTERN.test(delivery?.target || "") &&
       (delivery.targetThreadId === null || UUID_PATTERN.test(delivery.targetThreadId || "")) &&
+      (delivery.replyHandle === undefined ||
+        delivery.replyHandle === null ||
+        (delivery.admissionState === "admitted" &&
+          REPLY_HANDLE_PATTERN.test(delivery.replyHandle))) &&
       ["admitted", "quarantined"].includes(delivery.admissionState) &&
       typeof delivery.admissionReason === "string" &&
       ["immediate", ...SCHEDULED_WAKE_POLICIES].includes(delivery.wakePolicy) &&
@@ -781,6 +812,25 @@ export function listDeliveryLedger() {
   );
 }
 
+export function findDeliveryByReplyHandle({ replyHandle, target, targetThreadId }) {
+  if (!REPLY_HANDLE_PATTERN.test(replyHandle || "")) {
+    throw new Error("reply handle is invalid");
+  }
+  if (!NAME_PATTERN.test(target || "")) throw new Error("reply handle target is invalid");
+  validateUuid("reply handle target thread id", targetThreadId);
+  const matches = listDeliveryLedger().filter(
+    (record) =>
+      record.delivery.admissionState === "admitted" &&
+      record.delivery.target === target &&
+      record.delivery.targetThreadId === targetThreadId &&
+      record.delivery.replyHandle === replyHandle,
+  );
+  if (matches.length > 1) {
+    throw new Error("reply handle is ambiguous for the current recipient Node");
+  }
+  return matches[0] ? structuredClone(matches[0]) : null;
+}
+
 export async function listDeliveryLedgerIndexed() {
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () =>
@@ -825,6 +875,7 @@ export async function commitSingleRecipientDelivery(
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
     segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
     scheduledPerTargetLimit = SCHEDULED_DELIVERY_PER_TARGET_LIMIT,
+    replyHandleFactory = createReplyHandle,
   } = {},
 ) {
   validateStorageOptions(quotaBytes, segmentBytes);
@@ -846,6 +897,9 @@ export async function commitSingleRecipientDelivery(
     throw new Error("Ledger v1 does not support this wake policy");
   }
   if (!validTimestamp(now)) throw new Error("invalid Delivery timestamp");
+  if (typeof replyHandleFactory !== "function") {
+    throw new Error("reply handle factory must be a function");
+  }
 
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
@@ -880,6 +934,34 @@ export async function commitSingleRecipientDelivery(
         `scheduled Delivery queue for ${target} reached ${scheduledPerTargetLimit}`,
       );
     }
+    let replyHandle = null;
+    if (
+      admissionState === "admitted" &&
+      targetThreadId &&
+      (logicalMessage.senderThreadId || logicalMessage.senderNodeKey)
+    ) {
+      const namespace = targetThreadId || target;
+      for (let attempt = 0; attempt < 16; attempt += 1) {
+        const candidate = replyHandleFactory();
+        if (!REPLY_HANDLE_PATTERN.test(candidate || "")) {
+          throw new Error("reply handle factory returned an invalid handle");
+        }
+        const collision = [...messages.values()].some(
+          (message) =>
+            (message.delivery.targetThreadId || message.delivery.target) === namespace &&
+            message.delivery.replyHandle === candidate,
+        );
+        if (!collision) {
+          replyHandle = candidate;
+          break;
+        }
+      }
+      if (!replyHandle) {
+        const error = new Error("could not allocate a unique reply handle");
+        error.code = "EREPLYHANDLECOLLISION";
+        throw error;
+      }
+    }
     const record = {
       schemaVersion: 1,
       recordType: "ledger-batch",
@@ -891,6 +973,7 @@ export async function commitSingleRecipientDelivery(
           deliveryId: randomUUID(),
           target,
           targetThreadId,
+          replyHandle,
           admissionState,
           admissionReason,
           wakePolicy,

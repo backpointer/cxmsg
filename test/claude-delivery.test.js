@@ -30,7 +30,59 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
       peer,
       message: "review the change",
       maxAttempts: 3,
+      logicalMessageId: "17654321-4321-4321-4321-cba987654321",
+      replyToMessageId: "27654321-4321-4321-4321-cba987654321",
     });
+    assert.deepEqual(job.correlation, {
+      kind: "peer-reply",
+      logicalMessageId: "17654321-4321-4321-4321-cba987654321",
+      replyToMessageId: "27654321-4321-4321-4321-cba987654321",
+    });
+    assert.equal(job.jobId, job.correlation.logicalMessageId);
+    const duplicateReply = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "review the change",
+      maxAttempts: 3,
+      logicalMessageId: job.correlation.logicalMessageId,
+      replyToMessageId: job.correlation.replyToMessageId,
+    });
+    assert.equal(duplicateReply.deduplicated, true);
+    assert.equal(duplicateReply.jobId, job.jobId);
+    await assert.rejects(
+      createClaudeDeliveryJob({
+        from: "coordinator",
+        sourceRecord,
+        peer,
+        message: "changed reply content",
+        logicalMessageId: job.correlation.logicalMessageId,
+        replyToMessageId: job.correlation.replyToMessageId,
+      }),
+      /idempotency conflict/,
+    );
+    const concurrentCorrelation = {
+      logicalMessageId: "37654321-4321-4321-4321-cba987654321",
+      replyToMessageId: "47654321-4321-4321-4321-cba987654321",
+    };
+    const concurrent = await Promise.all([
+      createClaudeDeliveryJob({
+        from: "coordinator",
+        sourceRecord,
+        peer,
+        message: "one correlated reply",
+        ...concurrentCorrelation,
+      }),
+      createClaudeDeliveryJob({
+        from: "coordinator",
+        sourceRecord,
+        peer,
+        message: "one correlated reply",
+        ...concurrentCorrelation,
+      }),
+    ]);
+    assert.equal(concurrent.filter((candidate) => candidate.deduplicated).length, 1);
+    assert.equal(concurrent[0].jobId, concurrent[1].jobId);
     const frames = [];
     job = await sendClaudeDeliveryJob(
       { socketPath: "/tmp/cc-socks/99999.sock" },
@@ -72,6 +124,33 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.equal(job.status, "completed");
     assert.equal(job.result, "Done");
     assert.equal(readJob(job.jobId).status, "completed");
+
+    const rotatedPeer = {
+      ...peer,
+      name: "reviewer-renamed",
+      address: "uds:/tmp/cc-socks/54321.sock",
+      socketPath: "/tmp/cc-socks/54321.sock",
+    };
+    let rotated = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "follow the stable Node to its current endpoint",
+    });
+    const selectedSockets = [];
+    rotated = await sendClaudeDeliveryJob(
+      { socketPath: "/tmp/cc-socks/99999.sock" },
+      sourceRecord,
+      rotated,
+      {
+        peers: async () => [rotatedPeer],
+        send: async (socketPath) => selectedSockets.push(socketPath),
+      },
+    );
+    assert.deepEqual(selectedSockets, [rotatedPeer.socketPath]);
+    assert.equal(rotated.claudeTarget.sessionId, peer.sessionId);
+    assert.equal(rotated.claudeTarget.name, rotatedPeer.name);
+    assert.equal(rotated.claudeTarget.address, rotatedPeer.address);
 
     const { handleClaudeDeliveryAck } = await import("../src/claude-bridge.js");
     const { deliverPeerMessage } = await import("../src/messaging.js");

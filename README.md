@@ -76,10 +76,12 @@ cxmsg send \
   "Review handoff <id> at commit <sha>."
 ```
 
-Use the delivered Logical Message ID for a strictly correlated response:
+Each newly admitted message with pinned sender and recipient threads receives a
+short recipient-scoped Reply Handle. Use it, or the Logical Message ID for
+backward compatibility, for a strictly correlated response:
 
 ```bash
-cxmsg reply <logical-message-id> "Review passed at commit <sha>."
+cxmsg reply <reply-handle|logical-message-id> "Review passed at commit <sha>."
 ```
 
 `reply` derives its destination from the original Ledger record instead of
@@ -91,6 +93,36 @@ task. Therefore a routed request intended to receive a strict reply must include
 `--sender-role`. Records created before sender-thread pinning remain readable but
 cannot be used as strict reply targets. `reply` is still an untrusted Peer
 Message and creates no authority or approval.
+
+The Codex App Server model-visible Peer Message projection is intentionally small: a leading
+`[untrusted-peer]` marker, sender display alias, optional Reply Handle, and the
+body or bounded preview. Protocol, stable `from`/`to` identity, Project and role
+route, timestamps, wake policy, triggers, expiry, claims, attempts, digests, and
+Delivery outcomes stay outside model context. `additionalContext` is not used
+as a token-free metadata channel because it is still part of model input.
+Retained large bodies can be read with `cxmsg message show <reply-handle>` from
+the recipient session.
+Scheduled records created before Reply Handles existed expose their Logical
+Message UUID only when both legacy thread identities are pinned, preserving
+strict reply compatibility without restoring the full metadata envelope.
+
+Claude-to-Codex ingress with a valid native Claude session ID now stores the
+stable `claude:<session-id>` Node identity in the owner-private Delivery Ledger
+and projects only the recipient-scoped Reply Handle. `cxmsg reply` resolves the
+same Claude session ID against its current live endpoint, so a socket change
+does not reinterpret a display name or reuse the old address. Frames from older
+Claude peers that omit `from-session` receive no Reply Handle and temporarily
+retain the exact reply address in model context; this fail-safe compatibility
+path can be removed only after those peers supply stable Node identity.
+For a Project-routed message, the Claude Node must also be present in that
+Project's Node Directory (for example via `cxmsg directory sync --project
+<routing-id> --claude-only`); otherwise the reverse route fails closed instead
+of crossing a Project based on a claimed role.
+
+Cross-runtime replies create a Claude Delivery Job whose owner-private
+correlation record links the new Logical Message ID to the original message.
+The Claude transport ACK remains separate evidence: a queued or
+`transport_delivered` reply is not reported as model completion.
 
 Once a target is bound, an untyped, expired, wrong-Project, wrong-role, or
 stale-thread message is stored in owner-only Quarantine before any App Server
@@ -1127,6 +1159,7 @@ not needed.
 
 - [Busy delivery, scheduling, and doctor improvement plan](docs/BUSY_SCHEDULING_DOCTOR.md)
 - [Coordination graph and conversation plan](docs/COORDINATION_GRAPH_CONVERSATIONS.md)
+- [Prioritized implementation TODO](docs/IMPLEMENTATION_TODO.md)
 - [Doctor JSON schema v1](docs/DOCTOR_SCHEMA_V1.md)
 - [Domain language](CONTEXT.md)
 

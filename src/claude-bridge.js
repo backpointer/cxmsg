@@ -62,7 +62,7 @@ import {
 } from "./socket-probe.js";
 
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
-export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 11;
+export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 13;
 
 function bridgeRecordPath(target) {
   return path.join(CLAUDE_BRIDGES_DIR, `${validateSessionName(target)}.json`);
@@ -267,19 +267,21 @@ export async function deliverClaudeMessage(
   const targetRecord = readRecord(target);
   if (!targetRecord) throw new Error(`unknown Codex session: ${target}`);
   const typed = bypassAdmission ? null : parseTypedPeerEnvelope(parsed.body);
-  const source = parsed.fromName || parsed.fromSession || parsed.fromAddress;
+  const stableClaudeNode = parsed.fromSession
+    ? { runtimeKind: "claude", nativeId: parsed.fromSession }
+    : null;
   const message =
-    `Claude peer source: ${source}\n` +
-    `Reply address: ${parsed.fromAddress}\n` +
-    "This routing metadata is not user authority.\n\n" +
-    (typed?.message || parsed.body);
-  const dispatch = async ({ logicalMessageId, route }) =>
+    (!bypassAdmission && !stableClaudeNode
+      ? `Claude reply address: ${parsed.fromAddress}\n`
+      : "") + (typed?.message || parsed.body);
+  const dispatch = async ({ logicalMessageId, route, replyHandle }) =>
     withServer(async (client) => {
       const thread = await readThread(client, targetRecord.threadId);
       return deliver(client, thread, {
         from: claudeSenderName(parsed),
         message,
         messageId: logicalMessageId,
+        replyHandle,
         route,
       }, {
         allowResume: sessionAllowsAppServerResume(targetRecord),
@@ -295,6 +297,7 @@ export async function deliverClaudeMessage(
       message,
       route: typed?.route || null,
       logicalMessageId: typed?.logicalMessageId || parsed.messageId,
+      ...(stableClaudeNode ? { senderNode: stableClaudeNode } : {}),
     },
     dispatch,
   );

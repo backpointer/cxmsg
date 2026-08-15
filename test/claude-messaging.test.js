@@ -77,6 +77,20 @@ test("Claude cross-session frames preserve sender routing and untrusted text", (
   assert.equal(parsed.fromAddress, "uds:/tmp/cc-socks/12345.sock");
 });
 
+test("Claude cross-session frames reject malformed stable sender identity", () => {
+  const frame = buildClaudePeerFrame({
+    fromSocket: "/tmp/cc-socks/12345.sock",
+    fromName: "reviewer",
+    fromSession: SESSION_ID,
+    message: "hello",
+  });
+  frame.message.content = frame.message.content.replace(
+    `from-session="${SESSION_ID}"`,
+    'from-session="not-a-session"',
+  );
+  assert.throws(() => parseClaudePeerFrame(frame), /sender session is invalid/);
+});
+
 test("Claude request and response envelopes are explicit and correlated", () => {
   const request = buildClaudeRequestBody("inspect the report", GRANT_TOKEN);
   assert.deepEqual(parseClaudeRequestBody(request), {

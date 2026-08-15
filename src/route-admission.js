@@ -14,7 +14,9 @@ import {
   appendDeliveryEvidence,
   beginImmediateDelivery,
   commitSingleRecipientDelivery,
+  findDeliveryByReplyHandle,
   readDeliveryLedger,
+  REPLY_HANDLE_PATTERN,
 } from "./delivery-ledger.js";
 import {
   MAX_WHEN_IDLE_DELAY_MS,
@@ -235,18 +237,33 @@ export function listRouteBindings() {
 
 export function planPeerReply({
   from,
-  replyToMessageId,
+  replyToMessageId: replyReference,
   logicalMessageId = randomUUID(),
 }) {
   validateName("reply sender", from);
-  validateUuid("reply-to message id", replyToMessageId);
   validateUuid("logical message id", logicalMessageId);
+  const senderRecord = readSessionRecord(from);
+  let original = null;
+  let replyToMessageId = replyReference;
+  if (UUID_PATTERN.test(replyReference || "")) {
+    original = readDeliveryLedger(replyReference);
+  } else if (REPLY_HANDLE_PATTERN.test(replyReference || "")) {
+    if (!senderRecord) throw new Error("unknown peer reply sender");
+    original = findDeliveryByReplyHandle({
+      replyHandle: replyReference,
+      target: from,
+      targetThreadId: senderRecord.threadId,
+    });
+    replyToMessageId = original?.logicalMessage.messageId || null;
+  } else {
+    throw new Error("reply target must be a Logical Message UUID or reply handle");
+  }
+  if (!replyToMessageId || !original) {
+    throw new Error(`unknown peer message: ${replyReference}`);
+  }
   if (replyToMessageId === logicalMessageId) {
     throw new Error("a peer reply cannot reference itself");
   }
-
-  const original = readDeliveryLedger(replyToMessageId);
-  if (!original) throw new Error(`unknown peer message: ${replyToMessageId}`);
   if (original.delivery.admissionState !== "admitted") {
     throw new Error("cannot reply to a quarantined peer message");
   }
@@ -257,14 +274,63 @@ export function planPeerReply({
   const target = original.logicalMessage.from;
   const expectedSenderThreadId = original.delivery.targetThreadId;
   const expectedTargetThreadId = original.logicalMessage.senderThreadId;
-  if (!expectedSenderThreadId || !expectedTargetThreadId) {
-    throw new Error("original peer message lacks pinned bidirectional thread identity");
+  const targetNodeKey = original.logicalMessage.senderNodeKey || null;
+  const claudeTarget = /^claude:([0-9a-f-]{36})$/i.exec(targetNodeKey || "");
+  if (!expectedSenderThreadId || (!expectedTargetThreadId && !claudeTarget)) {
+    throw new Error("original peer message lacks a pinned reverse-route Node identity");
   }
-  const senderRecord = readSessionRecord(from);
-  const targetRecord = readSessionRecord(target);
   if (!senderRecord || senderRecord.threadId !== expectedSenderThreadId) {
     throw new Error("peer reply sender thread identity changed");
   }
+  if (claudeTarget) {
+    const senderBinding = routeBindingState(from);
+    const originalRoute = original.logicalMessage.route;
+    let route = null;
+    if (originalRoute) {
+      const project = findProjectByRoutingId(originalRoute.project_id);
+      const targetNode = readNode("claude", claudeTarget[1]);
+      if (
+        senderBinding.state !== "valid" ||
+        senderBinding.record.threadId !== expectedSenderThreadId ||
+        senderBinding.record.projectId !== originalRoute.project_id ||
+        senderBinding.record.role !== originalRoute.target_role ||
+        !project ||
+        !targetNode ||
+        targetNode.projectId !== project.projectId
+      ) {
+        throw new Error("cross-runtime reply Project or Node identity changed");
+      }
+      if (originalRoute.sender_role) {
+        route = {
+          schema_version: 1,
+          project_id: originalRoute.project_id,
+          target_role: originalRoute.sender_role,
+          logical_message_id: logicalMessageId,
+          payload_type: "response",
+          wake_policy: "immediate",
+          sender_role: senderBinding.record.role,
+          ...(originalRoute.task_id ? { task_id: originalRoute.task_id } : {}),
+        };
+      }
+    } else if (senderBinding.state !== "missing") {
+      throw new Error("unrouted cross-runtime reply requires the Codex session to remain unbound");
+    }
+    return {
+      from,
+      target,
+      targetRuntime: "claude",
+      targetNodeKey,
+      targetNativeId: claudeTarget[1].toLowerCase(),
+      logicalMessageId,
+      replyToMessageId,
+      replyReference,
+      expectedSenderThreadId,
+      expectedTargetThreadId: null,
+      route,
+    };
+  }
+
+  const targetRecord = readSessionRecord(target);
   if (!targetRecord || targetRecord.threadId !== expectedTargetThreadId) {
     throw new Error("peer reply target thread identity changed");
   }
@@ -309,8 +375,12 @@ export function planPeerReply({
   return {
     from,
     target,
+    targetRuntime: "codex",
+    targetNodeKey: targetNodeKey || `codex:${expectedTargetThreadId}`,
+    targetNativeId: expectedTargetThreadId,
     logicalMessageId,
     replyToMessageId,
+    replyReference,
     expectedSenderThreadId,
     expectedTargetThreadId,
     route,
@@ -472,6 +542,9 @@ function ledgerRouteDelivery(record) {
     logicalMessageId: message.messageId,
     deliveryId: delivery.deliveryId,
     from: message.from,
+    ...(message.senderNodeKey
+      ? { senderNodeKey: message.senderNodeKey }
+      : {}),
     ...(message.senderThreadId
       ? { senderThreadId: message.senderThreadId }
       : {}),
@@ -482,6 +555,7 @@ function ledgerRouteDelivery(record) {
     ...(delivery.targetThreadId
       ? { targetThreadId: delivery.targetThreadId }
       : {}),
+    replyHandle: delivery.replyHandle || null,
     messageBytes: message.body.bytes,
     messageSha256: message.body.sha256,
     contentRef: message.body.contentRef,
@@ -592,6 +666,7 @@ export async function routePeerMessage(
     route = null,
     logicalMessageId = route?.logical_message_id || randomUUID(),
     replyToMessageId = null,
+    senderNode = null,
   },
   dispatch,
   { log = writeCoordinationEvent, validateTrigger = null } = {},
@@ -610,6 +685,18 @@ export async function routePeerMessage(
     throw new Error(`message exceeds ${MAX_STORED_MESSAGE_BYTES} bytes`);
   }
   const normalizedRoute = normalizeRoute(route, logicalMessageId);
+  const senderRecord = readSessionRecord(from);
+  if (senderNode && senderNode.runtimeKind !== "claude") {
+    throw new Error("explicit sender Node is reserved for Claude bridge ingress");
+  }
+  const senderNodeKey = senderNode
+    ? directoryNodeKey(senderNode.runtimeKind, senderNode.nativeId)
+    : senderRecord?.threadId
+      ? directoryNodeKey("codex", senderRecord.threadId)
+      : null;
+  if (senderNode && senderRecord) {
+    throw new Error("explicit sender Node cannot replace a registered Codex sender");
+  }
   const messageSha256 = createHash("sha256").update(message).digest("hex");
   const fingerprint = routeFingerprint(normalizedRoute);
   ensureDirectory(ROUTE_DELIVERIES_DIR);
@@ -625,6 +712,9 @@ export async function routePeerMessage(
       if (
         existing.from !== from ||
         existing.target !== target ||
+        (existing.senderNodeKey ||
+          (existing.senderThreadId ? `codex:${existing.senderThreadId.toLowerCase()}` : null)) !==
+          senderNodeKey ||
         (existing.replyToMessageId || null) !== replyToMessageId ||
         existing.messageSha256 !== messageSha256 ||
         existing.routeFingerprint !== fingerprint
@@ -638,7 +728,6 @@ export async function routePeerMessage(
     const targetBinding = routeBindingState(target);
     const senderBinding = routeBindingState(from);
     const targetRecord = readSessionRecord(target);
-    const senderRecord = readSessionRecord(from);
     if (replyToMessageId) {
       const reply = planPeerReply({
         from,
@@ -702,6 +791,7 @@ export async function routePeerMessage(
         messageId: logicalMessageId,
         from,
         senderThreadId: senderRecord?.threadId || null,
+        ...(senderNodeKey ? { senderNodeKey } : {}),
         ...(replyToMessageId ? { replyToMessageId } : {}),
         body: {
           messageId: logicalMessageId,
@@ -756,6 +846,7 @@ export async function routePeerMessage(
       logicalMessageId,
       route: normalizedRoute,
       replyToMessageId,
+      replyHandle: prepared.record.replyHandle,
     });
     const completed = ledgerRouteDelivery(
       await appendDeliveryEvidence(logicalMessageId, {

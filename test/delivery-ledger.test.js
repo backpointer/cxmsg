@@ -27,6 +27,7 @@ test.after(() => {
 
 const ids = {
   message: "11345678-1234-4234-8234-123456789abc",
+  sourceThread: "12345678-2234-4234-8234-123456789abc",
   targetThread: "21345678-1234-4234-8234-123456789abc",
   turn: "31345678-1234-4234-8234-123456789abc",
   secondMessage: "41345678-1234-4234-8234-123456789abc",
@@ -37,6 +38,8 @@ const ids = {
   rejectedMessage: "b1345678-1234-4234-8234-123456789abc",
   boundedThread: "c1345678-1234-4234-8234-123456789abc",
   cancelledMessage: "d1345678-1234-4234-8234-123456789abc",
+  handleMessage: "e1345678-1234-4234-8234-123456789abc",
+  handleCollision: "f1345678-1234-4234-8234-123456789abc",
 };
 
 function logicalMessage(
@@ -56,6 +59,7 @@ function logicalMessage(
   return {
     messageId,
     from: "coordinator",
+    senderThreadId: ids.sourceThread,
     body: {
       messageId,
       bytes: Buffer.byteLength(body, "utf8"),
@@ -82,6 +86,23 @@ test("a Logical Message and its recipient Delivery commit in one private journal
   assert.equal(committed.created, true);
   assert.equal(committed.record.delivery.state, "created");
   assert.equal(committed.record.delivery.attempts.length, 0);
+  assert.match(committed.record.delivery.replyHandle, ledger.REPLY_HANDLE_PATTERN);
+  assert.equal(
+    ledger.findDeliveryByReplyHandle({
+      replyHandle: committed.record.delivery.replyHandle,
+      target: "auditor",
+      targetThreadId: ids.targetThread,
+    }).logicalMessage.messageId,
+    ids.message,
+  );
+  assert.equal(
+    ledger.findDeliveryByReplyHandle({
+      replyHandle: committed.record.delivery.replyHandle,
+      target: "other-auditor",
+      targetThreadId: ids.targetThread,
+    }),
+    null,
+  );
 
   const segments = readdirSync(ledger.DELIVERY_LEDGER_SEGMENTS_DIR);
   assert.equal(segments.length, 1);
@@ -92,6 +113,38 @@ test("a Logical Message and its recipient Delivery commit in one private journal
   assert.equal(lines.length, 1);
   assert.equal(JSON.parse(lines[0]).recordType, "ledger-batch");
   assert.doesNotMatch(lines[0], /private coordination body/);
+});
+
+test("reply handles are recipient-scoped and collisions are retried", async () => {
+  const first = await ledger.commitSingleRecipientDelivery(
+    {
+      logicalMessage: logicalMessage(ids.handleMessage),
+      target: "handle-auditor",
+      targetThreadId: ids.boundedThread,
+      admissionState: "admitted",
+      admissionReason: "binding_match",
+      now: "2026-08-14T00:00:10.000Z",
+    },
+    { replyHandleFactory: () => "m:0000000000" },
+  );
+  let allocations = 0;
+  const second = await ledger.commitSingleRecipientDelivery(
+    {
+      logicalMessage: logicalMessage(ids.handleCollision),
+      target: "handle-auditor",
+      targetThreadId: ids.boundedThread,
+      admissionState: "admitted",
+      admissionReason: "binding_match",
+      now: "2026-08-14T00:00:11.000Z",
+    },
+    {
+      replyHandleFactory: () =>
+        allocations++ === 0 ? "m:0000000000" : "m:1111111111",
+    },
+  );
+  assert.equal(first.record.delivery.replyHandle, "m:0000000000");
+  assert.equal(second.record.delivery.replyHandle, "m:1111111111");
+  assert.equal(allocations, 2);
 });
 
 test("Ledger idempotency preserves one batch and rejects changed content", async () => {
@@ -144,7 +197,7 @@ test("attempt and evidence records rebuild the strongest proven state", async ()
   });
   assert.equal(accepted.delivery.state, "turn_started");
   assert.equal(accepted.delivery.turnId, ids.turn);
-  assert.equal(ledger.listDeliveryLedger().length, 1);
+  assert.equal(ledger.listDeliveryLedger().length, 3);
 });
 
 test("when-idle Delivery uses an expiring claim before one dispatch attempt", async () => {
@@ -351,7 +404,7 @@ test("an incomplete active tail is quarantined before a new batch is appended", 
   });
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_QUARANTINE_DIR).length, 1);
   assert.equal(readdirSync(ledger.DELIVERY_LEDGER_SEGMENTS_DIR).length, 1);
-  assert.equal(ledger.listDeliveryLedger().length, 6);
+  assert.equal(ledger.listDeliveryLedger().length, 8);
 });
 
 test("Ledger scans reject broad modes and symlink segments", () => {

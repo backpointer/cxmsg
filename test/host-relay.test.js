@@ -17,16 +17,20 @@ test("authenticated host relay sends without caller access to Claude UDS", async
       socketPath: "/tmp/cc-socks/12345.sock",
       status: "idle",
     };
+    const created = [];
     const relay = await runHostRelay({
       port: 0,
       bridgeState: async () => ({ running: true, record: { socketPath: "bridge" } }),
       peers: async () => [peer],
       session: () => ({ threadId: "source-thread" }),
-      createDelivery: ({ from, message }) => ({
-        jobId: "12345678-1234-1234-1234-123456789abc",
-        from,
-        task: message,
-      }),
+      createDelivery: (input) => {
+        created.push(input);
+        return {
+          jobId: "12345678-1234-1234-1234-123456789abc",
+          from: input.from,
+          task: input.message,
+        };
+      },
       sendDelivery: async (_bridge, _source, job) => {
         sent.push(job);
         return { ...job, status: "transport_delivered", delivery: { attempt: 1 } };
@@ -40,10 +44,20 @@ test("authenticated host relay sends without caller access to Claude UDS", async
           from: "coordinator",
           target: "reviewer",
           message: "hello through the host",
+          logicalMessageId: "22345678-1234-4234-8234-123456789abc",
+          replyToMessageId: "32345678-1234-4234-8234-123456789abc",
         },
       });
       assert.equal(result.status, "transport_delivered");
       assert.equal(sent.length, 1);
+      assert.equal(
+        created[0].logicalMessageId,
+        "22345678-1234-4234-8234-123456789abc",
+      );
+      assert.equal(
+        created[0].replyToMessageId,
+        "32345678-1234-4234-8234-123456789abc",
+      );
 
       await assert.rejects(
         hostRelayRequest("/v1/claude/send", {

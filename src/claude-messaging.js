@@ -169,6 +169,9 @@ export function parseClaudePeerFrame(frame) {
   if (!fromAddress?.startsWith("uds:") || (frame.from && frame.from !== fromAddress)) {
     throw new Error("Claude peer sender address mismatch");
   }
+  if (attributes["from-session"] && !isUuid(attributes["from-session"])) {
+    throw new Error("Claude peer sender session is invalid");
+  }
 
   return {
     messageId: frame.msg_id,

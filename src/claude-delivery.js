@@ -5,11 +5,18 @@ import {
   resolveClaudePeer,
   sendClaudePeerFrame,
 } from "./claude-messaging.js";
-import { createJob, mutateJob, readJob, updateJob } from "./jobs.js";
+import {
+  createJob,
+  createJobOnce,
+  mutateJob,
+  readJob,
+  updateJob,
+} from "./jobs.js";
 import { writeCoordinationEvent } from "./observability.js";
 
 const ACK_PATTERN =
   /^<cxmsg-ack in-reply-to="([0-9a-f-]{36})" status="(accepted|completed|retryable_error|failed)"(?: code="([^"]{1,32})")?(?: retry-after="(\d{1,5})")?>\n([\s\S]*)\n<\/cxmsg-ack>$/i;
+const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 function deliveryBody(job) {
   return (
@@ -74,16 +81,31 @@ export async function createClaudeDeliveryJob({
   message,
   maxAttempts = 4,
   ackTimeoutSeconds = 120,
+  logicalMessageId = null,
+  replyToMessageId = null,
 }) {
-  const created = createJob({
+  if ((logicalMessageId === null) !== (replyToMessageId === null)) {
+    throw new Error("Claude peer reply correlation requires both Logical Message IDs");
+  }
+  if (
+    logicalMessageId !== null &&
+    (!UUID_PATTERN.test(logicalMessageId) ||
+      !UUID_PATTERN.test(replyToMessageId) ||
+      logicalMessageId === replyToMessageId)
+  ) {
+    throw new Error("Claude peer reply correlation is invalid");
+  }
+  const spec = {
+    ...(logicalMessageId ? { jobId: logicalMessageId } : {}),
     from,
     target: peer.name,
     targetThreadId: sourceRecord.threadId,
     threadId: null,
     task: message,
     kind: "claude-delivery",
-  });
-  const job = await updateJob(created, {
+  };
+  const initial = (created) => ({
+    ...created,
     status: "queued",
     claudeTarget: {
       name: peer.name,
@@ -102,8 +124,46 @@ export async function createClaudeDeliveryJob({
       errorCode: null,
     },
     ack: null,
+    correlation:
+      logicalMessageId === null
+        ? null
+        : {
+            kind: "peer-reply",
+            logicalMessageId,
+            replyToMessageId,
+          },
     ackTimeoutSeconds,
   });
+  let job;
+  if (logicalMessageId) {
+    const once = await createJobOnce(spec, initial);
+    job = once.job;
+    if (!once.created) {
+      if (
+        job.kind !== "claude-delivery" ||
+        job.from !== from ||
+        job.task !== message ||
+        job.claudeTarget?.sessionId !== peer.sessionId ||
+        job.correlation?.kind !== "peer-reply" ||
+        job.correlation.logicalMessageId !== logicalMessageId ||
+        job.correlation.replyToMessageId !== replyToMessageId
+      ) {
+        throw new Error(`Claude peer reply idempotency conflict: ${logicalMessageId}`);
+      }
+      await writeCoordinationEvent({
+        kind: "claude-delivery",
+        phase: "deduplication",
+        correlationId: job.jobId,
+        target: job.target,
+        attempt: job.delivery?.attempt || 0,
+        outcome: job.status,
+      });
+      return { ...job, deduplicated: true };
+    }
+  } else {
+    const created = createJob(spec);
+    job = await updateJob(created, initial(created));
+  }
   await writeCoordinationEvent({
     kind: "claude-delivery",
     phase: "created",
@@ -161,24 +221,36 @@ export async function sendClaudeDeliveryJob(
   });
   try {
     const peer = resolveStoredTarget(await peers(), current);
+    const sending =
+      current.claudeTarget?.sessionId &&
+      (current.claudeTarget.address !== peer.address ||
+        current.claudeTarget.name !== peer.name)
+        ? await updateJob(current, {
+            claudeTarget: {
+              name: peer.name,
+              sessionId: current.claudeTarget.sessionId,
+              address: peer.address,
+            },
+          })
+        : current;
     const frame = buildClaudePeerFrame({
       fromSocket: bridgeRecord.socketPath,
-      fromName: `codex-${current.from}`,
+      fromName: `codex-${sending.from}`,
       fromSession: sourceRecord.threadId,
-      message: deliveryBody(current),
+      message: deliveryBody(sending),
       messageId,
     });
     await send(peer.socketPath, frame);
     const ackDeadlineAt = new Date(
       Date.now() + (current.ackTimeoutSeconds || 120) * 1_000,
     ).toISOString();
-    const delivered = await updateJob(current, {
+    const delivered = await updateJob(sending, {
       status: "transport_delivered",
       error: null,
       delivery: {
-        ...current.delivery,
+        ...sending.delivery,
         attempt,
-        messageIds: [...(current.delivery?.messageIds || []), messageId],
+        messageIds: [...(sending.delivery?.messageIds || []), messageId],
         transportStatus: "delivered",
         attemptedAt,
         deliveredAt: new Date().toISOString(),

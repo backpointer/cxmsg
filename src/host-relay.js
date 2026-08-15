@@ -127,13 +127,18 @@ export async function runHostRelay({
             sourceRecord,
             peer,
             message,
+            logicalMessageId: body.logicalMessageId || null,
+            replyToMessageId: body.replyToMessageId || null,
           });
         }
-        job = await sendDelivery(bridge.record, sourceRecord, job);
+        if (!job.deduplicated) {
+          job = await sendDelivery(bridge.record, sourceRecord, job);
+        }
         json(response, 200, {
           jobId: job.jobId,
           status: job.status,
           attempt: job.delivery?.attempt || 0,
+          deduplicated: Boolean(job.deduplicated),
         });
         return;
       }
