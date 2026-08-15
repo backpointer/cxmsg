@@ -27,6 +27,7 @@ import {
 import { withFileLock } from "./file-lock.js";
 import {
   assertRetentionReadable,
+  assertRetentionReadableNoCreate,
   assertRetentionMutation,
   withRetentionWriter,
 } from "./retention-barrier.js";
@@ -1779,6 +1780,13 @@ export function readDeliveryLedger(messageId) {
 
 export function listDeliveryLedger() {
   assertRetentionReadable();
+  return [...rebuildDeliveryLedgerRecords(readRecords()).values()].sort((left, right) =>
+    left.committedAt.localeCompare(right.committedAt),
+  );
+}
+
+export function listDeliveryLedgerReadOnly() {
+  assertRetentionReadableNoCreate();
   return [...rebuildDeliveryLedgerRecords(readRecords()).values()].sort((left, right) =>
     left.committedAt.localeCompare(right.committedAt),
   );

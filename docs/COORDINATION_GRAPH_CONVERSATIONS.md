@@ -1,8 +1,8 @@
 # Coordination graph and conversation plan
 
-- Status: proposal
-- Target release: to be determined
-- Last updated: 2026-08-14
+- Status: implementation in progress
+- Target release: incremental
+- Last updated: 2026-08-15
 
 ## Summary
 
@@ -828,6 +828,19 @@ Message `turn/start` composes oldest unread Group entries. Busy steering,
 Delegation, and external turns never receive a digest. App Server acceptance
 precedes cursor advancement and intent consumption, while previews remain
 bounded to 16 messages and 8 KiB and are labelled untrusted coordination.
+
+Version 0.42.0 introduces the canonical read-only Graph Projection Interface.
+It derives typed Project, Cluster, Conversation, local reachability,
+communication, Delegation, and successor Edges from their owning Modules;
+supports `current`, one-hour, 24-hour, and all-history filters; and redacts
+paths unless explicitly requested. Endpoint addresses, bodies, tasks, results,
+permissions, approvals, and capabilities never enter the projection. The
+existing browser topology remains a presentation client to migrate onto this
+canonical projection rather than a second source of graph truth.
+Valid stable references missing from the Directory are retained only as
+`unresolved-directory` placeholders with no inferred Project or reachability;
+the projection reports their count so legacy state remains visible without
+silently promoting it into identity truth.
 
 ### Phase 7: Graph Projection and extended Doctor
 

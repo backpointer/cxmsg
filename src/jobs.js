@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -17,6 +18,7 @@ import {
 import { processState } from "./process-state.js";
 import {
   assertRetentionReadable,
+  assertRetentionReadableNoCreate,
   withRetentionWriter,
 } from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
@@ -62,10 +64,30 @@ export function readJob(jobId) {
 
 export function listJobs() {
   assertRetentionReadable();
-  ensureJobsDirectory();
+  if (!existsSync(JOBS_DIR)) return [];
   return readdirSync(JOBS_DIR)
     .filter((filename) => /^[0-9a-f-]+\.json$/i.test(filename))
     .map((filename) => readJob(filename.slice(0, -5)))
+    .filter(Boolean);
+}
+
+export function listJobsReadOnly() {
+  assertRetentionReadableNoCreate();
+  if (!existsSync(JOBS_DIR)) return [];
+  return readdirSync(JOBS_DIR)
+    .filter((filename) => /^[0-9a-f-]+\.json$/i.test(filename))
+    .map((filename) => {
+      try {
+        const job = JSON.parse(
+          readFileSync(path.join(JOBS_DIR, filename), "utf8"),
+        );
+        return job?.version === 1 && `${job.jobId}.json` === filename
+          ? job
+          : null;
+      } catch {
+        return null;
+      }
+    })
     .filter(Boolean);
 }
 

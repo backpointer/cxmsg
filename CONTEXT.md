@@ -188,6 +188,9 @@ they carry different authority and delivery semantics.
 - **Graph Projection Module**: the read-only Module that derives filtered
   topology views from the Node Directory, Delivery Ledger, Conversations,
   Jobs, and grants. It is never a source of identity or authority.
+- **Local Graph Observer**: the owner-local observation point used as the
+  source of `reachable-with` Edges. It prevents Endpoint evidence from being
+  misrepresented as proof that one peer can reach another peer.
 - **Doctor Module**: the read-only diagnostic Module that collects evidence
   through existing runtime Interfaces and reports health without changing
   local state or starting model work.

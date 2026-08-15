@@ -727,6 +727,28 @@ than competing with a possible standalone rollout writer.
 
 ## Local web views
 
+Inspect the canonical read-only coordination graph from owner-private state:
+
+```bash
+cxmsg graph show --range current --json
+cxmsg graph show --range 1h --edge communicated-with --edge delegated-to --json
+cxmsg graph show --range all --paths --json
+```
+
+The projection keeps Project, Cluster, Conversation, reachability,
+communication, Delegation, and successor relationships as separate edge
+kinds. `current` includes current Directory, membership, Endpoint, and grant
+evidence; `1h`, `24h`, and `all` additionally include temporal Ledger and Job
+evidence. Paths require explicit `--paths`. Endpoint addresses, Message Bodies,
+tasks, results, permission profiles, approvals, and grant tokens are never
+projected. `reachable-with` means the local cxmsg owner currently has a selected
+identity-verified reachable Endpoint for that Node; it does not infer that one
+peer can directly reach another.
+Registered threads or retained Ledger identities that have not yet been synced
+into the Node Directory appear as `unresolved-directory` placeholders. They do
+not receive Project or reachability Edges, and the summary reports their count
+instead of silently inventing identity metadata.
+
 Start the loopback-only web server:
 
 ```bash

@@ -398,6 +398,20 @@ followed, and both policies retain the original Team expiry. Trigger completion
 only opens the Scheduler timing gate; it cannot grant, approve, delegate, infer
 task completion, or broaden the recipient's permission profile.
 
+Graph Projection is a read-only composition over existing owner Modules. By
+default it excludes Project paths and always excludes Endpoint addresses,
+Message Bodies and Content References, Job tasks/results, permission profiles,
+approvals, and grant tokens. Explicit `--paths` affects Project path output
+only. Relationship kinds remain separate so communication or membership cannot
+be mistaken for Delegation authority. `reachable-with` is directional from the
+local observer to a Node with a selected `reachable` Endpoint; cxmsg does not
+infer peer-to-peer reachability. Projection starts no turn, transport, Job, or
+Delivery and writes no state.
+Valid stable IDs referenced by Registry, Ledger, Conversation, grant, or
+successor evidence may appear as `unresolved-directory` placeholders when no
+live Node or Tombstone exists. Such placeholders convey neither lifecycle nor
+Project identity and remain counted for later Doctor diagnosis.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

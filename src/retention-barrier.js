@@ -140,6 +140,11 @@ export function assertRetentionReadable() {
   if (existsSync(RETENTION_MUTATION_LOCK_PATH)) throw busyError();
 }
 
+export function assertRetentionReadableNoCreate() {
+  if (["writer", "mutation"].includes(context.getStore()?.mode)) return;
+  if (existsSync(RETENTION_MUTATION_LOCK_PATH)) throw busyError();
+}
+
 export function withRetentionWriter(callback) {
   if (typeof callback !== "function") throw new Error("Retention writer callback is required");
   const active = context.getStore();

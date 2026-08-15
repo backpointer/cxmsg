@@ -225,15 +225,15 @@ and no quiet drop, implicit wake-all, or Project leakage.
 - Status: READY; T6 and T7 are complete
 - Canonical phase: Phase 7
 
-- [ ] Derive separate `belongs-to-project`, `member-of-cluster`,
+- [x] Derive separate `belongs-to-project`, `member-of-cluster`,
       `member-of-conversation`, `reachable-with`, `communicated-with`, and
       `delegated-to` Topology Edges.
-- [ ] Add current, one-hour, 24-hour, and all-history filters.
+- [x] Add current, one-hour, 24-hour, and all-history filters.
 - [ ] Add Node, Conversation, and Delivery detail projections with redacted
       paths, Endpoints, bodies, and capability data by default.
 - [ ] Add Directory, Ledger, Conversation, Scheduler, fan-out, successor, and
       Tombstone consistency findings to Doctor.
-- [ ] Keep the graph and Doctor read-only and start zero model turns.
+- [x] Keep the graph and Doctor read-only and start zero model turns.
 
 Done when every rendered edge is traceable to one owning Module and the graph
 cannot mutate routing, membership, lifecycle, or authority.

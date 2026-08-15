@@ -60,6 +60,11 @@ import {
   runDoctor,
 } from "../src/doctor.js";
 import {
+  buildGraphProjection,
+  GRAPH_EDGE_KINDS,
+  GRAPH_TIME_RANGES,
+} from "../src/graph-projection.js";
+import {
   cancelScheduledDelivery,
   findDeliveryByReplyHandle,
   listDeliveryLedgerIndexed,
@@ -335,6 +340,7 @@ function usage(exitCode = 0) {
   cxmsg revoke <sender> <target>
   cxmsg permissions <target> [--json]
   cxmsg doctor [--json] [--deep] [--target <session-name>]
+  cxmsg graph show [--range current|1h|24h|all] [--edge <kind>...] [--paths] [--json]
   cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|inline]
                  [--approval never|relay|auto] [--approval-timeout <seconds>]
                  [--mirror none|summary|full] [--when-idle --expiry <timestamp>]
@@ -4107,6 +4113,51 @@ async function commandDoctor(args) {
   process.exitCode = doctorExitCode(report);
 }
 
+async function commandGraph(args) {
+  const operation = args.shift();
+  if (operation !== "show") usage(2);
+  let range = "current";
+  const edgeKinds = [];
+  let includePaths = false;
+  let jsonOutput = false;
+  while (args.length) {
+    const option = args.shift();
+    if (option === "--json") jsonOutput = true;
+    else if (option === "--paths") includePaths = true;
+    else if (option === "--range") {
+      range = args.shift();
+      if (!range) throw new Error("--range requires a value");
+    } else if (option === "--edge") {
+      const kind = args.shift();
+      if (!kind) throw new Error("--edge requires a value");
+      edgeKinds.push(kind);
+    } else throw new Error(`unknown graph option: ${option}`);
+  }
+  if (!GRAPH_TIME_RANGES.includes(range)) {
+    throw new Error(`Graph time range must be: ${GRAPH_TIME_RANGES.join(", ")}`);
+  }
+  if (edgeKinds.some((kind) => !GRAPH_EDGE_KINDS.includes(kind))) {
+    throw new Error(`Graph edge kinds must be: ${GRAPH_EDGE_KINDS.join(", ")}`);
+  }
+  const graph = buildGraphProjection({
+    range,
+    edgeKinds: edgeKinds.length ? edgeKinds : GRAPH_EDGE_KINDS,
+    includePaths,
+  });
+  if (jsonOutput) {
+    process.stdout.write(`${JSON.stringify(graph, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(
+    `graph range=${graph.range} entities=${graph.summary.entityCount} edges=${graph.summary.edgeCount} omitted=${graph.summary.omittedReferences}\n`,
+  );
+  for (const edge of graph.edges) {
+    process.stdout.write(
+      `${edge.kind}\t${edge.source}\t${edge.target}\tcount=${edge.count}\towner=${edge.ownerModule}\n`,
+    );
+  }
+}
+
 async function commandRetention(args) {
   const operation = args.shift();
   if (!["plan", "purge", "restore", "recover"].includes(operation)) usage(2);
@@ -4254,6 +4305,9 @@ async function main() {
       break;
     case "doctor":
       await commandDoctor(args);
+      break;
+    case "graph":
+      await commandGraph(args);
       break;
     case "delegate":
       await commandDelegate(args);

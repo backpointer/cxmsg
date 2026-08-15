@@ -48,7 +48,7 @@ export function readSessionRecord(name) {
 }
 
 export function listSessionRecords() {
-  ensureRegistry();
+  if (!existsSync(SESSIONS_DIR)) return [];
   return readdirSync(SESSIONS_DIR)
     .filter((filename) => filename.endsWith(".json"))
     .map((filename) => {
