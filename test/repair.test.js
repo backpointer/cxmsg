@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   existsSync,
@@ -9,6 +9,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -25,6 +26,39 @@ function runCxmsg(root, args) {
     encoding: "utf8",
     env: { ...process.env, CXMSG_STATE_DIR: root },
   });
+}
+
+function runCxmsgAsync(root, args) {
+  const child = spawn(process.execPath, [path.resolve("bin/cxmsg.js"), ...args], {
+    env: { ...process.env, CXMSG_STATE_DIR: root },
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => {
+    stdout += chunk;
+  });
+  child.stderr.on("data", (chunk) => {
+    stderr += chunk;
+  });
+  return {
+    child,
+    completed: new Promise((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (status) => resolve({ status, stdout, stderr }));
+    }),
+  };
+}
+
+async function waitFor(predicate, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = predicate();
+    if (value) return value;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("timed out waiting for Repair test state");
 }
 
 function clusterRedoFixture(root) {
@@ -360,6 +394,85 @@ test("Repair apply rebuilds only a stale cache and backs up its prior generation
     assert.equal(replay.status, 1);
     assert.match(replay.stderr, /not a current stale Delivery Ledger index/);
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Repair preserves a post-lock stale error when failure recording also fails", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "cxmsg-repair-race-"));
+  let running = null;
+  try {
+    const fixture = clusterRedoFixture(root);
+    const planResult = runCxmsg(root, [
+      "repair",
+      "plan",
+      fixture.findingId,
+      "--json",
+    ]);
+    assert.equal(planResult.status, 0, planResult.stderr);
+    const plan = JSON.parse(planResult.stdout);
+    const clusterLock = path.join(root, "directory", "clusters.lock");
+    writeJson(clusterLock, {
+      version: 1,
+      pid: process.pid,
+      token: "repair-race-test-owner",
+      createdAt: Date.now(),
+    });
+
+    running = runCxmsgAsync(root, [
+      "repair",
+      "apply",
+      fixture.findingId,
+      "--confirm",
+      plan.planDigest,
+      "--json",
+    ]);
+    const transactionId = await waitFor(() => {
+      const transactions = path.join(root, "repairs", "transactions");
+      if (!existsSync(transactions)) return null;
+      return readdirSync(transactions).find((name) => {
+        const manifest = path.join(transactions, name, "manifest.json");
+        if (!existsSync(manifest)) return false;
+        return JSON.parse(readFileSync(manifest, "utf8")).phase ===
+          "mutation-started";
+      });
+    });
+
+    const changedNext = JSON.parse(
+      readFileSync(fixture.nextMembershipPath, "utf8"),
+    );
+    changedNext.createdAt = "2026-08-15T00:02:00.000Z";
+    writeJson(fixture.nextMembershipPath, changedNext);
+    mkdirSync(
+      path.join(root, "repairs", "receipts", `${transactionId}.json`),
+      { mode: 0o700 },
+    );
+    unlinkSync(clusterLock);
+
+    const result = await running.completed;
+    running = null;
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /Cluster membership repair evidence changed/);
+    assert.doesNotMatch(result.stderr, /EISDIR|directory/);
+    const manifest = JSON.parse(
+      readFileSync(
+        path.join(
+          root,
+          "repairs",
+          "transactions",
+          transactionId,
+          "manifest.json",
+        ),
+        "utf8",
+      ),
+    );
+    assert.equal(manifest.phase, "failed");
+    assert.equal(manifest.errorCode, "EREPAIRSTALE");
+  } finally {
+    if (running) {
+      running.child.kill();
+      await running.completed;
+    }
     rmSync(root, { recursive: true, force: true });
   }
 });

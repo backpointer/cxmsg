@@ -446,23 +446,27 @@ export async function applyRepair({
     } catch (error) {
       const failedAt = new Date().toISOString();
       const code = boundedErrorCode(error);
-      atomicWriteJson(receiptPath, {
-        schemaVersion: 1,
-        transactionId,
-        findingId,
-        repairKind: plan.repairKind,
-        planDigest: plan.planDigest,
-        status: "failed",
-        errorCode: code,
-        startedAt,
-        completedAt: failedAt,
-      });
-      atomicWriteJson(manifestPath, {
-        ...manifest,
-        phase: "failed",
-        errorCode: code,
-        updatedAt: failedAt,
-      });
+      try {
+        atomicWriteJson(receiptPath, {
+          schemaVersion: 1,
+          transactionId,
+          findingId,
+          repairKind: plan.repairKind,
+          planDigest: plan.planDigest,
+          status: "failed",
+          errorCode: code,
+          startedAt,
+          completedAt: failedAt,
+        });
+      } catch {}
+      try {
+        atomicWriteJson(manifestPath, {
+          ...manifest,
+          phase: "failed",
+          errorCode: code,
+          updatedAt: failedAt,
+        });
+      } catch {}
       throw error;
     }
   });
