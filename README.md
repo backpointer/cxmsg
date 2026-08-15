@@ -1031,24 +1031,30 @@ preserve the delivery correlation ID and record each transport message ID so
 the receiver can avoid duplicating work.
 
 Claude Code may also return a native `peer_message_status` control receipt for
-an individual transport message ID. cxmsg retains the bounded states `held`,
-`denied`, `expired`, and `delivered` under `nativeReceipts`. These states are
-additional transport evidence only: even native `delivered` does not satisfy
-the model ACK, mark the task complete, or wake Codex. Previously these control
-frames were rejected as invalid peer frames.
-The control-frame shape is compatibility-tested against Claude Code 2.1.232;
-an unknown or malformed status frame fails closed instead of being inferred.
+an individual transport message ID. Receipt emission is optional: a live
+external-peer exchange can return an ordinary Peer Message without emitting a
+control receipt for the original request. cxmsg retains a receipt only when one
+actually arrives, using the bounded states `held`, `denied`, `expired`, and
+`delivered` under `nativeReceipts`. Absence of native receipt evidence is not a
+delivery failure. Even native `delivered` does not satisfy the model ACK, mark
+the task complete, or wake Codex. Previously these control frames were rejected
+as invalid peer frames.
+The control-frame shape is pinned by compatibility tests against the Claude
+Code 2.1.232 protocol shape; an unknown or malformed status frame fails closed
+instead of being inferred. Live external-peer probing does not establish that
+every Claude version or send path emits the optional frame.
 The native control frame carries no sender identity. cxmsg therefore treats it
 as unauthenticated same-user advisory evidence correlated by the random
 transport message ID. Native receipt state never gates routing, retry, wake,
 ACK, completion, permission, or approval.
 
 In the opposite direction, after a Claude-originated Peer Message is admitted
-and handed to the Codex delivery path, the bridge returns a native `delivered`
-receipt to the exact originating message ID. Route Admission quarantine or a
-downstream delivery failure returns `denied` on a best-effort basis. This gives
-Claude's sender transport feedback without claiming the Codex model read or
-completed the request.
+and handed to the Codex delivery path, the bridge attempts to return a native
+`delivered` receipt to the exact originating message ID. Route Admission
+quarantine or a downstream delivery failure attempts `denied`. Both are
+best-effort protocol feedback: successful UDS write does not prove that the
+sender surfaced or persisted the receipt. It never claims that the Codex model
+read or completed the request.
 
 An ordinary Claude Peer Message may carry an exact envelope-level
 `in-reply-to` UUID. After exact source validation, cxmsg records this separately

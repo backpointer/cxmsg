@@ -269,7 +269,9 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 - [x] Parse Claude native `peer_message_status` control receipts instead of
       rejecting them as ordinary invalid Peer Message frames.
-      Compatibility is pinned and tested against Claude Code 2.1.232.
+      The frame shape is pinned by compatibility tests against the Claude Code
+      2.1.232 protocol shape. Live external-peer probing confirms that receipt
+      emission is optional, so missing evidence is never inferred as failure.
 - [x] Correlate each native receipt to an exact outbound transport message ID
       without treating `delivered` as a model ACK or completion.
 - [x] Return best-effort native `delivered` or `denied` status for exact

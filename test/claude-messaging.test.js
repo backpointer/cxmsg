@@ -100,6 +100,29 @@ test("Claude cross-session frames reject malformed reply correlation", () => {
   assert.throws(() => parseClaudePeerFrame(frame), /reply correlation is invalid/);
 });
 
+test("Claude peer parsing tolerates observed native routing extensions", () => {
+  const frame = {
+    msgV: 1,
+    msg_id: MESSAGE_ID,
+    type: "user",
+    message: {
+      role: "user",
+      content:
+        '<cross-session-message from="uds:/tmp/cc-socks/12345.sock" ' +
+        'hop-chain="9f20c76898ea30a542662bc0" from-name="wire-probe" ' +
+        'from-mode="prompting">\nreply\n</cross-session-message>',
+    },
+    priority: "next",
+    from: "uds:/tmp/cc-socks/12345.sock",
+  };
+
+  const parsed = parseClaudePeerFrame(frame);
+  assert.equal(parsed.fromAddress, "uds:/tmp/cc-socks/12345.sock");
+  assert.equal(parsed.fromSession, null);
+  assert.equal(parsed.replyToMessageId, null);
+  assert.equal(parsed.body, "reply");
+});
+
 test("Claude native peer status frames preserve only bounded receipt evidence", () => {
   const frame = buildClaudePeerStatusFrame({
     messageId: MESSAGE_ID,

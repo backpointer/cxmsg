@@ -410,15 +410,18 @@ outbound transport message ID and retained as bounded transport evidence.
 a wake. The native control frame has no sender identity, so the evidence is
 explicitly unauthenticated and advisory within the same-user trust boundary;
 it never gates a state transition, retry, routing, wake, permission, or
-approval. An ordinary reply correlation additionally requires an exact
-envelope-level `in-reply-to` UUID and the same stable-session/address source
-check as an ACK. It remains untrusted Peer Message evidence, changes no ACK or
-completion state, and cannot grant, approve, delegate, or escalate. Correlation
-text in the body is ignored.
-After Claude-to-Codex ingress, the bridge returns native `delivered` only after
-Route Admission and downstream handoff succeed; quarantine or failure returns
-best-effort `denied`. A returned status still conveys no model completion or
-authority, and failure to return the diagnostic receipt does not replay input.
+approval. Receipt emission is optional, and absence of a native receipt is not
+negative delivery evidence. An ordinary reply correlation additionally
+requires an exact envelope-level `in-reply-to` UUID and the same
+stable-session/address source check as an ACK. It remains untrusted Peer Message
+evidence, changes no ACK or completion state, and cannot grant, approve,
+delegate, or escalate. Correlation text in the body is ignored.
+After Claude-to-Codex ingress, the bridge attempts native `delivered` only after
+Route Admission and downstream handoff succeed; quarantine or failure attempts
+best-effort `denied`. A successful socket write does not prove that the Claude
+sender surfaced or persisted the status. A returned status still conveys no
+model completion or authority, and failure to return the diagnostic receipt
+does not replay input.
 
 Busy fallback is opt-in per dispatch invocation. The default remains
 fail-before-attempt. With `--when-busy when-idle`, only an exact frozen Codex
