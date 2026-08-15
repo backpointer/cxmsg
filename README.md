@@ -328,6 +328,8 @@ retains a separate private UUID:
 
 ```bash
 cxmsg directory project ensure hermes /path/to/hermes
+cxmsg directory project move hermes /new/path/to/hermes --json
+cxmsg directory project-transitions --project hermes --json
 cxmsg directory sync --project hermes --codex-only
 cxmsg directory sync --project hermes --claude-only
 ```
@@ -336,6 +338,12 @@ Omit the runtime-only flag to synchronize both. Git repositories and their
 worktrees are matched by canonical Git common directory; non-Git projects use
 the explicitly declared canonical root. Equal basenames, remote URLs, or
 similar paths never cause an automatic merge.
+
+An explicit Project move retains the stable Project UUID, appends an
+owner-private transition, preserves prior root aliases, and changes only the
+discovery head. Repeating the same move is idempotent. Project merge and split
+are intentionally unsupported; neither path nor Git metadata may infer them.
+See the [Identity Lifecycle contract](docs/IDENTITY_LIFECYCLE_V1.md).
 
 Inspect redacted identity metadata:
 
@@ -392,6 +400,12 @@ rejected. The link retains lifecycle provenance only: it does not transfer a
 grant, permission profile, role, Conversation membership, pending message, or
 authority. cxmsg never infers successors from a reused name, path, PID, socket,
 or restart.
+
+A Scheduled Peer Message never follows a successor relation. Once its pinned
+thread is a predecessor, dispatch remains blocked with
+`ETARGETPREDECESSOR`; if the relation appears after claim, the unused claim is
+released with zero attempts. The operator must cancel the old schedule and
+enqueue a new Logical Message for the intended successor.
 
 Fork Delegations and their standalone `thread/start` fallback are classified as
 non-addressable Execution Threads before their first delegated turn starts.

@@ -179,8 +179,24 @@ worktree checkout from rewriting historical identity. The private Project
 record retains root aliases and the time each alias was observed.
 
 Automatic merging is conservative. Equal directory basenames, Git remote URLs,
-or display labels are not enough to merge Projects. A manual merge records the
-old Project as a Tombstone and preserves history.
+or display labels are not enough to merge Projects. cxmsg v1 does not implement
+Project merge or split: both remain explicit future migrations and fail closed
+rather than guessing identity or rewriting retained history.
+
+A Project move keeps the same private Project ID and appends an owner-private
+transition from the prior discovery identity to the new one before updating the
+Project head. Repeating the exact move is idempotent. A divergent transition,
+collision with another Project, malformed history, or ambiguous chain is
+rejected. Git worktrees that resolve to the same canonical Git common directory
+remain aliases of one Project and do not create a move transition.
+
+Node successor relations are equally explicit and non-authoritative. They do
+not inherit roles, grants, permission profiles, Conversation membership,
+Delivery state, or any other capability. A Scheduled Peer Message pinned to a
+predecessor never follows the successor: the Scheduler blocks it before target
+access and rechecks after claiming so a concurrent successor link cannot wake
+the new Node. The operator must cancel it and create a new Logical Message for
+the successor.
 
 Full paths remain owner-private. A local CLI may show them explicitly; web
 snapshots default to a safe label and redacted root identifier.

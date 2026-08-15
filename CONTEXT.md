@@ -75,6 +75,13 @@ they carry different authority and delivery semantics.
   evidence but does not become Node identity.
 - **Project**: a stable private identity grouping one or more working roots.
   A path helps discover Project membership but is not Project identity.
+- **Project Transition**: an explicit owner-private append-only move record
+  connecting one Project discovery identity to the next while retaining the
+  same stable Project ID. Worktree aliases are not transitions; merge and split
+  are unsupported in the v1 lifecycle contract.
+- **Successor Relation**: explicit continuity context between two stable Nodes.
+  It transfers no role, grant, permission, membership, Delivery, Job,
+  correlation, Endpoint, or authority.
 - **Cluster**: an explicit logical grouping of Nodes independent of Project and
   Conversation membership.
 - **Tombstone**: the retained identity metadata for a removed Node, Project,

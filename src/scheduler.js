@@ -45,6 +45,7 @@ import {
   readThreadMetadata,
 } from "./thread-activity.js";
 import { writeCoordinationEvent } from "./observability.js";
+import { findNodeSuccessors } from "./node-directory.js";
 import {
   beginTurnLifecycleConnection,
   endTurnLifecycleConnection,
@@ -307,6 +308,19 @@ async function markUnknown(messageId, error, now) {
   });
 }
 
+export function scheduledTargetIdentity(record, { successors = findNodeSuccessors } = {}) {
+  const threadId = record?.delivery?.targetThreadId;
+  if (!UUID_PATTERN.test(threadId || "")) return { state: "legacy" };
+  const nodeKey = `codex:${threadId.toLowerCase()}`;
+  const replacements = successors(nodeKey);
+  if (replacements.length === 0) return { state: "current", nodeKey };
+  return {
+    state: "predecessor",
+    nodeKey,
+    successorNodeKeys: replacements.map((relation) => relation.successorNodeKey).sort(),
+  };
+}
+
 export async function dispatchScheduledDelivery(
   record,
   client,
@@ -318,6 +332,7 @@ export async function dispatchScheduledDelivery(
     deliver = deliverPeerMessageWhenIdle,
     triggerReadiness = scheduledTriggerReadiness,
     renewClaim = renewScheduledDeliveryClaim,
+    targetIdentity = scheduledTargetIdentity,
     log = writeCoordinationEvent,
   } = {},
 ) {
@@ -348,6 +363,35 @@ export async function dispatchScheduledDelivery(
   const readiness = await triggerReadiness(record, client);
   if (readiness.state !== "eligible") {
     return { ...readiness, messageId };
+  }
+
+  let identity;
+  try {
+    identity = targetIdentity(record);
+  } catch {
+    identity = { state: "unavailable" };
+  }
+  if (identity.state === "unavailable") {
+    await log({
+      kind: "scheduled-delivery",
+      phase: "target-identity",
+      correlationId: messageId,
+      target: delivery.target,
+      outcome: "blocked",
+      errorCode: "ESUCCESSORUNAVAILABLE",
+    });
+    return { state: "blocked", messageId, errorCode: "ESUCCESSORUNAVAILABLE" };
+  }
+  if (identity.state === "predecessor") {
+    await log({
+      kind: "scheduled-delivery",
+      phase: "target-identity",
+      correlationId: messageId,
+      target: delivery.target,
+      outcome: "blocked",
+      errorCode: "ETARGETPREDECESSOR",
+    });
+    return { state: "blocked", messageId, errorCode: "ETARGETPREDECESSOR" };
   }
 
   const target = session(delivery.target);
@@ -416,6 +460,33 @@ export async function dispatchScheduledDelivery(
         errorCode: currentReadiness.errorCode || null,
       });
       return { ...currentReadiness, messageId };
+    }
+    let currentIdentity;
+    try {
+      currentIdentity = targetIdentity(record);
+    } catch {
+      currentIdentity = { state: "unavailable" };
+    }
+    if (["predecessor", "unavailable"].includes(currentIdentity.state)) {
+      const identityErrorCode =
+        currentIdentity.state === "predecessor"
+          ? "ETARGETPREDECESSOR"
+          : "ESUCCESSORUNAVAILABLE";
+      await releaseScheduledDeliveryClaim(messageId, {
+        claimId: claimResult.claim.claimId,
+        workerId,
+        reason: "dispatch_unavailable",
+        now: new Date(now()).toISOString(),
+      });
+      await log({
+        kind: "scheduled-delivery",
+        phase: "claim-release",
+        correlationId: messageId,
+        target: delivery.target,
+        outcome: currentIdentity.state,
+        errorCode: identityErrorCode,
+      });
+      return { state: "blocked", messageId, errorCode: identityErrorCode };
     }
     const current = await readThread(client, currentTarget.threadId);
     if (current.status?.type === "active") throw new TargetBusyError();

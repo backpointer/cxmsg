@@ -857,6 +857,44 @@ function validDirectoryProject(record, stem) {
   };
 }
 
+function validDirectoryProjectTransition(record, stem) {
+  const match = /^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})--([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.exec(
+    stem,
+  );
+  const allowedFields = new Set([
+    "version",
+    "transitionId",
+    "kind",
+    "projectId",
+    "fromDiscovery",
+    "toDiscovery",
+    "toRoot",
+    "createdAt",
+  ]);
+  const validDiscovery = (discovery) =>
+    ["git-common-dir", "canonical-root"].includes(discovery?.kind) &&
+    typeof discovery.key === "string" &&
+    path.isAbsolute(discovery.key);
+  return {
+    valid: Boolean(
+      match &&
+        record?.version === 1 &&
+        record.projectId === match[1].toLowerCase() &&
+        record.transitionId === match[2].toLowerCase() &&
+        record.kind === "move" &&
+        validDiscovery(record.fromDiscovery) &&
+        validDiscovery(record.toDiscovery) &&
+        (record.fromDiscovery.kind !== record.toDiscovery.kind ||
+          record.fromDiscovery.key !== record.toDiscovery.key) &&
+        typeof record.toRoot === "string" &&
+        path.isAbsolute(record.toRoot) &&
+        Number.isFinite(Date.parse(record.createdAt || "")) &&
+        Object.keys(record).every((field) => allowedFields.has(field)),
+    ),
+    errorCode: "EPROJECTTRANSITIONSCHEMA",
+  };
+}
+
 function validDirectoryNode(record, stem) {
   const expectedStem = `${record?.runtimeKind || ""}--${record?.nativeId || ""}`;
   const endpoints = Object.entries(record?.selectedEndpoints || {});
@@ -1155,6 +1193,12 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
     scope: "directory-projects",
     validate: validDirectoryProject,
   });
+  const projectTransitions = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/project-transitions",
+    scope: "directory-project-transitions",
+    validate: validDirectoryProjectTransition,
+  });
   const nodes = scanJsonDirectory({
     stateDir,
     directoryName: "directory/nodes",
@@ -1199,6 +1243,7 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
   });
   const checks = [
     ...projects.checks,
+    ...projectTransitions.checks,
     ...nodes.checks,
     ...tombstones.checks,
     ...successors.checks,
@@ -1230,6 +1275,79 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
     );
     seenRoutingIds.add(project.routingId);
     seenDiscoveries.add(discovery);
+  }
+  const projectsById = new Map(
+    projects.records.map((record) => [record.projectId, record]),
+  );
+  const transitionsByProject = new Map();
+  for (const transition of projectTransitions.records) {
+    const records = transitionsByProject.get(transition.projectId) || [];
+    records.push(transition);
+    transitionsByProject.set(transition.projectId, records);
+  }
+  for (const [projectId, transitions] of transitionsByProject) {
+    const project = projectsById.get(projectId);
+    const outgoing = new Map();
+    const incoming = new Map();
+    let branched = false;
+    const discoveryKey = (value) => `${value.kind}:${value.key}`;
+    for (const transition of transitions) {
+      const from = discoveryKey(transition.fromDiscovery);
+      const to = discoveryKey(transition.toDiscovery);
+      if ((outgoing.has(from) && outgoing.get(from) !== to) || incoming.has(to)) {
+        branched = true;
+      }
+      outgoing.set(from, to);
+      incoming.set(to, from);
+    }
+    const starts = [...outgoing.keys()].filter((key) => !incoming.has(key));
+    let cursor = starts[0] || null;
+    const visited = new Set();
+    while (cursor && outgoing.has(cursor) && !visited.has(cursor)) {
+      visited.add(cursor);
+      cursor = outgoing.get(cursor);
+    }
+    const cyclic = Boolean(cursor && visited.has(cursor));
+    const connected = starts.length === 1 && visited.size === outgoing.size;
+    const current = project ? discoveryKey(project.discovery) : null;
+    const complete = Boolean(project && !branched && !cyclic && connected && current === cursor);
+    const recoverable = Boolean(
+      project &&
+        !branched &&
+        !cyclic &&
+        connected &&
+        (outgoing.has(current) || incoming.has(current)),
+    );
+    checks.push(
+      diagnosticCheck({
+        id: `directory-project-transitions.chain.${projectId.slice(0, 8)}`,
+        scope: "directory-project-transitions",
+        status: complete ? "pass" : recoverable ? "warn" : "fail",
+        summary: !project
+          ? "Project transition history references a missing Project"
+          : branched || !connected
+            ? "Project transition history is branched or disconnected"
+            : cyclic
+              ? "Project transition history contains a cycle"
+              : recoverable
+                ? "Project move transition is durable but its Project head is incomplete"
+                : complete
+                  ? "Project move history forms one chain ending at the current identity"
+                  : "Project head does not match its transition history",
+        verification: "records",
+        errorCode: complete
+          ? null
+          : recoverable
+            ? "EPROJECTMOVEINCOMPLETE"
+            : "EPROJECTTRANSITIONAMBIGUOUS",
+        remediation: recoverable
+          ? "Repeat the exact project move command; Doctor does not mutate Project identity"
+          : complete
+            ? null
+            : "Inspect owner-private Project transitions; do not merge, split, or rewrite identities automatically",
+        required: !recoverable,
+      }),
+    );
   }
   const sessionThreadIds = new Set(sessions.map((record) => record.threadId));
   for (const node of nodes.records) {
@@ -1769,12 +1887,22 @@ export function inspectRouteState({
     validate: validQuarantine,
     maxRecordBytes: MAX_STORED_MESSAGE_BYTES + 16 * 1024,
   });
+  const scheduleSuccessors = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/successors",
+    scope: "schedule-successors",
+    validate: validDirectorySuccessor,
+  });
   const checks = [
     ...bindings.checks,
     ...deliveries.checks,
     ...ledger.checks,
     ...quarantine.checks,
+    ...scheduleSuccessors.checks,
   ];
+  const predecessorNodeKeys = new Set(
+    scheduleSuccessors.records.map((record) => record.predecessorNodeKey),
+  );
   const sessionsByName = new Map(sessions.map((record) => [record.name, record]));
   const legacyMessageIds = new Set(
     deliveries.records.map((record) => record.logicalMessageId),
@@ -1869,6 +1997,26 @@ export function inspectRouteState({
           verification: "records",
           errorCode: "ESCHEDULECLAIMEXPIRED",
           remediation: "Start the scheduler to reclaim the Delivery; do not replay it manually",
+          required: false,
+        }),
+      );
+    }
+    if (
+      delivery.version === 2 &&
+      delivery.status === "scheduled" &&
+      delivery.targetThreadId &&
+      predecessorNodeKeys.has(`codex:${delivery.targetThreadId}`)
+    ) {
+      checks.push(
+        diagnosticCheck({
+          id: `schedules.target.predecessor.${safeLabel(delivery.logicalMessageId)}`,
+          scope: "schedules",
+          status: "warn",
+          summary: "Scheduled Delivery targets a predecessor Node and will remain blocked",
+          verification: "records",
+          errorCode: "ETARGETPREDECESSOR",
+          remediation:
+            "Cancel this schedule and explicitly enqueue a new Logical Message for the intended successor; cxmsg never transfers Delivery or authority",
           required: false,
         }),
       );

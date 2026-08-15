@@ -86,8 +86,8 @@ records. They never emit a quarantined body in the report. `EROUTEIDENTITY`
 requires an explicit re-bind of the intended session; `EQUARANTINED` is an
 operator-review warning and never authorizes automatic release.
 
-Node Directory findings validate bounded owner-only Project, Node, Tombstone,
-and successor records; unique routing/discovery identity; Node-to-Project
+Node Directory findings validate bounded owner-only Project, Project transition,
+Node, Tombstone, and successor records; unique routing/discovery identity; Node-to-Project
 references; Endpoint generation schemas; and whether an addressable Codex Node
 still has a registry record. Tombstones must contain only reduced identity,
 Project, safe-label, reason, and time fields. Successor relations must reference
@@ -97,6 +97,11 @@ addresses, and native private routing details. `ENODEUNREGISTERED` recommends
 an explicit operator lifecycle action but never permits Doctor to delete or
 Tombstone a Node. `ENODELIFECYCLE` reports interrupted transitions where live
 and tombstoned records coexist; Doctor never chooses either record as truth.
+Project transitions must form one unbranched, acyclic chain whose sink matches
+the current Project discovery identity. `EPROJECTMOVEINCOMPLETE` warns that a
+durable transition exists but the Project head still names its source;
+`EPROJECTTRANSITIONAMBIGUOUS` fails on a branch, cycle, disconnected chain, or
+head mismatch. Doctor never completes, rolls back, merges, or splits a Project.
 
 Endpoint history findings validate the 64-observation and 16-transport bounds,
 schema, chronological ordering, monotonic successful generations, justified
@@ -162,6 +167,8 @@ lease without claiming or dispatching it. Invalid scheduler metadata is
 `ESCHEDULERSCHEMA`. A live legacy record without heartbeat evidence reports
 `ESCHEDULERLEGACY`; a live worker whose heartbeat is older than 15 seconds
 reports `ESCHEDULERSTALLED`; a bounded pass failure reports `ESCHEDULERPASS`.
+`ETARGETPREDECESSOR` warns that a queued Delivery still targets a Node with an
+explicit successor and must be cancelled and recreated for the intended Node.
 Doctor never starts or restarts the Scheduler, acquires or releases a claim,
 cancels a Delivery, rebuilds the index, reads the retained body, or starts a
 model turn.

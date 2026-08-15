@@ -121,8 +121,10 @@ import {
   listNodeTombstones,
   listNodes,
   listProjects,
+  listProjectTransitions,
   listSuccessors,
   nodeKey,
+  moveProject,
   projectContainsPath,
   publicCluster,
   publicClusterMembership,
@@ -130,11 +132,13 @@ import {
   publicNode,
   publicNodeTombstone,
   publicProject,
+  publicProjectTransition,
   publicExecutionThread,
   publicSuccessor,
   readExecutionThread,
   readCluster,
   readNode,
+  readProject,
   recoverClusterMembership,
   removeClusterMember,
   tombstoneCluster,
@@ -235,6 +239,8 @@ function usage(exitCode = 0) {
   cxmsg route retry <logical-message-id> [--json]
   cxmsg quarantine list [--json]
   cxmsg directory project ensure <routing-id> <root> [--json]
+  cxmsg directory project move <routing-id|project-id> <root> [--json] [--paths]
+  cxmsg directory project-transitions [--project <routing-id|project-id>] [--json] [--paths]
   cxmsg directory sync --project <routing-id> [--codex-only|--claude-only] [--json]
   cxmsg directory projects [--json] [--paths]
   cxmsg directory cluster ensure <routing-id> [--json]
@@ -2428,17 +2434,78 @@ function claudeEndpoint(peer) {
 async function commandDirectory(args) {
   const operation = args.shift();
   if (operation === "project") {
-    if (args.shift() !== "ensure") usage(2);
-    const routingId = args.shift();
+    const projectOperation = args.shift();
+    if (!["ensure", "move"].includes(projectOperation)) usage(2);
+    const identity = args.shift();
     const root = args.shift();
     const jsonOutput = args.includes("--json");
-    if (!routingId || !root || args.some((value) => value !== "--json")) usage(2);
-    const project = await ensureProject({ routingId, root });
-    const output = publicProject(project, { includePaths: true });
+    const includePaths = args.includes("--paths");
+    if (
+      !identity ||
+      !root ||
+      args.some((value) => !["--json", "--paths"].includes(value)) ||
+      (projectOperation === "ensure" && includePaths)
+    ) {
+      usage(2);
+    }
+    const result =
+      projectOperation === "ensure"
+        ? { project: await ensureProject({ routingId: identity, root }), moved: false }
+        : await moveProject({ project: identity, root });
+    const output = {
+      ...publicProject(result.project, {
+        includePaths: projectOperation === "ensure" || includePaths,
+      }),
+      ...(projectOperation === "move"
+        ? {
+            moved: result.moved,
+            transition: result.transition
+              ? publicProjectTransition(result.transition, { includePaths })
+              : null,
+          }
+        : {}),
+    };
     process.stdout.write(
       jsonOutput
         ? `${JSON.stringify(output, null, 2)}\n`
-        : `project ${output.routingId} ${output.projectId} (${output.discoveryKind})\n`,
+        : `project ${output.routingId} ${output.projectId} (${output.discoveryKind})${
+            projectOperation === "move" ? ` moved=${output.moved}` : ""
+          }\n`,
+    );
+    return;
+  }
+  if (operation === "project-transitions") {
+    let project = null;
+    let jsonOutput = false;
+    let includePaths = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--project") project = args.shift();
+      else if (option === "--json") jsonOutput = true;
+      else if (option === "--paths") includePaths = true;
+      else usage(2);
+    }
+    let projectId = null;
+    if (project) {
+      const byId = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(project)
+        ? readProject(project)
+        : null;
+      const byRouting = findProjectByRoutingId(project);
+      if (byId && byRouting && byId.projectId !== byRouting.projectId) {
+        throw new Error(`ambiguous Project identity: ${project}`);
+      }
+      const record = byId || byRouting;
+      if (!record) throw new Error(`unknown Project: ${project}`);
+      projectId = record.projectId;
+    }
+    const transitions = listProjectTransitions(projectId).map((record) =>
+      publicProjectTransition(record, { includePaths }),
+    );
+    jsonOrLines(
+      transitions,
+      jsonOutput,
+      (record) =>
+        `${record.projectId}\t${record.kind}\t${record.transitionId}\t${record.fromDiscoveryKind}->${record.toDiscoveryKind}`,
     );
     return;
   }

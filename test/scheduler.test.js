@@ -33,6 +33,8 @@ const ids = {
   triggerRegression: "c2345678-2234-4234-8234-123456789abc",
   externalWriter: "d2345678-2234-4234-8234-123456789abc",
   claimLoss: "e2345678-2234-4234-8234-123456789abc",
+  predecessor: "f2345678-2234-4234-8234-123456789abc",
+  successorRace: "02345678-2234-4234-8234-123456789abc",
 };
 
 async function scheduledRecord(messageId, body, wakePolicy = "when-idle", trigger = {}) {
@@ -423,6 +425,78 @@ test("claim loss immediately before start stops the old dispatcher with zero att
   });
   assert.equal(starts, 1);
   assert.equal(ledger.readDeliveryLedger(ids.claimLoss).delivery.attempts.length, 0);
+});
+
+test("a scheduled predecessor target is blocked without following its successor", async () => {
+  const record = await scheduledRecord(ids.predecessor, "predecessor coordination");
+  const successorThread = "a3345678-2234-4234-8234-123456789abc";
+  assert.deepEqual(
+    scheduler.scheduledTargetIdentity(record, {
+      successors: (nodeKey) => [
+        {
+          predecessorNodeKey: nodeKey,
+          successorNodeKey: `codex:${successorThread}`,
+        },
+      ],
+    }),
+    {
+      state: "predecessor",
+      nodeKey: `codex:${ids.targetThread}`,
+      successorNodeKeys: [`codex:${successorThread}`],
+    },
+  );
+  let targetReads = 0;
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    {
+      now: () => Date.parse("2026-08-15T00:06:00.000Z"),
+      triggerReadiness: async () => ({ state: "eligible" }),
+      targetIdentity: () => ({ state: "predecessor" }),
+      session: () => {
+        targetReads += 1;
+        return { name: "auditor", threadId: successorThread };
+      },
+      log: async () => {},
+    },
+  );
+  assert.deepEqual(outcome, {
+    state: "blocked",
+    messageId: ids.predecessor,
+    errorCode: "ETARGETPREDECESSOR",
+  });
+  assert.equal(targetReads, 0);
+  assert.equal(ledger.readDeliveryLedger(ids.predecessor).delivery.attempts.length, 0);
+});
+
+test("a successor linked after claim releases the unused claim", async () => {
+  const record = await scheduledRecord(ids.successorRace, "successor race");
+  let identityChecks = 0;
+  let starts = 0;
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    {
+      now: () => Date.parse("2026-08-15T00:07:00.000Z"),
+      triggerReadiness: async () => ({ state: "eligible" }),
+      targetIdentity: () => ({
+        state: identityChecks++ === 0 ? "current" : "predecessor",
+      }),
+      session: () => ({ name: "auditor", threadId: ids.targetThread }),
+      readThread: async () => ({ id: ids.targetThread, status: { type: "idle" } }),
+      deliver: async () => {
+        starts += 1;
+      },
+      log: async () => {},
+    },
+  );
+  assert.equal(outcome.errorCode, "ETARGETPREDECESSOR");
+  assert.equal(starts, 0);
+  const retained = ledger.readDeliveryLedger(ids.successorRace).delivery;
+  assert.equal(retained.claim, null);
+  assert.equal(retained.attempts.length, 0);
 });
 
 test("an expired when-idle Delivery becomes terminal without target access", async () => {

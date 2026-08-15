@@ -424,7 +424,6 @@ test("Route Inspector rebuilds Delivery Ledger evidence without exposing bodies"
       `${JSON.stringify(batch)}\n${JSON.stringify(attempt)}\n`,
       { mode: 0o600 },
     );
-
     const checks = inspectRouteState({
       stateDir: root,
       sessions: [{ name: "worker", threadId: THREAD_ID }],
@@ -569,8 +568,10 @@ test("Route Inspector reports queued work with a missing scheduler and expired c
     await fs.chmod(root, 0o700);
     const segments = path.join(root, "delivery-ledger", "segments");
     const quarantine = path.join(root, "delivery-ledger", "quarantine");
+    const successors = path.join(root, "directory", "successors");
     await fs.mkdir(segments, { recursive: true, mode: 0o700 });
     await fs.mkdir(quarantine, { mode: 0o700 });
+    await fs.mkdir(successors, { recursive: true, mode: 0o700 });
     const messageId = "1edaa4e0-fa31-454e-a37e-a37f8807f0e7";
     const deliveryId = "2edaa4e0-fa31-454e-a37e-a37f8807f0e7";
     const workerId = "3edaa4e0-fa31-454e-a37e-a37f8807f0e7";
@@ -596,6 +597,14 @@ test("Route Inspector reports queued work with a missing scheduler and expired c
       `${JSON.stringify(batch)}\n${JSON.stringify(claim)}\n`,
       { mode: 0o600 },
     );
+    const successorThreadId = "6edaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    await writeJson(path.join(successors, `codex--${successorThreadId}.json`), {
+      version: 1,
+      predecessorNodeKey: `codex:${THREAD_ID}`,
+      successorNodeKey: `codex:${successorThreadId}`,
+      projectId: "7edaa4e0-fa31-454e-a37e-a37f8807f0e7",
+      linkedAt: "2026-08-14T00:00:20.000Z",
+    });
     const checks = inspectRouteState({
       stateDir: root,
       sessions: [{ name: "worker", threadId: THREAD_ID }],
@@ -607,6 +616,10 @@ test("Route Inspector reports queued work with a missing scheduler and expired c
     );
     assert.equal(
       checks.find((check) => check.errorCode === "ESCHEDULERDOWN").status,
+      "warn",
+    );
+    assert.equal(
+      checks.find((check) => check.errorCode === "ETARGETPREDECESSOR").status,
       "warn",
     );
   } finally {
@@ -1252,6 +1265,58 @@ test("Node Directory Inspector reports lifecycle conflicts and successor cycles 
     );
     assert.ok(checks.some((check) => check.errorCode === "EENDPOINTHISTORY"));
     assert.doesNotMatch(JSON.stringify(checks), /redacted-project/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Node Directory Inspector validates Project move chains without exposing paths", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-project-move-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const projects = path.join(root, "directory", "projects");
+    const transitions = path.join(root, "directory", "project-transitions");
+    await fs.mkdir(projects, { recursive: true, mode: 0o700 });
+    await fs.mkdir(transitions, { recursive: true, mode: 0o700 });
+    const projectId = "12345678-2234-4234-8234-123456789abc";
+    const transitionId = "22345678-2234-4234-8234-123456789abc";
+    const beforePath = "/private/old-project-fixture";
+    const afterPath = "/private/new-project-fixture";
+    const projectPath = path.join(projects, `${projectId}.json`);
+    await writeJson(projectPath, {
+      version: 1,
+      projectId,
+      routingId: "hermes",
+      discovery: { kind: "canonical-root", key: afterPath },
+      rootAliases: [{ path: beforePath }, { path: afterPath }],
+    });
+    await writeJson(
+      path.join(transitions, `${projectId}--${transitionId}.json`),
+      {
+        version: 1,
+        transitionId,
+        kind: "move",
+        projectId,
+        fromDiscovery: { kind: "canonical-root", key: beforePath },
+        toDiscovery: { kind: "canonical-root", key: afterPath },
+        toRoot: afterPath,
+        createdAt: "2026-08-14T00:00:00.000Z",
+      },
+    );
+    const inspect = () =>
+      inspectNodeDirectory({ stateDir: root }).find((check) =>
+        check.id.startsWith("directory-project-transitions.chain"),
+      );
+    assert.equal(inspect().status, "pass");
+    assert.doesNotMatch(JSON.stringify(inspect()), /old-project|new-project/);
+    await writeJson(projectPath, {
+      version: 1,
+      projectId,
+      routingId: "hermes",
+      discovery: { kind: "canonical-root", key: beforePath },
+      rootAliases: [{ path: beforePath }, { path: afterPath }],
+    });
+    assert.equal(inspect().errorCode, "EPROJECTMOVEINCOMPLETE");
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

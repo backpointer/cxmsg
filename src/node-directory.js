@@ -19,6 +19,10 @@ import { CXMSG_STATE_DIR } from "./runtime.js";
 export const NODE_DIRECTORY_DIR = path.join(CXMSG_STATE_DIR, "directory");
 export const NODES_DIR = path.join(NODE_DIRECTORY_DIR, "nodes");
 export const PROJECTS_DIR = path.join(NODE_DIRECTORY_DIR, "projects");
+export const PROJECT_TRANSITIONS_DIR = path.join(
+  NODE_DIRECTORY_DIR,
+  "project-transitions",
+);
 export const NODE_TOMBSTONES_DIR = path.join(
   NODE_DIRECTORY_DIR,
   "tombstones",
@@ -107,6 +111,16 @@ const SUCCESSOR_FIELDS = new Set([
   "successorNodeKey",
   "projectId",
   "linkedAt",
+]);
+const PROJECT_TRANSITION_FIELDS = new Set([
+  "version",
+  "transitionId",
+  "kind",
+  "projectId",
+  "fromDiscovery",
+  "toDiscovery",
+  "toRoot",
+  "createdAt",
 ]);
 const EXECUTION_THREAD_FIELDS = new Set([
   "version",
@@ -291,6 +305,17 @@ function projectPath(projectId) {
   return path.join(PROJECTS_DIR, `${validateUuid("project id", projectId)}.json`);
 }
 
+function projectTransitionFilename(projectId, transitionId) {
+  return `${validateUuid("project id", projectId).toLowerCase()}--${validateUuid(
+    "project transition id",
+    transitionId,
+  ).toLowerCase()}.json`;
+}
+
+function sameDiscovery(left, right) {
+  return left?.kind === right?.kind && left?.key === right?.key;
+}
+
 export function discoverProjectRoot(root, { run = spawnSync } = {}) {
   const canonicalRoot = canonicalPath(root);
   const result = run(
@@ -321,6 +346,26 @@ function validProject(record) {
       record.rootAliases.every(
         (alias) => typeof alias?.path === "string" && path.isAbsolute(alias.path),
       ),
+  );
+}
+
+function validProjectTransition(record) {
+  return Boolean(
+    record?.version === 1 &&
+      UUID_PATTERN.test(record.transitionId || "") &&
+      record.kind === "move" &&
+      UUID_PATTERN.test(record.projectId || "") &&
+      [record.fromDiscovery, record.toDiscovery].every(
+        (discovery) =>
+          ["git-common-dir", "canonical-root"].includes(discovery?.kind) &&
+          typeof discovery.key === "string" &&
+          path.isAbsolute(discovery.key),
+      ) &&
+      !sameDiscovery(record.fromDiscovery, record.toDiscovery) &&
+      typeof record.toRoot === "string" &&
+      path.isAbsolute(record.toRoot) &&
+      Number.isFinite(Date.parse(record.createdAt || "")) &&
+      Object.keys(record).every((field) => PROJECT_TRANSITION_FIELDS.has(field)),
   );
 }
 
@@ -528,9 +573,128 @@ export function listProjects() {
     .filter(validProject);
 }
 
+export function listProjectTransitions(projectId = null, { strict = false } = {}) {
+  if (projectId !== null) projectId = validateUuid("project id", projectId).toLowerCase();
+  if (!existsSync(PROJECT_TRANSITIONS_DIR)) return [];
+  const records = [];
+  for (const name of readdirSync(PROJECT_TRANSITIONS_DIR).sort()) {
+    const match = /^([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})--([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})\.json$/i.exec(
+      name,
+    );
+    if (!match) {
+      if (strict && name.endsWith(".json")) {
+        throw new Error("Project Transition Directory contains an unexpected record name");
+      }
+      continue;
+    }
+    const record = readJson(path.join(PROJECT_TRANSITIONS_DIR, name));
+    const bound =
+      validProjectTransition(record) &&
+      record.projectId === match[1].toLowerCase() &&
+      record.transitionId === match[2].toLowerCase();
+    if (!bound) {
+      if (strict) {
+        throw new Error(`Project transition failed schema validation: ${name}`);
+      }
+      continue;
+    }
+    if (projectId === null || record.projectId === projectId) records.push(record);
+  }
+  return records;
+}
+
 export function findProjectByRoutingId(routingId) {
   validateIdentifier("routing id", routingId);
   return listProjects().find((record) => record.routingId === routingId) || null;
+}
+
+function resolveProject(identity) {
+  const byId = UUID_PATTERN.test(identity || "") ? readProject(identity) : null;
+  const byRouting = findProjectByRoutingId(identity);
+  if (byId && byRouting && byId.projectId !== byRouting.projectId) {
+    throw new Error(`ambiguous Project identity: ${identity}`);
+  }
+  const project = byId || byRouting;
+  if (!project) throw new Error(`unknown Project: ${identity}`);
+  return project;
+}
+
+export async function moveProject({ project, root, discover = discoverProjectRoot }) {
+  const destination = discover(root);
+  if (
+    !["git-common-dir", "canonical-root"].includes(destination?.kind) ||
+    typeof destination.key !== "string" ||
+    !path.isAbsolute(destination.key) ||
+    typeof destination.root !== "string" ||
+    !path.isAbsolute(destination.root)
+  ) {
+    throw new Error("Project discovery returned invalid canonical evidence");
+  }
+  ensureDirectory(NODE_DIRECTORY_DIR);
+  ensureDirectory(PROJECTS_DIR);
+  ensureDirectory(PROJECT_TRANSITIONS_DIR);
+  return withFileLock(path.join(NODE_DIRECTORY_DIR, "projects.lock"), async () => {
+    const current = resolveProject(project);
+    const transitions = listProjectTransitions(current.projectId, { strict: true });
+    const collision = listProjects().find(
+      (candidate) =>
+        candidate.projectId !== current.projectId &&
+        sameDiscovery(candidate.discovery, destination),
+    );
+    if (collision) {
+      throw new Error("Project move destination already belongs to another Project");
+    }
+    const now = new Date().toISOString();
+    const aliases = [...current.rootAliases];
+    const alias = aliases.find((candidate) => candidate.path === destination.root);
+    if (alias) alias.lastSeenAt = now;
+    else aliases.push({ path: destination.root, firstSeenAt: now, lastSeenAt: now });
+    if (sameDiscovery(current.discovery, destination)) {
+      const record = atomicWrite(PROJECTS_DIR, `${current.projectId}.json`, {
+        ...current,
+        rootAliases: aliases,
+        updatedAt: now,
+      });
+      return { project: record, transition: null, moved: false };
+    }
+    const divergent = transitions.find(
+      (record) =>
+        sameDiscovery(record.fromDiscovery, current.discovery) &&
+        !sameDiscovery(record.toDiscovery, destination),
+    );
+    if (divergent) {
+      throw new Error("Project already has a divergent move from its current identity");
+    }
+    let transition = transitions.find(
+      (record) =>
+        sameDiscovery(record.fromDiscovery, current.discovery) &&
+        sameDiscovery(record.toDiscovery, destination),
+    );
+    if (!transition) {
+      const transitionId = randomUUID();
+      transition = atomicWrite(
+        PROJECT_TRANSITIONS_DIR,
+        projectTransitionFilename(current.projectId, transitionId),
+        {
+          version: 1,
+          transitionId,
+          kind: "move",
+          projectId: current.projectId,
+          fromDiscovery: structuredClone(current.discovery),
+          toDiscovery: { kind: destination.kind, key: destination.key },
+          toRoot: destination.root,
+          createdAt: now,
+        },
+      );
+    }
+    const record = atomicWrite(PROJECTS_DIR, `${current.projectId}.json`, {
+      ...current,
+      discovery: { kind: destination.kind, key: destination.key },
+      rootAliases: aliases,
+      updatedAt: now,
+    });
+    return { project: record, transition, moved: true };
+  });
 }
 
 export async function ensureProject({
@@ -665,6 +829,26 @@ export function listSuccessors() {
     .sort()
     .map((name) => readJson(path.join(SUCCESSORS_DIR, name)))
     .filter(validSuccessor);
+}
+
+export function findNodeSuccessors(predecessorNodeKey) {
+  const parsed = parseNodeKey(predecessorNodeKey);
+  const normalized = nodeKey(parsed.runtimeKind, parsed.nativeId);
+  if (!existsSync(SUCCESSORS_DIR)) return [];
+  const records = [];
+  for (const name of readdirSync(SUCCESSORS_DIR)
+    .filter((candidate) => candidate.endsWith(".json"))
+    .sort()) {
+    if (!/^(?:codex|claude)--[0-9a-f-]{36}\.json$/i.test(name)) {
+      throw new Error("Successor Directory contains an unexpected record name");
+    }
+    const record = readJson(path.join(SUCCESSORS_DIR, name));
+    if (!validSuccessor(record)) {
+      throw new Error(`Successor Directory record failed schema validation: ${name}`);
+    }
+    records.push(record);
+  }
+  return records.filter((record) => record.predecessorNodeKey === normalized);
 }
 
 export function readExecutionThread(threadId) {
@@ -1543,6 +1727,28 @@ export function publicProject(record, { includePaths = false } = {}) {
       : {}),
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
+  };
+}
+
+export function publicProjectTransition(record, { includePaths = false } = {}) {
+  if (!validProjectTransition(record)) {
+    throw new Error("invalid Project transition record");
+  }
+  return {
+    version: record.version,
+    transitionId: record.transitionId,
+    kind: record.kind,
+    projectId: record.projectId,
+    fromDiscoveryKind: record.fromDiscovery.kind,
+    toDiscoveryKind: record.toDiscovery.kind,
+    ...(includePaths
+      ? {
+          fromDiscoveryKey: record.fromDiscovery.key,
+          toDiscoveryKey: record.toDiscovery.key,
+          toRoot: record.toRoot,
+        }
+      : {}),
+    createdAt: record.createdAt,
   };
 }
 

@@ -115,15 +115,15 @@ duplicate, or prematurely dispatch Scheduled Peer Messages.
 ### T4 — Explicit identity lifecycle
 
 - Priority: P1
-- Status: NEXT
+- Status: COMPLETE
 - Canonical phase: Phase 3
 
-- [ ] Specify Project move, merge, split, and worktree alias transitions.
-- [ ] Specify Claude successor linking after restart or conversation change.
-- [ ] Keep successor relations from inheriting role, grant, permission,
+- [x] Specify Project move, merge, split, and worktree alias transitions.
+- [x] Specify Claude successor linking after restart or conversation change.
+- [x] Keep successor relations from inheriting role, grant, permission,
       Conversation, Delivery, or authority implicitly.
-- [ ] Define explicit handling for schedules targeting a predecessor Node.
-- [ ] Extend Doctor to report ambiguous identity transitions without repair.
+- [x] Define explicit handling for schedules targeting a predecessor Node.
+- [x] Extend Doctor to report ambiguous identity transitions without repair.
 
 Done when later Conversations can reference stable Nodes and Projects without
 silently following names, paths, sockets, or inferred successors.
@@ -131,7 +131,7 @@ silently following names, paths, sockets, or inferred successors.
 ### T5 — Scheduled Delegation and retained Job migration
 
 - Priority: P1
-- Status: READY after T3 and T4
+- Status: NEXT
 - Canonical phase: Phase 4
 
 - [ ] Schedule a Delegation through the Scheduler Module without treating its
@@ -151,7 +151,7 @@ and cannot be confused with a Scheduled Peer Message.
 ### T6 — Direct Conversation
 
 - Priority: P1
-- Status: BLOCKED on T1 and T4
+- Status: READY after T1 and T4
 - Canonical phase: Phase 5
 
 - [ ] Create one canonical Direct Conversation for an unordered pair of Node

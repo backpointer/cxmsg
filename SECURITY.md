@@ -164,6 +164,18 @@ with zero attempts. A Busy race releases the unused claim. An uncertain result
 becomes `unknown` and is not retried automatically. Scheduler stop and stale
 worker replacement remain fail-closed when process identity cannot be verified.
 
+Project and Node lifecycle metadata never transfers authority. A Project move
+retains one stable Project ID and records the old and new discovery evidence in
+owner-private state; default output redacts those paths. Worktree aliases must
+share the exact canonical Git common directory. Project merge and split are
+unsupported and cannot be inferred from paths, labels, or Git remotes.
+Successor relations transfer no role, grant, permission, approval,
+Conversation/Cluster membership, Delivery, Job, reply, Endpoint, or
+correlation. A scheduled predecessor target is blocked before target access and
+again after claim; cxmsg never rewrites it to the successor. Malformed
+successor storage also blocks scheduled dispatch rather than being treated as
+an empty relation set.
+
 App Server lifecycle notifications have no replay cursor in the pinned 0.147.0
 contract. They reduce latency but do not prove delivery, reading, processing,
 completion, approval, or authority. The owner-private lifecycle projection

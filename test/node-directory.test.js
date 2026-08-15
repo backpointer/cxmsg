@@ -31,6 +31,8 @@ const executionThreadId = "a2345678-1234-4234-8234-123456789abc";
 const executionJobId = "b2345678-1234-4234-8234-123456789abc";
 const otherProjectId = "72345678-1234-4234-8234-123456789abc";
 const otherNodeId = "82345678-1234-4234-8234-123456789abc";
+const claudePredecessorId = "93345678-1234-4234-8234-123456789abc";
+const claudeSuccessorId = "a3345678-1234-4234-8234-123456789abc";
 const reviewClusterId = "d3345678-1234-4234-8234-123456789abc";
 const releaseClusterId = "e3345678-1234-4234-8234-123456789abc";
 const initialRecoveryClusterId = "f6345678-1234-4234-8234-123456789abc";
@@ -126,6 +128,56 @@ test("real Git worktrees resolve to one Project discovery identity", async () =>
   } finally {
     rmSync(worktreeParent, { recursive: true, force: true });
     rmSync(repository, { recursive: true, force: true });
+  }
+});
+
+test("Project move is explicit, preserves aliases, and records one private transition", async () => {
+  const movedRoot = mkdtempSync(path.join(os.tmpdir(), "cxmsg-project-moved-"));
+  const rejectedRoot = mkdtempSync(path.join(os.tmpdir(), "cxmsg-project-rejected-"));
+  try {
+    const result = await directory.moveProject({
+      project: "hermes",
+      root: movedRoot,
+      discover: discovery,
+    });
+    assert.equal(result.moved, true);
+    assert.equal(result.project.projectId, projectId);
+    assert.equal(result.project.discovery.key, path.resolve(movedRoot));
+    assert.ok(
+      result.project.rootAliases.some((alias) => alias.path === path.resolve(projectRoot)),
+    );
+    assert.ok(
+      result.project.rootAliases.some((alias) => alias.path === path.resolve(movedRoot)),
+    );
+    assert.equal(directory.listProjectTransitions(projectId).length, 1);
+    const redacted = directory.publicProjectTransition(result.transition);
+    assert.equal("fromDiscoveryKey" in redacted, false);
+    assert.equal("toRoot" in redacted, false);
+    const repeated = await directory.moveProject({
+      project: projectId,
+      root: movedRoot,
+      discover: discovery,
+    });
+    assert.equal(repeated.moved, false);
+    assert.equal(directory.listProjectTransitions(projectId).length, 1);
+
+    const invalidTransition = path.join(
+      directory.PROJECT_TRANSITIONS_DIR,
+      `${projectId}--32345678-2234-4234-8234-123456789abc.json`,
+    );
+    writeFileSync(invalidTransition, '{"version":1}\n', { mode: 0o600 });
+    await assert.rejects(
+      directory.moveProject({
+        project: projectId,
+        root: rejectedRoot,
+        discover: discovery,
+      }),
+      /failed schema validation/,
+    );
+    rmSync(invalidTransition);
+  } finally {
+    rmSync(movedRoot, { recursive: true, force: true });
+    rmSync(rejectedRoot, { recursive: true, force: true });
   }
 });
 
@@ -471,6 +523,26 @@ test("successor links are explicit, same-Project, single-predecessor, and acycli
   );
   assert.equal("permissions" in directory.publicSuccessor(first), false);
   assert.equal("conversationId" in directory.publicSuccessor(first), false);
+
+  await directory.upsertNode({
+    runtimeKind: "claude",
+    nativeId: claudePredecessorId,
+    displayName: "claude-before",
+    projectId,
+  });
+  await directory.upsertNode({
+    runtimeKind: "claude",
+    nativeId: claudeSuccessorId,
+    displayName: "claude-after",
+    projectId,
+  });
+  const claudeLink = await directory.addSuccessor({
+    predecessorNodeKey: `claude:${claudePredecessorId}`,
+    successorNodeKey: `claude:${claudeSuccessorId}`,
+  });
+  assert.equal(claudeLink.projectId, projectId);
+  assert.equal(directory.readNode("claude", claudeSuccessorId).aliases.length, 1);
+  assert.equal("permissions" in directory.publicSuccessor(claudeLink), false);
 
   await assert.rejects(
     directory.addSuccessor({
