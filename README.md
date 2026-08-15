@@ -1045,6 +1045,11 @@ After `accepted`, only `completed` or `failed` is valid; a later retryable ACK
 is rejected so cxmsg cannot automatically duplicate work Claude already
 accepted.
 
+ACK instructions are embedded in each outbound frame. An in-flight delivery
+created before an upgrade therefore retains its earlier instruction shape.
+Restart every running Claude bridge before relying on a new ACK lifecycle;
+`cxmsg doctor` reports bridges whose implementation revision is stale.
+
 Claude Code may also return a native `peer_message_status` control receipt for
 an individual transport message ID. Receipt emission is optional: a live
 external-peer exchange can return an ordinary Peer Message without emitting a

@@ -652,6 +652,39 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.equal(timedOut.status, "completed");
     assert.equal(timedOut.ack.late, true);
 
+    let lateAccepted = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "accept after the initial ACK deadline",
+    });
+    lateAccepted = await sendClaudeDeliveryJob(
+      { socketPath: "/tmp/cc-socks/99999.sock" },
+      sourceRecord,
+      lateAccepted,
+      { peers: async () => [peer], send: async () => {} },
+    );
+    lateAccepted = await updateJob(lateAccepted, {
+      delivery: {
+        ...lateAccepted.delivery,
+        ackDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
+      },
+    });
+    lateAccepted = await refreshClaudeDelivery(lateAccepted);
+    assert.equal(lateAccepted.status, "ack_timeout");
+    const lateAcceptedAck = parseClaudeDeliveryAck(
+      `<cxmsg-ack in-reply-to="${lateAccepted.jobId}" status="accepted">\nLate start\n</cxmsg-ack>`,
+    );
+    lateAccepted = await recordClaudeDeliveryAck(
+      { fromSession: peer.sessionId, fromAddress: peer.address },
+      lateAcceptedAck,
+    );
+    assert.equal(lateAccepted.status, "acknowledged");
+    assert.equal(lateAccepted.ack.late, true);
+    assert.ok(
+      Date.parse(lateAccepted.delivery.completionDeadlineAt) > Date.now(),
+    );
+
     let raceSafe = await createClaudeDeliveryJob({
       from: "coordinator",
       sourceRecord,
@@ -674,12 +707,14 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     const raceCompletion = parseClaudeDeliveryAck(
       `<cxmsg-ack in-reply-to="${raceSafe.jobId}" status="completed">\nWon the race\n</cxmsg-ack>`,
     );
-    raceSafe = await recordClaudeDeliveryAck(
-      { fromSession: peer.sessionId, fromAddress: peer.address },
-      raceCompletion,
-    );
-    assert.equal(raceSafe.status, "completed");
-    raceSafe = await refreshClaudeDelivery(staleRaceCandidate);
+    await Promise.all([
+      refreshClaudeDelivery(staleRaceCandidate),
+      recordClaudeDeliveryAck(
+        { fromSession: peer.sessionId, fromAddress: peer.address },
+        raceCompletion,
+      ),
+    ]);
+    raceSafe = readJob(raceSafe.jobId);
     assert.equal(raceSafe.status, "completed");
 
     const eventLog = await fs.readFile(path.join(stateDir, "events.jsonl"), "utf8");
@@ -688,6 +723,14 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.ok(
       events.some(
         (event) => event.phase === "ack-persisted" && event.late === true,
+      ),
+    );
+    assert.ok(
+      events.some(
+        (event) =>
+          event.phase === "ack-transition" &&
+          event.outcome === "acknowledged" &&
+          event.errorCode === "EACKTRANSITION",
       ),
     );
     assert.doesNotMatch(eventLog, /review the change|Late result|cc-socks/);

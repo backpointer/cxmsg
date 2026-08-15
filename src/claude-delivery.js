@@ -510,6 +510,7 @@ export async function recordClaudeDeliveryAck(
   let ackTransitioned = false;
   let rejection = null;
   let rejectionPhase = "ack-source-validation";
+  let rejectionOutcome = "rejected";
   let late = false;
   const updated = await mutateJob(job.jobId, (current) => {
     if (!deliverySourceMatches(current, parsed)) {
@@ -545,6 +546,7 @@ export async function recordClaudeDeliveryAck(
     if (["completed", "failed"].includes(current.status)) {
       if (current.ack?.status === ack.status) return current;
       rejectionPhase = "ack-transition";
+      rejectionOutcome = current.status;
       rejection = Object.assign(
         new Error(`Claude delivery is already ${current.status}: ${ack.jobId}`),
         { code: "EACKTRANSITION" },
@@ -563,6 +565,7 @@ export async function recordClaudeDeliveryAck(
       ack.status === "retryable_error"
     ) {
       rejectionPhase = "ack-transition";
+      rejectionOutcome = current.status;
       rejection = Object.assign(
         new Error("An accepted Claude delivery requires a terminal ACK"),
         { code: "EACKTRANSITION" },
@@ -643,7 +646,7 @@ export async function recordClaudeDeliveryAck(
       correlationId: job.jobId,
       target: job.target,
       attempt: job.delivery?.attempt,
-      outcome: "rejected",
+      outcome: rejectionOutcome,
       errorCode: rejection.code || "ack_rejected",
       late,
     });
