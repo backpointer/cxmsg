@@ -711,10 +711,12 @@ The initial Message Body Store fixes these provisional Phase 2 values in code
 and tests: 256 KiB maximum Message Body, 16 KiB inline threshold, 16 KiB
 default read, 64 KiB maximum range read, 8 MiB append segment, and 64 MiB total
 quota. Quota exhaustion rejects the new body and deletes nothing. Automatic
-retention and purge remain disabled until the Phase 4 policy and audit behavior
-are explicitly decided. The temporary pre-index reader has a 256 MiB aggregate
-scan ceiling; the Phase 4 rebuildable index replaces its linear scan rather
-than silently raising that ceiling.
+retention remains disabled. Phase 4 now provides a separately confirmed
+explicit purge with an exact plan digest, durable Tombstones, recoverable
+generation swaps, owner-private receipts, and generation-checked restore. The
+temporary pre-index reader has a 256 MiB aggregate scan ceiling; the Phase 4
+rebuildable index replaces its linear scan rather than silently raising that
+ceiling.
 
 - private Project ID creation and explicit declaration format;
 - worktree discovery, Project move, merge, split, and Tombstone rules;
@@ -725,7 +727,7 @@ than silently raising that ceiling.
 - hash-shard count, shard-key version, and reshard migration behavior;
 - partial-segment quarantine and operator recovery behavior;
 - Route Admission Quarantine body retention, discard, expiry, and audit rules;
-- purge selection, dry-run, backup, and audit behavior;
+- automatic backup retention and expiry policy for explicit purge backups;
 - Scheduler claim renewal and shutdown behavior beyond the fixed first slice;
 - per-Node and per-Conversation queue depth;
 - Group membership version retention;

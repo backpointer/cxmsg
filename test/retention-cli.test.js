@@ -17,7 +17,7 @@ function run(args) {
   });
 }
 
-test("retention CLI is plan-only and renders aggregate or bounded JSON output", () => {
+test("retention CLI plans safely and requires exact confirmation for mutation", () => {
   const text = run([
     "retention",
     "plan",
@@ -27,7 +27,8 @@ test("retention CLI is plan-only and renders aggregate or bounded JSON output", 
     "all",
   ]);
   assert.equal(text.status, 0, text.stderr);
-  assert.match(text.stdout, /retention plan only; automatic deletion=false, mutation=false/);
+  assert.match(text.stdout, /retention plan; automatic deletion=false, explicit mutation=true/);
+  assert.match(text.stdout, /plan-digest=[0-9a-f]{64}/);
   assert.match(text.stdout, /ledger\teligible=0\tblocked=0/);
 
   const json = run([
@@ -43,7 +44,8 @@ test("retention CLI is plan-only and renders aggregate or bounded JSON output", 
   const plan = JSON.parse(json.stdout);
   assert.equal(plan.schemaVersion, 1);
   assert.equal(plan.policy.automaticDeletion, false);
-  assert.equal(plan.policy.mutationEnabled, false);
+  assert.equal(plan.policy.mutationEnabled, true);
+  assert.match(plan.planDigest, /^[0-9a-f]{64}$/);
 
   const unsafe = run([
     "retention",
@@ -57,6 +59,7 @@ test("retention CLI is plan-only and renders aggregate or bounded JSON output", 
   assert.match(unsafe.stderr, /preserve at least 90 days/);
 
   const mutation = run(["retention", "purge", "--before", "2026-01-01T00:00:00Z"]);
-  assert.equal(mutation.status, 2);
+  assert.equal(mutation.status, 1);
+  assert.match(mutation.stderr, /requires --confirm/);
   assert.doesNotMatch(`${mutation.stdout}${mutation.stderr}`, /deleted|removed/);
 });

@@ -223,13 +223,13 @@ coordination event log; retained bodies and endpoint paths are never included.
 restarting, claiming, cancelling, or dispatching anything.
 
 This slice does not yet implement scheduled Delegation, automatic retry,
-retention, purge, group fan-out, or task-completion inference. The index is
+group fan-out, or task-completion inference. The index is
 bounded to 4,096 Logical Messages and is not a retention mechanism. An ambiguous
 dispatch remains `unknown`, and only positive App Server acceptance evidence
 may strengthen it to `turn_started`. Storage uses private 8 MiB JSONL
 segments, a 64 MiB fail-closed quota with bounded terminal-evidence reserve,
-and a 256 MiB hard scan ceiling. Automatic retention and purge remain disabled
-until their policy is explicitly selected.
+and a 256 MiB hard scan ceiling. Automatic retention remains disabled. Explicit
+purge requires an exact read-only plan digest and preserves a restorable backup.
 
 Doctor derives stale dispatch observation from the same 30-second grace used
 by `route reconcile`. An attempt with no evidence remains `created` in the
@@ -243,10 +243,31 @@ Doctor measures active and quarantined Ledger segment bytes without reading
 record bodies. Usage at 90 percent is a warning and usage at or above the
 quota is a required failure because new sends are rejected. Evidence reserves
 can make writes fail before raw bytes reach 100 percent. At exhaustion, stop
-new sends and make a complete backup. Do not edit, partially delete, or move
-segments; this release has no supported quota recovery until retention and
-purge tooling ships. Monitor the Message Body Store on the same volume as a
-separate quota consumer.
+new sends and inspect an explicit retention plan. Do not edit, partially
+delete, or move segments manually. The supported purge path revalidates the
+plan under an exclusive mutation barrier and retains its backup. Monitor the
+Message Body Store on the same volume as a separate quota consumer.
+
+Retention is always operator initiated:
+
+```bash
+cxmsg retention plan --before <ISO-timestamp> --scope all --json
+cxmsg retention purge --before <same-ISO-timestamp> --scope all \
+  --confirm <plan-digest> --json
+cxmsg retention restore <backup-id> --confirm <backup-id> --json
+cxmsg retention recover --json
+```
+
+The plan emits no Message Body text. Purge rejects changed candidates,
+nonterminal or `unknown` evidence, active claims, reply/Job references, unsafe
+files, partial segments, and a mismatched digest. A rejected Route Admission
+record and its quarantined Ledger record may be removed only together with
+`scope=all`. Tombstones are durable before generation replacement. A crash
+after that point rolls forward from content-addressed generation evidence.
+Restore succeeds only for the current transaction head when every active
+generation is unchanged; it restores retained data but deliberately keeps
+Tombstones, so the old Logical Message ID and reply target cannot wake again.
+Backups and abandoned staging generations have no automatic expiry.
 
 Legacy compatibility applies only when the binding file is genuinely absent.
 If a binding path exists but its file type, owner, mode, link count, JSON, or

@@ -183,6 +183,11 @@ import { SCHEDULER_HEARTBEAT_STALE_MS } from "../src/delivery-policy.js";
 import { withFileLock } from "../src/file-lock.js";
 import { writeCoordinationEvent } from "../src/observability.js";
 import { buildRetentionPlan } from "../src/retention.js";
+import {
+  purgeRetention,
+  recoverRetentionTransactions,
+  restoreRetention,
+} from "../src/retention-transaction.js";
 
 const codexBin = process.env.CODEX_BIN || "codex";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -200,6 +205,9 @@ function usage(exitCode = 0) {
   cxmsg deliveries cancel <logical-message-id> [--json]
   cxmsg deliveries rebuild-index [--json]
   cxmsg retention plan --before <ISO timestamp> [--scope all|ledger|bodies|quarantine] [--json]
+  cxmsg retention purge --before <ISO timestamp> [--scope all|ledger|bodies|quarantine] --confirm <plan-digest> [--json]
+  cxmsg retention restore <backup-id> --confirm <backup-id> [--json]
+  cxmsg retention recover [--json]
   cxmsg open <name> [-- <codex resume options>]
   cxmsg attach <name> [-- <codex resume options>]
   cxmsg detach <name>
@@ -2906,25 +2914,63 @@ async function commandDoctor(args) {
 
 async function commandRetention(args) {
   const operation = args.shift();
-  if (operation !== "plan") usage(2);
+  if (!["plan", "purge", "restore", "recover"].includes(operation)) usage(2);
   let before = null;
   let scope = "all";
   let jsonOutput = false;
+  let confirm = null;
+  const backupId = operation === "restore" ? args.shift() || null : null;
   while (args.length) {
     const option = args.shift();
     if (option === "--before") before = args.shift() || null;
     else if (option === "--scope") scope = args.shift() || "";
+    else if (option === "--confirm") confirm = args.shift() || null;
     else if (option === "--json") jsonOutput = true;
-    else throw new Error(`unknown retention plan option: ${option}`);
+    else throw new Error(`unknown retention ${operation} option: ${option}`);
   }
-  if (!before) throw new Error("retention plan requires --before <ISO timestamp>");
+  if (operation === "recover") {
+    const recovered = await recoverRetentionTransactions();
+    if (jsonOutput) process.stdout.write(`${JSON.stringify({ recovered }, null, 2)}\n`);
+    else process.stdout.write(`retention recovery complete\trecovered=${recovered.length}\n`);
+    return;
+  }
+  if (operation === "restore") {
+    if (!backupId) throw new Error("retention restore requires <backup-id>");
+    if (confirm !== backupId) {
+      throw new Error("retention restore requires --confirm with the exact backup id");
+    }
+    const receipt = await restoreRetention({ backupId });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(receipt, null, 2)}\n`
+        : `retention restored\tbackup-id=${receipt.backupId}\trestore-id=${receipt.restoreId}\n`,
+    );
+    return;
+  }
+  if (!before) throw new Error(`retention ${operation} requires --before <ISO timestamp>`);
+  if (operation === "purge") {
+    if (!confirm) throw new Error("retention purge requires --confirm <plan-digest>");
+    const receipt = await purgeRetention({
+      before,
+      scope,
+      expectedPlanDigest: confirm,
+    });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(receipt, null, 2)}\n`
+        : `retention purge committed\tbackup-id=${receipt.backupId}` +
+          `\tplan-digest=${receipt.planDigest}\n`,
+    );
+    return;
+  }
   const plan = await buildRetentionPlan({ before, scope });
   if (jsonOutput) {
     process.stdout.write(`${JSON.stringify(plan, null, 2)}\n`);
     return;
   }
   process.stdout.write(
-    `retention plan only; automatic deletion=false, mutation=false, cutoff=${plan.cutoff}\n`,
+    `retention plan; automatic deletion=false, explicit mutation=true, cutoff=${plan.cutoff}` +
+      `, plan-digest=${plan.planDigest}\n`,
   );
   for (const [kind, category] of Object.entries(plan.categories)) {
     process.stdout.write(

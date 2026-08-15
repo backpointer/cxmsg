@@ -104,6 +104,12 @@ they carry different authority and delivery semantics.
   Retention mutation only after those writers drain. It is always acquired
   before Route, Job, Message Body, or Delivery Ledger locks and creates no
   deletion or task authority by itself.
+- **Retention Transaction Module**: the Module that revalidates one exact
+  Retention plan, stages private content generations, writes Delivery Dedup
+  Tombstones, swaps active generations with retained backups, rebuilds derived
+  indexes, and emits an audit receipt. After Tombstone creation it recovers by
+  roll-forward; restore requires the current transaction head and unchanged
+  active generation and never removes Tombstones.
 - **Peer Message Context Projection Module**: the Module that converts an
   admitted Peer Message into the minimal model-visible untrusted marker,
   display alias, Message Body or preview, and Reply Handle. Routing, scheduling,

@@ -100,7 +100,7 @@ test("retention planning protects live, ambiguous, reply, and Job-correlated evi
   );
 
   assert.equal(plan.policy.automaticDeletion, false);
-  assert.equal(plan.policy.mutationEnabled, false);
+  assert.equal(plan.policy.mutationEnabled, true);
   assert.deepEqual(
     plan.categories.ledger.eligible.map((candidate) => candidate.messageId),
     [ids.eligible],
@@ -123,7 +123,7 @@ test("retention planning protects live, ambiguous, reply, and Job-correlated evi
   assert.doesNotMatch(JSON.stringify(plan), /private body|socket|credential/);
 });
 
-test("retention planning enforces minimum ages and has no mutation path", async () => {
+test("retention planning enforces minimum ages and keeps mutation in a separate Module", async () => {
   assert.throws(
     () =>
       retention.planRetention(

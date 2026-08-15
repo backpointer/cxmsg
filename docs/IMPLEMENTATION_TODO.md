@@ -52,7 +52,7 @@ and no uncommitted implementation work is mixed into the next slice.
 ### T1 — Delivery retention and explicit purge
 
 - Priority: P0
-- Status: IN PROGRESS — read-only plan implemented; mutation remains gated
+- Status: COMPLETE
 - Canonical phase: Phase 4
 
 - [x] Fix separate retention policies for Delivery metadata, Message Bodies,
@@ -63,11 +63,11 @@ and no uncommitted implementation work is mixed into the next slice.
       and Route Admission writers without holding it over model dispatch.
 - [x] Add owner-private Delivery Dedup Tombstones that require the mutation
       barrier and prevent Logical Message ID or reply-target resurrection.
-- [ ] Add an explicit, recoverable purge mutation with exact selection and an
+- [x] Add an explicit, recoverable purge mutation with exact selection and an
       audit receipt; automatic deletion remains disabled.
-- [ ] Preserve records referenced by active schedules, Jobs, replies,
+- [x] Preserve records referenced by active schedules, Jobs, replies,
       Conversations, Tombstones, or unresolved `unknown` evidence.
-- [ ] Add crash tests for segment rotation, index rebuild, and interrupted
+- [x] Add crash tests for segment rotation, index rebuild, and interrupted
       purge.
 
 Done when storage growth is bounded without silently deleting live,

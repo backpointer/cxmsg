@@ -26,6 +26,7 @@ import {
 } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
 import {
+  assertRetentionReadable,
   assertRetentionMutation,
   withRetentionWriter,
 } from "./retention-barrier.js";
@@ -443,7 +444,9 @@ function readDedupTombstone(messageId) {
 function writeDedupTombstone(record) {
   const existing = readDedupTombstone(record.messageId);
   if (existing) {
-    if (JSON.stringify(existing) !== JSON.stringify(record)) {
+    if (
+      existing.deliveryFingerprintSha256 !== record.deliveryFingerprintSha256
+    ) {
       throw new Error(`Delivery dedup Tombstone conflict: ${record.messageId}`);
     }
     return existing;
@@ -881,10 +884,12 @@ function withDeliveryLedgerMutation(callback) {
 }
 
 export function readDeliveryLedger(messageId) {
+  assertRetentionReadable();
   return ledgerState(messageId);
 }
 
 export function listDeliveryLedger() {
+  assertRetentionReadable();
   return [...rebuildDeliveryLedgerRecords(readRecords()).values()].sort((left, right) =>
     left.committedAt.localeCompare(right.committedAt),
   );
@@ -910,6 +915,7 @@ export function findDeliveryByReplyHandle({ replyHandle, target, targetThreadId 
 }
 
 export async function listDeliveryLedgerIndexed() {
+  assertRetentionReadable();
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () =>
     [...readDeliveryIndexLocked().values()]
@@ -923,6 +929,7 @@ export async function listDeliveryLedgerIndexed() {
 }
 
 export async function readDeliveryLedgerIndexed(messageId) {
+  assertRetentionReadable();
   validateUuid("logical message id", messageId);
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
@@ -947,7 +954,12 @@ export function listDeliveryDedupTombstones() {
 }
 
 export async function createDeliveryDedupTombstones(
-  { messageIds, backupId, purgedAt = new Date().toISOString() },
+  {
+    messageIds,
+    backupId,
+    purgedAt = new Date().toISOString(),
+    coupledQuarantineMessageIds = [],
+  },
 ) {
   assertRetentionMutation();
   if (!Array.isArray(messageIds) || messageIds.length < 1) {
@@ -958,17 +970,30 @@ export async function createDeliveryDedupTombstones(
   const unique = [...new Set(messageIds.map((messageId) =>
     validateUuid("logical message id", messageId),
   ))].sort();
+  const coupledQuarantine = new Set(
+    coupledQuarantineMessageIds.map((messageId) =>
+      validateUuid("coupled Quarantine message id", messageId),
+    ),
+  );
+  if ([...coupledQuarantine].some((messageId) => !unique.includes(messageId))) {
+    throw new Error("coupled Quarantine Tombstone is outside the purge selection");
+  }
   ensureStore();
   return withFileLock(DELIVERY_LEDGER_LOCK_PATH, async () => {
     const messages = readDeliveryIndexLocked();
     const records = unique.map((messageId) => {
+      const existingTombstone = readDedupTombstone(messageId);
       const message = messages.get(messageId);
+      if (!message && existingTombstone) return existingTombstone;
       if (!message) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
-      if (
-        message.delivery.admissionState !== "admitted" ||
-        !["turn_started", "expired", "cancelled"].includes(message.delivery.state) ||
-        message.delivery.claim
-      ) {
+      const admittedTerminal =
+        message.delivery.admissionState === "admitted" &&
+        ["turn_started", "expired", "cancelled"].includes(message.delivery.state);
+      const quarantinedCoupled =
+        message.delivery.admissionState === "quarantined" &&
+        coupledQuarantine.has(messageId) &&
+        ["created", "scheduled"].includes(message.delivery.state);
+      if ((!admittedTerminal && !quarantinedCoupled) || message.delivery.claim) {
         throw new Error(`Delivery is not terminal and purgeable: ${messageId}`);
       }
       return {

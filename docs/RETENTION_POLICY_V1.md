@@ -7,19 +7,16 @@ Message Bodies, and Route Admission Quarantine without reading Message Body
 text into its plan or starting model work. Retention never creates authority,
 changes a Delivery state, retries a message, or resolves Quarantine.
 
-Version 1 first shipped a read-only plan. The Retention Mutation Barrier and
-Delivery Dedup Tombstone foundations are now implemented, but automatic
-deletion and the purge command remain disabled until segment replacement,
-backup restoration, receipts, and crash tests described below are implemented
-together.
+Version 1 provides a read-only plan plus a separately confirmed explicit purge,
+recovery, and exact-generation restore. Automatic deletion remains disabled.
 
 ## Fixed minimum ages
 
 | Category | Minimum retained age | Current mutation policy |
 | --- | ---: | --- |
-| Delivery Ledger metadata and evidence | 90 days | disabled |
-| Message Bodies | 30 days | disabled |
-| Route Admission Quarantine | 30 days | disabled |
+| Delivery Ledger metadata and evidence | 90 days | explicit only |
+| Message Bodies | 30 days | explicit only |
+| Route Admission Quarantine | 30 days | explicit only |
 
 The caller must always provide an absolute ISO cutoff. There is no implicit
 "delete old data" default. Planning `scope=all` uses the longest minimum age,
@@ -69,13 +66,23 @@ The plan reports three outcomes per category:
 - `blocked`: old enough but protected, with bounded reason codes;
 - `retainedByAge`: newer than the explicit cutoff.
 
-`eligible` means "candidate for a future explicit purge transaction", not
-"safe to delete with filesystem commands".
+`eligible` means "candidate for the separately confirmed explicit purge
+transaction", not "safe to delete with filesystem commands".
 
-## Required purge transaction
+## Explicit purge and restore Interface
 
-Mutation remains disabled until one implementation provides all of the
-following as one coherent slice:
+```bash
+cxmsg retention purge \
+  --before 2026-01-01T00:00:00Z \
+  --scope all \
+  --confirm <exact-plan-digest> \
+  --json
+
+cxmsg retention restore <backup-id> --confirm <backup-id> --json
+cxmsg retention recover --json
+```
+
+The implementation provides the following as one coherent transaction:
 
 1. Acquire one Retention mutation lock and re-run the exact plan.
 2. Reject changed candidate sets, active claims, new reply/Job references,
@@ -86,7 +93,8 @@ following as one coherent slice:
    files and transaction manifest.
 5. Atomically swap the staging and active segment directories while retaining
    the previous directories under an opaque backup ID.
-6. Rebuild the Ledger and Message Body indexes from the new truth.
+6. Rebuild the Delivery Ledger index from the new truth; the Message Body Store
+   has no separate index.
 7. Write an owner-only audit receipt containing policy version, cutoff,
    category counts, candidate-set digests, backup ID, and outcome. It contains
    no bodies or credentials.
@@ -95,9 +103,23 @@ following as one coherent slice:
 9. Keep automatic backup expiry disabled until backup retention has its own
    explicit policy.
 
-A partial implementation must not expose a `purge` command. In particular,
-deleting Message Body or Ledger segment files directly is not an acceptable
-Retention Module implementation.
+The generation digest covers sorted filename, byte size, and content SHA-256,
+not mutable timestamps. A Route Admission Quarantine record with a linked
+quarantined Ledger record is eligible only in `scope=all`, where both are
+selected and Tombstoned together. This prevents either store from retaining an
+unbounded orphan solely because the other was purged first.
+
+The durable phases are staging, prepared, Tombstoning, swapping, indexing, and
+committed. A crash at or before prepared changes no active generation and the
+transaction becomes abandoned. After Tombstoning begins, recovery always
+rolls forward by comparing active, staged, and backup generation digests. It
+never guesses from a phase label or silently deletes a conflicting generation.
+
+Restore is not resurrection. It makes the retained evidence readable again but
+keeps Delivery Dedup Tombstones. Exact Logical Message ID retry and new replies
+to the restored target remain rejected. Restore also preserves the displaced
+post-purge generation and refuses a changed active generation or a backup that
+is not the current transaction head.
 
 ## Mutation barrier and Tombstone foundation
 
@@ -113,11 +135,11 @@ lock, then Delivery Ledger lock. App Server dispatch and model work occur
 outside the barrier; only durable prepare and evidence mutations enter it.
 
 Delivery Dedup Tombstones live outside swappable Ledger segment directories.
-They require an exclusive Retention mutation, accept only admitted terminal
-Deliveries without an active claim, and permanently block reuse of their
-Logical Message IDs and reply targets. They contain a digest rather than a
-Message Body. Creating Tombstones alone does not delete Ledger records and is
-not exposed as a CLI operation.
+They require an exclusive Retention mutation, accept admitted terminal
+Deliveries or a quarantined Delivery coupled to the same Quarantine purge, and
+always reject active claims. They permanently block reuse of their Logical
+Message IDs and reply targets and contain a fingerprint digest rather than a
+Message Body. Creating Tombstones alone is not exposed as a CLI operation.
 
 ## Privacy and authority
 

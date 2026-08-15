@@ -18,7 +18,10 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { withFileLock } from "./file-lock.js";
-import { withRetentionWriter } from "./retention-barrier.js";
+import {
+  assertRetentionReadable,
+  withRetentionWriter,
+} from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const MAX_STORED_MESSAGE_BYTES = 256 * 1024;
@@ -91,7 +94,7 @@ function allSegmentPaths() {
   ];
 }
 
-function validRecord(record) {
+export function validMessageBodyRecord(record) {
   return Boolean(
     record &&
       record.schemaVersion === 1 &&
@@ -120,7 +123,7 @@ function readSegmentRecords(filename) {
     } catch {
       throw new Error(`malformed message body segment: ${path.basename(filename)}`);
     }
-    if (!validRecord(record)) {
+    if (!validMessageBodyRecord(record)) {
       throw new Error(`invalid message body record: ${path.basename(filename)}`);
     }
     return record;
@@ -293,6 +296,7 @@ function verifiedBody(record) {
 }
 
 export function messageBodyInfo(reference) {
+  assertRetentionReadable();
   const messageId = parseMessageContentRef(reference);
   ensureStore();
   const record = listRecords().find((candidate) => candidate.messageId === messageId);
@@ -302,6 +306,7 @@ export function messageBodyInfo(reference) {
 }
 
 export function listMessageBodies() {
+  assertRetentionReadable();
   ensureStore();
   return listRecords().map((record) => {
     verifiedBody(record);
@@ -313,6 +318,7 @@ export function readMessageBody(
   reference,
   { offset = 0, limit = DEFAULT_MESSAGE_READ_BYTES } = {},
 ) {
+  assertRetentionReadable();
   const messageId = parseMessageContentRef(reference);
   if (!Number.isSafeInteger(offset) || offset < 0) {
     throw new Error("message body offset must be a non-negative integer");

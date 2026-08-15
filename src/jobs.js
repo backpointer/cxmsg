@@ -11,7 +11,10 @@ import path from "node:path";
 import { withFileLock } from "./file-lock.js";
 import { finalTurnResult } from "./messaging.js";
 import { processState } from "./process-state.js";
-import { withRetentionWriter } from "./retention-barrier.js";
+import {
+  assertRetentionReadable,
+  withRetentionWriter,
+} from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import { findThreadTurn } from "./thread-activity.js";
 
@@ -43,6 +46,7 @@ export function newJobId() {
 }
 
 export function readJob(jobId) {
+  assertRetentionReadable();
   try {
     const job = JSON.parse(readFileSync(jobPath(jobId), "utf8"));
     if (job?.version !== 1 || job.jobId !== jobId) return null;
@@ -53,6 +57,7 @@ export function readJob(jobId) {
 }
 
 export function listJobs() {
+  assertRetentionReadable();
   ensureJobsDirectory();
   return readdirSync(JOBS_DIR)
     .filter((filename) => /^[0-9a-f-]+\.json$/i.test(filename))
@@ -122,9 +127,11 @@ function buildJob({
 }
 
 export function createJob(spec) {
-  const job = buildJob(spec);
-  if (readJob(job.jobId)) throw new Error(`job already exists: ${job.jobId}`);
-  return writeJob(job);
+  return withRetentionWriter(() => {
+    const job = buildJob(spec);
+    if (readJob(job.jobId)) throw new Error(`job already exists: ${job.jobId}`);
+    return writeJob(job);
+  });
 }
 
 export async function createJobOnce(spec, initialize = (job) => job) {
@@ -155,8 +162,10 @@ export function isPendingJob(job) {
 
 export async function withJobLock(jobId, callback, timeoutMs = 10_000) {
   validateJobId(jobId);
-  ensureJobsDirectory();
-  return withFileLock(jobLockPath(jobId), callback, { timeoutMs });
+  return withRetentionWriter(() => {
+    ensureJobsDirectory();
+    return withFileLock(jobLockPath(jobId), callback, { timeoutMs });
+  });
 }
 
 export async function mutateJob(jobId, mutate) {

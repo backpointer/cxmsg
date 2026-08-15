@@ -1,7 +1,8 @@
+import { createHash } from "node:crypto";
 import { listDeliveryLedgerIndexed } from "./delivery-ledger.js";
 import { listJobs } from "./jobs.js";
 import { listMessageBodies } from "./message-bodies.js";
-import { listQuarantine } from "./route-admission.js";
+import { listQuarantineForRetention } from "./route-admission.js";
 
 export const DELIVERY_RETENTION_MIN_AGE_MS = 90 * 24 * 60 * 60 * 1_000;
 export const MESSAGE_BODY_RETENTION_MIN_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -53,6 +54,26 @@ function emptyCategory() {
   return { eligible: [], blocked: [], retainedByAge: 0, estimatedBytes: 0 };
 }
 
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function selectionDigest(plan) {
+  return sha256(JSON.stringify({
+    schemaVersion: plan.schemaVersion,
+    cutoff: plan.cutoff,
+    scope: plan.scope,
+    eligible: Object.fromEntries(
+      Object.entries(plan.categories).map(([kind, category]) => [
+        kind,
+        category.eligible.map((candidate) => ({ ...candidate })).sort((left, right) =>
+          left.messageId.localeCompare(right.messageId),
+        ),
+      ]),
+    ),
+  }));
+}
+
 export function planRetention(
   {
     before,
@@ -84,6 +105,54 @@ export function planRetention(
     bodies: emptyCategory(),
     quarantine: emptyCategory(),
   };
+  const coupledQuarantineIds = new Set();
+
+  if (include("quarantine")) {
+    for (const record of quarantine) {
+      const quarantinedAt = timestamp("Quarantine timestamp", record.quarantinedAt);
+      if (quarantinedAt >= cutoff) {
+        categories.quarantine.retainedByAge += 1;
+        continue;
+      }
+      const reasons = [];
+      const linked = ledgerById.get(record.logicalMessageId);
+      for (const reason of protectedIds.get(record.logicalMessageId) || []) {
+        addReason(reasons, reason);
+      }
+      if (linked) {
+        if (scope !== "all") {
+          addReason(reasons, "linked_delivery_requires_all_scope");
+        }
+        if (timestamp("linked Delivery updatedAt", linked.delivery.updatedAt) >= cutoff) {
+          addReason(reasons, "linked_delivery_retained_by_age");
+        }
+        if (
+          linked.delivery.admissionState !== "quarantined" ||
+          linked.logicalMessage.from !== record.from ||
+          linked.delivery.target !== record.target ||
+          linked.logicalMessage.createdAt !== record.quarantinedAt ||
+          linked.logicalMessage.body.bytes !== record.messageBytes ||
+          linked.logicalMessage.body.sha256 !== record.messageSha256
+        ) {
+          addReason(reasons, "quarantine_ledger_mismatch");
+        }
+      }
+      const candidate = {
+        messageId: record.logicalMessageId,
+        quarantinedAt: record.quarantinedAt,
+        reason: record.reason,
+        estimatedBytes: Number.isSafeInteger(record.messageBytes)
+          ? record.messageBytes
+          : 0,
+      };
+      if (reasons.length) categories.quarantine.blocked.push({ ...candidate, reasons });
+      else {
+        categories.quarantine.eligible.push(candidate);
+        categories.quarantine.estimatedBytes += candidate.estimatedBytes;
+        if (linked) coupledQuarantineIds.add(record.logicalMessageId);
+      }
+    }
+  }
 
   if (include("ledger")) {
     for (const record of ledger) {
@@ -94,10 +163,13 @@ export function planRetention(
         continue;
       }
       const reasons = [];
-      if (record.delivery.admissionState !== "admitted") {
+      const coupledQuarantine =
+        record.delivery.admissionState === "quarantined" &&
+        coupledQuarantineIds.has(messageId);
+      if (record.delivery.admissionState !== "admitted" && !coupledQuarantine) {
         addReason(reasons, "quarantined_delivery");
       }
-      if (!TERMINAL_DELIVERY_STATES.has(record.delivery.state)) {
+      if (!coupledQuarantine && !TERMINAL_DELIVERY_STATES.has(record.delivery.state)) {
         addReason(reasons, `nonterminal_${record.delivery.state}`);
       }
       for (const reason of protectedIds.get(messageId) || []) addReason(reasons, reason);
@@ -145,34 +217,14 @@ export function planRetention(
     }
   }
 
-  if (include("quarantine")) {
-    for (const record of quarantine) {
-      const quarantinedAt = timestamp("Quarantine timestamp", record.quarantinedAt);
-      if (quarantinedAt >= cutoff) {
-        categories.quarantine.retainedByAge += 1;
-        continue;
-      }
-      const candidate = {
-        messageId: record.logicalMessageId,
-        quarantinedAt: record.quarantinedAt,
-        reason: record.reason,
-        estimatedBytes: Number.isSafeInteger(record.messageBytes)
-          ? record.messageBytes
-          : 0,
-      };
-      categories.quarantine.eligible.push(candidate);
-      categories.quarantine.estimatedBytes += candidate.estimatedBytes;
-    }
-  }
-
-  return {
+  const plan = {
     schemaVersion: 1,
     generatedAt: new Date(now).toISOString(),
     cutoff: new Date(cutoff).toISOString(),
     scope,
     policy: {
       automaticDeletion: false,
-      mutationEnabled: false,
+      mutationEnabled: true,
       minimumAgeDays: {
         ledger: DELIVERY_RETENTION_MIN_AGE_MS / (24 * 60 * 60 * 1_000),
         bodies: MESSAGE_BODY_RETENTION_MIN_AGE_MS / (24 * 60 * 60 * 1_000),
@@ -188,6 +240,7 @@ export function planRetention(
     },
     categories,
   };
+  return { ...plan, planDigest: selectionDigest(plan) };
 }
 
 export async function buildRetentionPlan(
@@ -195,7 +248,7 @@ export async function buildRetentionPlan(
   {
     ledgerReader = listDeliveryLedgerIndexed,
     bodyReader = listMessageBodies,
-    quarantineReader = listQuarantine,
+    quarantineReader = listQuarantineForRetention,
     jobReader = listJobs,
     now = Date.now(),
   } = {},

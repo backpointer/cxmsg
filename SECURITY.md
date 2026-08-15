@@ -56,24 +56,41 @@ change permission profiles, or answer approvals. An `unknown` or
 cleanup. Doctor output omits message, task, result, error-body, approval-body,
 capability-token, and full socket-path data.
 
-The Retention Module is also read-only by default. Its plan uses explicit
+The Retention Module remains read-only by default. Its plan uses explicit
 cutoffs, fixed minimum ages, bounded reason codes, and owner-private metadata;
-it never reads Message Body text into output or starts model work. An eligible
-candidate is not deletion authority. No purge Interface is exposed until the
-same implementation provides durable Logical Message dedup Tombstones,
-candidate revalidation under a mutation lock, recoverable segment backups, an
-audit receipt, and exact-generation restore. Quota exhaustion, Peer Messages,
-ACKs, Triggers, replies, and Doctor findings cannot authorize deletion.
+it never emits Message Body text or starts model work. An eligible candidate is
+not deletion authority. Explicit purge additionally requires the exact plan
+digest supplied through `--confirm`, then revalidates all evidence under the
+exclusive mutation barrier. Quota exhaustion, Peer Messages, ACKs, Triggers,
+replies, and Doctor findings cannot authorize deletion.
 
 Retention-sensitive writers use owner-private leases behind one Retention
-Mutation Barrier. A future purge must acquire its exclusive mutation lease and
+Mutation Barrier. Purge acquires its exclusive mutation lease and
 drain those writers before replanning. The barrier is ordered before Route,
 Job, Message Body, and Delivery Ledger locks; it is released during App Server
 dispatch and model work. A writer cannot upgrade itself into a mutation.
 Delivery Dedup Tombstones require the exclusive mutation context, accept only
 terminal admitted Deliveries without active claims, contain no Message Body,
 and permanently reject reuse as either a Logical Message ID or reply target.
-No CLI creates them before the recoverable purge transaction is complete.
+Only the Retention Transaction Module creates them after all new generations
+are staged and fsynced.
+
+The Retention Transaction Module validates regular-file identity, ownership,
+mode, link count, complete JSONL records, record schema, and content digests.
+Its generation identity is a SHA-256 over sorted filename, size, and content
+digest entries; timestamps and local paths are excluded. Active generations
+are moved to an opaque owner-private backup and are never automatically
+expired. Audit receipts contain plan and generation digests, counts, backup
+identity, and outcome but no body, task, capability, Endpoint, or storage path.
+
+Before Tombstones, an interrupted prepared transaction is marked abandoned and
+changes no active generation. From Tombstone creation onward, recovery is
+roll-forward and infers state from actual active, staged, and backup generation
+digests rather than trusting a phase label alone. Restore verifies the receipt
+digest, current transaction head, backup generation, and unchanged active
+generation. It preserves the displaced post-purge generation and never removes
+Delivery Dedup Tombstones. Thus restored evidence is readable, but its purged
+Logical Message IDs and reply targets remain permanently non-wakeable.
 
 Redacted coordination events are stored in an owner-only segmented JSONL set:
 one 1 MiB active segment and four retained archives. Rotation uses an
@@ -108,6 +125,8 @@ permission to replay. Private segment metadata, bounded record validation,
 `O_NOFOLLOW`, fsync, a fail-closed quota, and reserved terminal-evidence space
 protect the initial file Adapter. Partial active tails are quarantined before
 another append. There is no automatic retention, purge, retry, or repair.
+Explicit purge is a separate confirmed Retention transaction and never follows
+from quota pressure.
 Delivery Ledger files and their quarantine are runtime state and must never be
 committed, published, or copied into a web snapshot.
 

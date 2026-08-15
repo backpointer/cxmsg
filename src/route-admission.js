@@ -38,7 +38,10 @@ import {
 } from "./node-directory.js";
 import { writeCoordinationEvent } from "./observability.js";
 import { readSessionRecord } from "./registry.js";
-import { withRetentionWriter } from "./retention-barrier.js";
+import {
+  assertRetentionReadable,
+  withRetentionWriter,
+} from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const ROUTE_BINDINGS_DIR = path.join(CXMSG_STATE_DIR, "route-bindings");
@@ -49,6 +52,7 @@ export { ROUTE_RECONCILE_GRACE_MS };
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
+const QUARANTINE_MAX_SCAN_BYTES = 256 * 1024 * 1024;
 export { MAX_WHEN_IDLE_DELAY_MS };
 
 function validateName(label, value) {
@@ -1002,6 +1006,7 @@ export async function reconcileRouteDelivery(
 }
 
 export function listQuarantine() {
+  assertRetentionReadable();
   if (!existsSync(QUARANTINE_DIR)) return [];
   return readdirSync(QUARANTINE_DIR)
     .filter((name) => name.endsWith(".json"))
@@ -1009,6 +1014,100 @@ export function listQuarantine() {
     .map((name) => readJson(path.join(QUARANTINE_DIR, name)))
     .filter(Boolean)
     .map(({ message, ...record }) => record);
+}
+
+function validHistoricalRoute(route, messageId) {
+  if (route === null) return true;
+  if (
+    route?.schema_version !== 1 ||
+    route.logical_message_id !== messageId ||
+    !NAME_PATTERN.test(route.project_id || "") ||
+    !NAME_PATTERN.test(route.target_role || "") ||
+    !NAME_PATTERN.test(route.payload_type || "") ||
+    !["immediate", ...SCHEDULED_WAKE_POLICIES].includes(route.wake_policy)
+  ) {
+    return false;
+  }
+  if (route.wake_policy === "immediate") {
+    return route.expiry === undefined &&
+      route.trigger_turn_id === undefined &&
+      route.trigger_job_id === undefined;
+  }
+  if (!Number.isFinite(Date.parse(route.expiry || ""))) return false;
+  if (route.wake_policy === "after-turn") {
+    return UUID_PATTERN.test(route.trigger_turn_id || "") &&
+      route.trigger_job_id === undefined;
+  }
+  if (route.wake_policy === "after-job") {
+    return UUID_PATTERN.test(route.trigger_job_id || "") &&
+      route.trigger_turn_id === undefined;
+  }
+  return route.trigger_turn_id === undefined && route.trigger_job_id === undefined;
+}
+
+export function validQuarantineRecord(record, messageId = record?.logicalMessageId) {
+  if (
+    record?.version !== 1 ||
+    record.logicalMessageId !== messageId ||
+    !UUID_PATTERN.test(messageId || "") ||
+    !NAME_PATTERN.test(record.from || "") ||
+    !NAME_PATTERN.test(record.target || "") ||
+    typeof record.message !== "string" ||
+    !record.message.trim() ||
+    !Number.isSafeInteger(record.messageBytes) ||
+    record.messageBytes > MAX_STORED_MESSAGE_BYTES ||
+    record.messageBytes !== Buffer.byteLength(record.message, "utf8") ||
+    !/^[0-9a-f]{64}$/.test(record.messageSha256 || "") ||
+    record.messageSha256 !== createHash("sha256").update(record.message).digest("hex") ||
+    typeof record.reason !== "string" ||
+    !/^[a-z][a-z0-9_]{0,63}$/.test(record.reason) ||
+    !Number.isFinite(Date.parse(record.quarantinedAt || "")) ||
+    !validHistoricalRoute(record.route, messageId)
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export function listQuarantineForRetention() {
+  return readQuarantineSnapshotForRetention().map(({ message, ...record }) => record);
+}
+
+export function readQuarantineSnapshotForRetention() {
+  assertRetentionReadable();
+  if (!existsSync(QUARANTINE_DIR)) return [];
+  let scannedBytes = 0;
+  return readdirSync(QUARANTINE_DIR)
+    .sort()
+    .map((name) => {
+      const match = /^([0-9a-f-]{36})\.json$/i.exec(name);
+      if (!match) throw new Error(`Quarantine filename is invalid: ${name}`);
+      const filename = path.join(QUARANTINE_DIR, name);
+      const metadata = lstatSync(filename);
+      if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
+        throw new Error(`Quarantine record is not a private regular file: ${name}`);
+      }
+      if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
+        throw new Error(`Quarantine record is owned by another user: ${name}`);
+      }
+      if ((metadata.mode & 0o077) !== 0) {
+        throw new Error(`Quarantine record permissions are too broad: ${name}`);
+      }
+      scannedBytes += metadata.size;
+      if (scannedBytes > QUARANTINE_MAX_SCAN_BYTES) {
+        throw new Error("Quarantine exceeds the bounded Retention scan limit");
+      }
+      let record;
+      try {
+        record = JSON.parse(readFileSync(filename, "utf8"));
+      } catch {
+        throw new Error(`Quarantine record is malformed: ${name}`);
+      }
+      if (!validQuarantineRecord(record, match[1])) {
+        throw new Error(`Quarantine record failed validation: ${name}`);
+      }
+      return record;
+    });
 }
 
 export function parseTypedPeerEnvelope(text) {
