@@ -211,7 +211,7 @@ model wake-ups and exact per-recipient evidence.
       and a conservative fan-out payload-byte ceiling.
 - [x] Add an explicit Codex `when-idle` Busy fallback per recipient by reusing
       the shared Delivery Ledger and Scheduler claim protocol.
-- [ ] Add `after-turn` and `after-job` per-recipient policies without creating
+- [x] Add `after-turn` and `after-job` per-recipient policies without creating
       a second scheduling truth.
 - [ ] Add bounded digest-on-next-cxmsg-turn composition; never steer an
       external or unrelated Busy turn with a digest.

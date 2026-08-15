@@ -548,6 +548,8 @@ cxmsg team prepare --selection <selection-uuid> \
   "Review handoff pointer abc123"
 cxmsg team dispatch <logical-message-id> --json
 cxmsg team dispatch <logical-message-id> --when-busy when-idle --json
+cxmsg team dispatch <logical-message-id> --when-busy after-turn --json
+cxmsg team dispatch <logical-message-id> --after-job <job-uuid> --json
 ```
 
 Default output exposes only the recipient count and set digest. Use
@@ -569,8 +571,13 @@ default a Busy Codex recipient rejects the
 whole preflight with zero attempts. `--when-busy when-idle` instead moves only
 that explicit recipient into the existing Delivery Ledger/Scheduler claim
 protocol; it never steers the active turn, creates a second queue, or schedules
-Claude recipients. The original 15-minute Team Cast expiry remains the fallback
-deadline. See
+Claude recipients. `--when-busy after-turn` pins each Busy Codex recipient's
+exact active turn, while idle siblings still dispatch immediately.
+`--after-job <job-uuid>` instead schedules every pending Codex recipient against
+one exact existing Job and rejects a mixed Claude fan-out before changing any
+Delivery. These Triggers control timing only; they are not approval, authority,
+or task-completion evidence. The original 15-minute Team Cast expiry remains
+the fallback deadline. See
 [Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md).
 
 Preparation also reports `estimatedFanoutPayloadBytes`, calculated as Message

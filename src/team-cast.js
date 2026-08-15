@@ -981,12 +981,21 @@ export async function dispatchPreparedTeamCastMessage(
       continue;
     }
     const context = contexts.get(delivery.targetNodeKey);
-    if (context?.scheduleWakePolicy === "when-idle") {
+    if (
+      ["when-idle", "after-turn", "after-job"].includes(
+        context?.scheduleWakePolicy,
+      )
+    ) {
       try {
         const scheduled = await scheduleRecipient(
           logicalMessageId,
           delivery.targetNodeKey,
-          { now },
+          {
+            now,
+            wakePolicy: context.scheduleWakePolicy,
+            triggerTurnId: context.triggerTurnId ?? null,
+            triggerJobId: context.triggerJobId ?? null,
+          },
         );
         outcomes.push({
           targetNodeKey: delivery.targetNodeKey,

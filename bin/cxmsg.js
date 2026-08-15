@@ -321,7 +321,8 @@ function usage(exitCode = 0) {
   cxmsg team selection <selection-id> [--recipients] [--json]
   cxmsg team prepare --selection <selection-id> --from <node-key>
              [--logical-message-id <uuid>] [--json] -- <message...>
-  cxmsg team dispatch <logical-message-id> [--when-busy reject|when-idle] [--json]
+  cxmsg team dispatch <logical-message-id> [--when-busy reject|when-idle|after-turn]
+             [--after-job <job-id>] [--json]
   cxmsg message info <message-id|reply-handle|content-ref> [--json]
   cxmsg message show <message-id|reply-handle|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -3456,19 +3457,29 @@ async function commandTeam(args) {
     const logicalMessageId = args.shift();
     let jsonOutput = false;
     let whenBusy = "reject";
+    let afterJob = null;
     while (args.length) {
       const option = args.shift();
       if (option === "--json") jsonOutput = true;
-      else if (option === "--when-busy") whenBusy = args.shift();
+      else if (option === "--when-busy") {
+        whenBusy = args.shift();
+        if (!whenBusy) throw new Error("--when-busy requires a value");
+      } else if (option === "--after-job") {
+        afterJob = args.shift();
+        if (!afterJob) throw new Error("--after-job requires a job id");
+      }
       else throw new Error(`unknown Team Cast dispatch option: ${option}`);
     }
     if (
       !logicalMessageId ||
-      !["reject", "when-idle"].includes(whenBusy)
+      !["reject", "when-idle", "after-turn"].includes(whenBusy)
     ) {
       throw new Error(
-        "Team Cast --when-busy must be reject or when-idle",
+        "Team Cast --when-busy must be reject, when-idle, or after-turn",
       );
+    }
+    if (afterJob && whenBusy !== "reject") {
+      throw new Error("Team Cast --after-job cannot be combined with --when-busy");
     }
     const teamRecord = await readDeliveryLedgerIndexed(logicalMessageId);
     if (!teamRecord?.teamDeliveries) {
@@ -3484,6 +3495,15 @@ async function commandTeam(args) {
     const needsClaude = pending.some((delivery) =>
       delivery.targetNodeKey.startsWith("claude:"),
     );
+    if (afterJob) {
+      const triggerJob = readJob(afterJob);
+      if (!triggerJob || typeof triggerJob.status !== "string") {
+        throw new Error(`after-job trigger does not exist or is invalid: ${afterJob}`);
+      }
+      if (needsClaude) {
+        throw new Error("Team Cast --after-job currently requires Codex recipients");
+      }
+    }
     let sourceSession = null;
     let claudePeers = [];
     if (needsClaude) {
@@ -3545,11 +3565,32 @@ async function commandTeam(args) {
             }
             matches.sort((left, right) => left.name.localeCompare(right.name));
             const thread = await readThreadMetadata(client, targetThreadId);
-            if (activeTurnId(thread)) {
+            if (afterJob) {
+              return {
+                transport: "codex-app-server",
+                scheduleWakePolicy: "after-job",
+                triggerJobId: afterJob,
+                session: matches[0],
+                allowResume: matches.every(sessionAllowsAppServerResume),
+                thread,
+              };
+            }
+            const currentTurnId = activeTurnId(thread);
+            if (currentTurnId) {
               if (whenBusy === "when-idle") {
                 return {
                   transport: "codex-app-server",
                   scheduleWakePolicy: "when-idle",
+                  session: matches[0],
+                  allowResume: matches.every(sessionAllowsAppServerResume),
+                  thread,
+                };
+              }
+              if (whenBusy === "after-turn") {
+                return {
+                  transport: "codex-app-server",
+                  scheduleWakePolicy: "after-turn",
+                  triggerTurnId: currentTurnId,
                   session: matches[0],
                   allowResume: matches.every(sessionAllowsAppServerResume),
                   thread,

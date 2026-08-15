@@ -380,6 +380,14 @@ If one Busy fallback cannot enter the bounded target lane, that recipient stays
 recorded, siblings retain independent outcomes, and there is no automatic
 retry.
 
+Team `after-turn` pins the exact active turn observed for each Busy Codex
+recipient. Team `after-job` pins one exact existing Job for every pending Codex
+recipient and rejects mixed-runtime fan-out before mutation. The schedule event
+cannot be rebound to another policy or trigger, successor identity is not
+followed, and both policies retain the original Team expiry. Trigger completion
+only opens the Scheduler timing gate; it cannot grant, approve, delegate, infer
+task completion, or broaden the recipient's permission profile.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

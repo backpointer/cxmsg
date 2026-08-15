@@ -491,14 +491,31 @@ function expectedTeamDeliveryTransport(delivery) {
 }
 
 function validTeamSchedule(record) {
-  return Boolean(
-    record?.schemaVersion === 1 &&
+  if (
+    !(
+      record?.schemaVersion === 1 &&
       record.recordType === "team-delivery-schedule" &&
       UUID_PATTERN.test(record.messageId || "") &&
       UUID_PATTERN.test(record.deliveryId || "") &&
-      record.wakePolicy === "when-idle" &&
-      validTimestamp(record.scheduledAt),
-  );
+      SCHEDULED_WAKE_POLICIES.includes(record.wakePolicy) &&
+      validTimestamp(record.scheduledAt)
+    )
+  ) {
+    return false;
+  }
+  if (record.wakePolicy === "after-turn") {
+    return (
+      UUID_PATTERN.test(record.triggerTurnId || "") &&
+      record.triggerJobId === null
+    );
+  }
+  if (record.wakePolicy === "after-job") {
+    return (
+      record.triggerTurnId === null &&
+      UUID_PATTERN.test(record.triggerJobId || "")
+    );
+  }
+  return record.triggerTurnId == null && record.triggerJobId == null;
 }
 
 function validClaim(record) {
@@ -858,12 +875,13 @@ function validTeamDeliveryProjection(candidate, messageId, initialWakePolicy) {
   }
   const scheduled = candidate.schedule != null;
   if (
-    scheduled !== (candidate.wakePolicy === "when-idle") ||
+    scheduled !== SCHEDULED_WAKE_POLICIES.includes(candidate.wakePolicy) ||
     (!scheduled && candidate.wakePolicy !== initialWakePolicy) ||
     (scheduled &&
       (!validTeamSchedule(candidate.schedule) ||
         candidate.schedule.messageId !== messageId ||
         candidate.schedule.deliveryId !== candidate.deliveryId ||
+        candidate.schedule.wakePolicy !== candidate.wakePolicy ||
         !candidate.targetNodeKey.startsWith("codex:")))
   ) {
     return false;
@@ -1403,7 +1421,9 @@ function applyDeliveryEvent(projected, record) {
     const initialWakePolicy = projected.logicalMessage.teamCast.wakePolicy;
     if (
       !delivery ||
-      ![initialWakePolicy, "when-idle"].includes(delivery.wakePolicy)
+      ![initialWakePolicy, ...SCHEDULED_WAKE_POLICIES].includes(
+        delivery.wakePolicy,
+      )
     ) {
       throw new Error(`invalid Team Cast Delivery event: ${record.messageId}`);
     }
@@ -1420,14 +1440,14 @@ function applyDeliveryEvent(projected, record) {
       ) {
         throw new Error(`invalid Team Cast schedule: ${record.messageId}`);
       }
-      delivery.wakePolicy = "when-idle";
+      delivery.wakePolicy = record.wakePolicy;
       delivery.state = "scheduled";
       delivery.schedule = structuredClone(record);
       delivery.updatedAt = record.scheduledAt;
     } else if (record.recordType === "delivery-claim") {
       if (
         !validClaim(record) ||
-        delivery.wakePolicy !== "when-idle" ||
+        !SCHEDULED_WAKE_POLICIES.includes(delivery.wakePolicy) ||
         delivery.state !== "scheduled" ||
         delivery.attempts.length !== 0
       ) {
@@ -1484,7 +1504,7 @@ function applyDeliveryEvent(projected, record) {
         delivery.state === "prepared" &&
         record.claimId === null;
       const scheduled =
-        delivery.wakePolicy === "when-idle" &&
+        SCHEDULED_WAKE_POLICIES.includes(delivery.wakePolicy) &&
         delivery.state === "scheduled" &&
         delivery.claim?.claimId === record.claimId &&
         Date.parse(record.startedAt) >= Date.parse(delivery.updatedAt);
@@ -1507,7 +1527,7 @@ function applyDeliveryEvent(projected, record) {
       const expiry =
         record.state === "expired" &&
         record.attemptId === null &&
-        delivery.wakePolicy === "when-idle" &&
+        SCHEDULED_WAKE_POLICIES.includes(delivery.wakePolicy) &&
         delivery.state === "scheduled" &&
         delivery.attempts.length === 0 &&
         delivery.claim === null;
@@ -2414,6 +2434,8 @@ export async function scheduleTeamCastRecipientDelivery(
   {
     now = new Date().toISOString(),
     wakePolicy = "when-idle",
+    triggerTurnId = null,
+    triggerJobId = null,
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
     segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
   } = {},
@@ -2423,8 +2445,8 @@ export async function scheduleTeamCastRecipientDelivery(
     throw new Error("Team Cast schedule target must be a stable Node key");
   }
   targetNodeKey = targetNodeKey.toLowerCase();
-  if (wakePolicy !== "when-idle") {
-    throw new Error("Team Cast scheduled fallback must be when-idle");
+  if (!SCHEDULED_WAKE_POLICIES.includes(wakePolicy)) {
+    throw new Error("Team Cast schedule wake policy is unsupported");
   }
   if (!validTimestamp(now)) {
     throw new Error("Team Cast schedule timestamp is invalid");
@@ -2440,7 +2462,9 @@ export async function scheduleTeamCastRecipientDelivery(
     if (delivery.schedule) {
       if (
         delivery.wakePolicy === wakePolicy &&
-        delivery.state === "scheduled"
+        delivery.state === "scheduled" &&
+        (delivery.schedule.triggerTurnId ?? null) === triggerTurnId &&
+        (delivery.schedule.triggerJobId ?? null) === triggerJobId
       ) {
         return { record: structuredClone(record), scheduled: false };
       }
@@ -2475,6 +2499,8 @@ export async function scheduleTeamCastRecipientDelivery(
       messageId,
       deliveryId: delivery.deliveryId,
       wakePolicy,
+      triggerTurnId,
+      triggerJobId,
       scheduledAt: now,
     };
     if (!validTeamSchedule(event)) throw new Error("invalid Team Cast schedule");

@@ -27,13 +27,17 @@ const ids = {
   worker: "71345678-8234-4234-8234-123456789abc",
   turn: "81345678-8234-4234-8234-123456789abc",
   expiredMessage: "91345678-8234-4234-8234-123456789abc",
+  afterTurnMessage: "a1345678-8234-4234-8234-123456789abc",
+  afterJobMessage: "b1345678-8234-4234-8234-123456789abc",
+  triggerTurn: "c1345678-8234-4234-8234-123456789abc",
+  triggerJob: "d1345678-8234-4234-8234-123456789abc",
 };
 const senderNodeKey = `codex:${ids.sender}`;
 const targetNodeKey = `codex:${ids.target}`;
 const createdAt = "2026-08-15T00:00:00.000Z";
 const expiresAt = "2026-08-15T00:15:00.000Z";
 
-async function scheduledTeamRecord(messageId = ids.message) {
+async function scheduledTeamRecord(messageId = ids.message, schedule = {}) {
   const message = "deliver once after the Team recipient becomes idle";
   const body = await bodies.storeMessageBody({
     messageId,
@@ -85,9 +89,17 @@ async function scheduledTeamRecord(messageId = ids.message) {
   await ledger.scheduleTeamCastRecipientDelivery(
     messageId,
     targetNodeKey,
-    { now: "2026-08-15T00:00:01.000Z" },
+    { now: "2026-08-15T00:00:01.000Z", ...schedule },
   );
   await ledger.rebuildDeliveryLedgerIndex();
+}
+
+function teamCandidate(record) {
+  return {
+    ...structuredClone(record),
+    delivery: structuredClone(record.teamDeliveries[0]),
+    teamRecipientNodeKey: record.teamDeliveries[0].targetNodeKey,
+  };
 }
 
 test("Team when-idle survives Busy and Scheduler restart boundaries", async () => {
@@ -165,4 +177,72 @@ test("an expired Team fallback becomes terminal without target access", async ()
   assert.equal(stored.teamDeliveries[0].state, "expired");
   assert.equal(stored.teamDeliveries[0].attempts.length, 0);
   assert.equal(stored.teamDeliveries[0].claim, null);
+});
+
+test("Team after-turn keeps the exact recipient trigger across rebuilds", async () => {
+  await scheduledTeamRecord(ids.afterTurnMessage, {
+    wakePolicy: "after-turn",
+    triggerTurnId: ids.triggerTurn,
+  });
+  const stored = await ledger.readDeliveryLedgerIndexed(ids.afterTurnMessage);
+  assert.equal(stored.teamDeliveries[0].wakePolicy, "after-turn");
+  assert.equal(stored.teamDeliveries[0].schedule.triggerTurnId, ids.triggerTurn);
+  assert.equal(stored.teamDeliveries[0].schedule.triggerJobId, null);
+
+  let status = "inProgress";
+  const readiness = () =>
+    scheduler.scheduledTriggerReadiness(teamCandidate(stored), {}, {
+      findTurn: async (_client, threadId, turnId) => {
+        assert.equal(threadId, ids.target);
+        assert.equal(turnId, ids.triggerTurn);
+        return { id: ids.triggerTurn, status };
+      },
+    });
+  assert.deepEqual(await readiness(), { state: "waiting-trigger" });
+  status = "completed";
+  assert.deepEqual(await readiness(), { state: "eligible" });
+
+  await ledger.rebuildDeliveryLedgerIndex();
+  const rebuilt = await ledger.readDeliveryLedgerIndexed(ids.afterTurnMessage);
+  assert.equal(rebuilt.teamDeliveries[0].schedule.triggerTurnId, ids.triggerTurn);
+});
+
+test("Team after-job waits for the exact durable Job and rejects trigger changes", async () => {
+  await scheduledTeamRecord(ids.afterJobMessage, {
+    wakePolicy: "after-job",
+    triggerJobId: ids.triggerJob,
+  });
+  const stored = await ledger.readDeliveryLedgerIndexed(ids.afterJobMessage);
+  assert.equal(stored.teamDeliveries[0].wakePolicy, "after-job");
+  assert.equal(stored.teamDeliveries[0].schedule.triggerTurnId, null);
+  assert.equal(stored.teamDeliveries[0].schedule.triggerJobId, ids.triggerJob);
+
+  let status = "running";
+  const readiness = () =>
+    scheduler.scheduledTriggerReadiness(teamCandidate(stored), {}, {
+      job: (jobId) => {
+        assert.equal(jobId, ids.triggerJob);
+        return { jobId: ids.triggerJob, status };
+      },
+      pendingJob: (job) => job.status === "running",
+      refreshPendingJob: async (job) => job,
+    });
+  assert.deepEqual(await readiness(), { state: "waiting-trigger" });
+  status = "completed";
+  assert.deepEqual(await readiness(), { state: "eligible" });
+
+  const repeated = await ledger.scheduleTeamCastRecipientDelivery(
+    ids.afterJobMessage,
+    targetNodeKey,
+    { wakePolicy: "after-job", triggerJobId: ids.triggerJob },
+  );
+  assert.equal(repeated.scheduled, false);
+  await assert.rejects(
+    ledger.scheduleTeamCastRecipientDelivery(
+      ids.afterJobMessage,
+      targetNodeKey,
+      { wakePolicy: "when-idle" },
+    ),
+    /another outcome/,
+  );
 });

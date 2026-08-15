@@ -128,6 +128,8 @@ Dispatch prepared Codex or Claude recipients explicitly:
 ```bash
 cxmsg team dispatch <logical-message-id> --json
 cxmsg team dispatch <logical-message-id> --when-busy when-idle --json
+cxmsg team dispatch <logical-message-id> --when-busy after-turn --json
+cxmsg team dispatch <logical-message-id> --after-job <job-uuid> --json
 ```
 
 Before the first attempt it verifies that every pending recipient is still the
@@ -143,6 +145,16 @@ exact Busy Codex recipient moves durably from `prepared` to `scheduled`, while
 idle siblings dispatch normally. This transition creates no attempt and uses
 the existing Delivery Ledger and Scheduler rather than a Team-specific queue.
 The default `reject` behavior remains unchanged.
+
+`--when-busy after-turn` is another Busy-only fallback. It stores the exact
+active turn ID separately for each Busy Codex recipient; idle siblings dispatch
+normally. `--after-job <job-uuid>` is an explicit whole-invocation timing gate:
+it verifies one existing Job and schedules every pending Codex recipient, even
+if currently Idle. Mixed Claude recipients are rejected before any Delivery
+transition because this Scheduler path is Codex-only. A schedule event stores
+exactly one trigger ID, and idempotent replay requires both wake policy and
+trigger to match. Turn or Job completion is eligibility evidence only and
+never approval, Delegation authority, model completion, or task completion.
 
 After preflight, recipients dispatch sequentially. Each recipient gets one
 durable attempt and exactly one outcome record. Codex acceptance is
@@ -172,5 +184,9 @@ The JSON result includes `deliveryStarted: false` when resolving. Membership,
 role, and plan possession are coordination metadata only; none authorizes work,
 grants a permission, approves a prompt, or expands a peer's authority.
 
-`after-turn`/`after-job` Team policies and digest composition remain separately
-gated future work.
+Version 0.40.0 adds per-recipient `after-turn` and `after-job` Team scheduling
+to the same Delivery Ledger and Scheduler used by ordinary Peer Messages.
+Each durable Team schedule event pins its exact trigger, survives journal
+rebuild and Scheduler restart, shares the existing target-lane FIFO and claim
+lease, and rejects policy or trigger reinterpretation. Digest composition
+remains separately gated future work.

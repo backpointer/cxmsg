@@ -61,6 +61,8 @@ const ids = {
   wakeAllWideMessage: "72345678-7234-4234-8234-123456789abc",
   wakeAllWidePlan: "82345678-7234-4234-8234-123456789abc",
   wakeAllWideSelection: "92345678-7234-4234-8234-123456789abc",
+  afterTurnMessage: "a2345678-7234-4234-8234-123456789abc",
+  afterTurnTrigger: "b2345678-7234-4234-8234-123456789abc",
 };
 const keys = Object.fromEntries(
   ["sender", "first", "second", "cross"].map((name) => [
@@ -832,6 +834,41 @@ test("a Busy Team Cast recipient can enter the shared when-idle ledger", async (
     ).state,
     "scheduled",
   );
+});
+
+test("Team dispatch persists an exact per-recipient after-turn trigger", async () => {
+  await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.fanoutSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.afterTurnMessage,
+    message: "deliver the second pointer after its current turn",
+  });
+  const result = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.afterTurnMessage },
+    {
+      preflightRecipient: async ({ targetNodeKey }) =>
+        targetNodeKey === keys.second
+          ? {
+              transport: "codex-app-server",
+              scheduleWakePolicy: "after-turn",
+              triggerTurnId: ids.afterTurnTrigger,
+            }
+          : { transport: "codex-app-server" },
+      dispatchRecipient: async () => ({
+        state: "turn_started",
+        turnId: ids.fanoutTurn,
+        transportResult: "started",
+        errorCode: null,
+      }),
+    },
+  );
+  const scheduled = result.record.teamDeliveries.find(
+    (delivery) => delivery.targetNodeKey === keys.second,
+  );
+  assert.equal(scheduled.state, "scheduled");
+  assert.equal(scheduled.wakePolicy, "after-turn");
+  assert.equal(scheduled.schedule.triggerTurnId, ids.afterTurnTrigger);
+  assert.equal(scheduled.schedule.triggerJobId, null);
 });
 
 test("wake-all reuses recipient dispatch and Busy fallback without implicit steering", async () => {

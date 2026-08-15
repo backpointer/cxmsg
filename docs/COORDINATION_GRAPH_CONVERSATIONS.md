@@ -814,6 +814,14 @@ reuses the same cross-runtime recipient attempts and Codex `when-idle`
 fallback. A saturated fallback remains `prepared` with visible
 `schedule_failed` output while sibling outcomes continue independently.
 
+Version 0.40.0 completes the initial Team scheduling policies without adding a
+second queue. Each Codex recipient may durably pin `when-idle`, one exact
+`after-turn` turn, or one exact `after-job` Job in its own schedule event. The
+shared Scheduler reads that recipient event, preserves target-lane FIFO and
+claim leases across restart, and treats trigger completion only as timing
+eligibility. Policy or trigger changes are idempotency conflicts; Claude
+recipients never enter this Codex-only scheduled path.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

@@ -192,6 +192,12 @@ export async function scheduledTriggerReadiness(
   } = {},
 ) {
   const route = record.logicalMessage.route;
+  const triggerTurnId = record.teamRecipientNodeKey
+    ? record.delivery.schedule?.triggerTurnId
+    : route?.trigger_turn_id;
+  const triggerJobId = record.teamRecipientNodeKey
+    ? record.delivery.schedule?.triggerJobId
+    : route?.trigger_job_id;
   if (record.delivery.wakePolicy === "when-idle") return { state: "eligible" };
   if (record.delivery.wakePolicy === "after-turn") {
     let turn;
@@ -199,13 +205,13 @@ export async function scheduledTriggerReadiness(
       turn = await findTurn(
         client,
         record.delivery.targetThreadId,
-        route?.trigger_turn_id,
+        triggerTurnId,
       );
     } catch {
       return { state: "blocked", errorCode: "ETRIGGERUNAVAILABLE" };
     }
     if (!turn) return { state: "blocked", errorCode: "ETRIGGERNOTFOUND" };
-    if (turn.id !== route?.trigger_turn_id) {
+    if (turn.id !== triggerTurnId) {
       return { state: "blocked", errorCode: "ETRIGGERMISMATCH" };
     }
     if (turn.status === "inProgress") return { state: "waiting-trigger" };
@@ -216,7 +222,7 @@ export async function scheduledTriggerReadiness(
   if (record.delivery.wakePolicy === "after-job") {
     let current;
     try {
-      current = job(route?.trigger_job_id);
+      current = job(triggerJobId);
       if (current && pendingJob(current)) {
         current = await refreshPendingJob(current);
       }
@@ -224,7 +230,7 @@ export async function scheduledTriggerReadiness(
       return { state: "blocked", errorCode: "ETRIGGERUNAVAILABLE" };
     }
     if (!current) return { state: "blocked", errorCode: "ETRIGGERNOTFOUND" };
-    if (current.jobId !== route?.trigger_job_id) {
+    if (current.jobId !== triggerJobId) {
       return { state: "blocked", errorCode: "ETRIGGERMISMATCH" };
     }
     if (pendingJob(current)) return { state: "waiting-trigger" };

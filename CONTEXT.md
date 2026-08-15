@@ -14,6 +14,9 @@ they carry different authority and delivery semantics.
   Trigger becomes eligible and the target can accept it.
 - **Trigger**: the condition that makes a Scheduled Peer Message eligible.
   Initial trigger kinds are `when-idle`, `after-turn`, and `after-job`.
+- **Team Recipient Trigger**: one exact Trigger persisted on one prepared Team
+  recipient Delivery. It may pin that recipient's current turn or one existing
+  Job, controls timing only, and cannot be rebound or treated as authority.
 - **Delivery**: one durable recipient-specific record for a Logical Message.
   It exists before any transport attempt and records only provable scheduling,
   transport, turn, reply, failure, expiry, cancellation, or unknown evidence.
