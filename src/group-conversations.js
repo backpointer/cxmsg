@@ -283,6 +283,10 @@ function validGroup(record) {
   return true;
 }
 
+export function validGroupConversationRecord(record) {
+  return validGroup(record);
+}
+
 function secureRead(filename, validator, maxBytes = RECORD_MAX_BYTES) {
   try {
     const metadata = lstatSync(filename);

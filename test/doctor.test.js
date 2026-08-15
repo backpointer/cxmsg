@@ -16,12 +16,14 @@ import {
   diagnosticCheck,
   inspectAppServer,
   inspectBridges,
+  inspectConversationState,
   inspectJobs,
   inspectMessageBodies,
   inspectNodeDirectory,
   inspectRouteState,
   inspectState,
 } from "../src/inspectors.js";
+import { directConversationId } from "../src/conversations.js";
 import { CLAUDE_BRIDGE_IMPLEMENTATION_REVISION } from "../src/claude-bridge.js";
 import { failedProbe } from "../src/socket-probe.js";
 import { rebuildDeliveryLedgerRecords } from "../src/delivery-ledger.js";
@@ -214,6 +216,150 @@ test("Route Inspector validates scheduled Job trigger references without dispatc
     assert.equal(inspect().status, "pass");
     await fs.rm(path.join(jobs, `${jobId}.json`));
     assert.equal(inspect().errorCode, "ETRIGGERJOBMISSING");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Conversation Inspector detects missing sources and fan-out plans without exposing content", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-conversations-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const directDir = path.join(root, "conversations", "direct");
+    const groupDir = path.join(root, "conversations", "group");
+    const planDir = path.join(root, "team-casts", "plans");
+    const selectionDir = path.join(root, "team-casts", "selections");
+    const ledgerSegments = path.join(root, "delivery-ledger", "segments");
+    const ledgerQuarantine = path.join(root, "delivery-ledger", "quarantine");
+    for (const directory of [
+      directDir,
+      groupDir,
+      planDir,
+      selectionDir,
+      ledgerSegments,
+      ledgerQuarantine,
+    ]) {
+      await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+    }
+
+    const first = "codex:12345678-1234-4234-8234-123456789abc";
+    const second = "codex:22345678-1234-4234-8234-123456789abc";
+    const third = "claude:32345678-1234-4234-8234-123456789abc";
+    const members = [first, second].sort();
+    const conversationId = directConversationId(members[0], members[1]);
+    const directMessageId = "42345678-1234-4234-8234-123456789abc";
+    await writeJson(path.join(directDir, `${conversationId}.json`), {
+      version: 1,
+      kind: "direct",
+      conversationId,
+      members,
+      currentMembers: members,
+      nextSequence: 2,
+      messages: [{
+        version: 1,
+        conversationId,
+        sequence: 1,
+        logicalMessageId: directMessageId,
+        senderNodeKey: first,
+        recipientNodeKey: second,
+        sourceKind: "delivery-ledger",
+        replyToMessageId: null,
+        parentConversationId: null,
+        crossConversationReply: false,
+        recordedAt: "2026-08-15T00:01:00.000Z",
+      }],
+      migrations: [],
+      createdAt: "2026-08-15T00:00:00.000Z",
+      updatedAt: "2026-08-15T00:01:00.000Z",
+    });
+
+    const groupConversationId = "52345678-1234-4234-8234-123456789abc";
+    const groupMessageId = "62345678-1234-4234-8234-123456789abc";
+    const groupMembers = [first, second, third].sort();
+    await writeJson(path.join(groupDir, `${groupConversationId}.json`), {
+      version: 1,
+      kind: "group",
+      conversationId: groupConversationId,
+      label: "doctor-group",
+      projectId: "72345678-1234-4234-8234-123456789abc",
+      membershipVersion: 1,
+      membershipSnapshots: [{
+        version: 1,
+        members: groupMembers,
+        createdAt: "2026-08-15T00:00:00.000Z",
+      }],
+      nextSequence: 2,
+      messages: [{
+        version: 1,
+        conversationId: groupConversationId,
+        sequence: 1,
+        logicalMessageId: groupMessageId,
+        senderNodeKey: first,
+        membershipVersion: 1,
+        recipientNodeKeys: groupMembers.filter((member) => member !== first),
+        replyToMessageId: null,
+        hopCount: 0,
+        expiry: "2026-08-15T01:01:00.000Z",
+        bodyBytes: 27,
+        bodySha256: createHash("sha256").update("private group message body").digest("hex"),
+        recordedAt: "2026-08-15T00:01:00.000Z",
+      }],
+      createdAt: "2026-08-15T00:00:00.000Z",
+      updatedAt: "2026-08-15T00:01:00.000Z",
+    });
+
+    const planId = "82345678-1234-4234-8234-123456789abc";
+    const missingPlanId = "92345678-1234-4234-8234-123456789abc";
+    const selectionId = "a2345678-1234-4234-8234-123456789abc";
+    const projectId = "b2345678-1234-4234-8234-123456789abc";
+    const recipientNodeKeys = [second, third].sort();
+    const recipientSetSha256 = createHash("sha256")
+      .update(JSON.stringify(recipientNodeKeys))
+      .digest("hex");
+    await writeJson(path.join(planDir, `${planId}.json`), {
+      version: 1,
+      planId,
+      senderNodeKey: first,
+      projectId,
+      selector: {
+        kind: "conversation",
+        conversationId: groupConversationId,
+        conversationKind: "group",
+        membershipVersion: 1,
+      },
+      recipientNodeKeys,
+      recipientSetSha256,
+      estimatedWakeTurns: 2,
+      createdAt: "2026-08-15T00:00:00.000Z",
+      expiresAt: "2026-08-15T00:15:00.000Z",
+    });
+    await writeJson(path.join(selectionDir, `${selectionId}.json`), {
+      version: 1,
+      selectionId,
+      planId: missingPlanId,
+      senderNodeKey: first,
+      projectId,
+      wakePolicy: "wake-all",
+      recipientNodeKeys,
+      recipientSetSha256,
+      estimatedWakeTurns: 2,
+      createdAt: "2026-08-15T00:01:00.000Z",
+      expiresAt: "2026-08-15T00:15:00.000Z",
+    });
+
+    const before = await stateSnapshot(root);
+    const checks = inspectConversationState({ stateDir: root });
+    const after = await stateSnapshot(root);
+    assert.deepEqual(after, before);
+    assert.ok(checks.some((check) => check.errorCode === "ECONVERSATIONSOURCE"));
+    assert.ok(checks.some((check) => check.errorCode === "EGROUPFANOUT"));
+    assert.ok(
+      checks.some((check) => check.errorCode === "ETEAMCASTSELECTIONPLAN"),
+    );
+    assert.doesNotMatch(
+      JSON.stringify(checks),
+      /private group message body|[0-9a-f]{64}/,
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

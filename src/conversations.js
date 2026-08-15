@@ -214,6 +214,10 @@ function validConversation(record) {
   return JSON.stringify(projectedMembers) === JSON.stringify(record.currentMembers);
 }
 
+export function validDirectConversationRecord(record) {
+  return validConversation(record);
+}
+
 function secureRead(filename) {
   try {
     const metadata = lstatSync(filename);

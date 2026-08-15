@@ -231,7 +231,7 @@ and no quiet drop, implicit wake-all, or Project leakage.
 - [x] Add current, one-hour, 24-hour, and all-history filters.
 - [x] Add Node, Conversation, and Delivery detail projections with redacted
       paths, Endpoints, bodies, and capability data by default.
-- [ ] Add Directory, Ledger, Conversation, Scheduler, fan-out, successor, and
+- [x] Add Directory, Ledger, Conversation, Scheduler, fan-out, successor, and
       Tombstone consistency findings to Doctor.
 - [x] Keep the graph and Doctor read-only and start zero model turns.
 

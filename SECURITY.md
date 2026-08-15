@@ -422,6 +422,15 @@ and turn identifiers. Stable Node, Project, Conversation, and Logical Message
 IDs remain visible because they are the correlation keys the diagnostic view
 exists to explain.
 
+Doctor also cross-checks Direct and Group Conversation identity against the
+Node Directory, their metadata-only message sources against retained Ledger or
+Job evidence, and Group or Team Cast recipient sets against per-recipient
+Delivery records. It emits one aggregate finding per Conversation or fan-out,
+never Message Body text, body digests, recipient capability material, Job task
+or result content, or Endpoint addresses. A missing source or recipient is
+diagnostic evidence only and cannot authorize replay, refan-out, membership
+change, or lifecycle repair.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

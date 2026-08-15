@@ -8,6 +8,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { probeAppServerSocket, withAppServer } from "./app-server-client.js";
+import { validDirectConversationRecord } from "./conversations.js";
 import {
   CLAUDE_BRIDGE_IMPLEMENTATION_REVISION,
   probeClaudeBridge,
@@ -25,6 +26,7 @@ import {
   ROUTE_RECONCILE_GRACE_MS,
   SCHEDULER_HEARTBEAT_STALE_MS,
 } from "./delivery-policy.js";
+import { validGroupConversationRecord } from "./group-conversations.js";
 import { hostRelayRequest } from "./host-relay.js";
 import {
   MESSAGE_BODY_SEGMENT_BYTES,
@@ -35,6 +37,10 @@ import { processIdentity, processState, serviceEvidence } from "./process-state.
 import { EVENT_LOG_ARCHIVES, EVENT_LOG_MAX_BYTES } from "./runtime.js";
 import { failedProbe } from "./socket-probe.js";
 import { readThreadMetadata } from "./thread-activity.js";
+import {
+  validTeamCastPlanRecord,
+  validTeamCastSelectionRecord,
+} from "./team-cast.js";
 import { validTurnLifecycleState } from "./turn-lifecycle.js";
 import { CXMSG_VERSION } from "./version.js";
 
@@ -493,6 +499,7 @@ function inspectDeliveryLedger(
   );
 
   let records = [];
+  let projections = null;
   let ledgerProjectionDigests = new Map();
   try {
     const rebuilt = rebuildDeliveryLedgerRecords(events);
@@ -502,7 +509,8 @@ function inspectDeliveryLedger(
         createHash("sha256").update(JSON.stringify(record)).digest("hex"),
       ]),
     );
-    records = [...rebuilt.values()].map((record) => {
+    projections = [...rebuilt.values()];
+    records = projections.map((record) => {
       const message = record.logicalMessage;
       const delivery = record.delivery;
       const activeAttempt = delivery.attempts.at(-1) || null;
@@ -715,7 +723,7 @@ function inspectDeliveryLedger(
       }),
     );
   }
-  return { checks, records };
+  return { checks, records, projections };
 }
 
 function validSession(record, stem) {
@@ -1901,6 +1909,348 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
         }),
       );
     }
+  }
+  return checks;
+}
+
+function exactStringSet(left, right) {
+  return (
+    Array.isArray(left) &&
+    Array.isArray(right) &&
+    JSON.stringify([...left].sort()) === JSON.stringify([...right].sort())
+  );
+}
+
+function identityRecordMap(nodes, tombstones) {
+  return new Map(
+    [...nodes.records, ...tombstones.records].map((record) => [
+      record.nodeKey,
+      record,
+    ]),
+  );
+}
+
+export function inspectConversationState({ stateDir, jobs = [] } = {}) {
+  const direct = scanJsonDirectory({
+    stateDir,
+    directoryName: "conversations/direct",
+    scope: "direct-conversations",
+    maxRecordBytes: 4 * 1024 * 1024,
+    validate: (record, stem) => ({
+      valid:
+        validDirectConversationRecord(record) &&
+        record.conversationId === stem.toLowerCase(),
+      errorCode: "EDIRECTCONVERSATIONSCHEMA",
+    }),
+  });
+  const groups = scanJsonDirectory({
+    stateDir,
+    directoryName: "conversations/group",
+    scope: "group-conversations",
+    maxRecordBytes: 4 * 1024 * 1024,
+    validate: (record, stem) => ({
+      valid:
+        validGroupConversationRecord(record) &&
+        record.conversationId === stem.toLowerCase(),
+      errorCode: "EGROUPCONVERSATIONSCHEMA",
+    }),
+  });
+  const plans = scanJsonDirectory({
+    stateDir,
+    directoryName: "team-casts/plans",
+    scope: "team-cast-plans",
+    maxRecordBytes: 64 * 1024,
+    validate: (record, stem) => ({
+      valid:
+        validTeamCastPlanRecord(record) && record.planId === stem.toLowerCase(),
+      errorCode: "ETEAMCASTPLANSCHEMA",
+    }),
+  });
+  const selections = scanJsonDirectory({
+    stateDir,
+    directoryName: "team-casts/selections",
+    scope: "team-cast-selections",
+    maxRecordBytes: 64 * 1024,
+    validate: (record, stem) => ({
+      valid:
+        validTeamCastSelectionRecord(record) &&
+        record.selectionId === stem.toLowerCase(),
+      errorCode: "ETEAMCASTSELECTIONSCHEMA",
+    }),
+  });
+  const projects = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/projects",
+    scope: "coordination-projects",
+    validate: validDirectoryProject,
+  });
+  const nodes = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/nodes",
+    scope: "coordination-nodes",
+    validate: validDirectoryNode,
+  });
+  const tombstones = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/tombstones/nodes",
+    scope: "coordination-node-tombstones",
+    validate: validDirectoryNodeTombstone,
+  });
+  const ledger = inspectDeliveryLedger(stateDir);
+  const checks = [
+    ...direct.checks,
+    ...groups.checks,
+    ...plans.checks,
+    ...selections.checks,
+  ];
+  const identities = identityRecordMap(nodes, tombstones);
+  const projectIds = new Set(projects.records.map((record) => record.projectId));
+  const projections = Array.isArray(ledger.projections)
+    ? ledger.projections
+    : null;
+  const ledgerByMessage = new Map(
+    (projections || []).map((record) => [record.logicalMessage.messageId, record]),
+  );
+  const jobsById = new Map(jobs.map((record) => [record.jobId, record]));
+
+  for (const conversation of direct.records) {
+    const label = safeLabel(conversation.conversationId);
+    const referencedNodes = new Set([
+      ...conversation.members,
+      ...conversation.currentMembers,
+      ...conversation.migrations.flatMap((migration) => [
+        migration.predecessorNodeKey,
+        migration.successorNodeKey,
+      ]),
+    ]);
+    const records = [...referencedNodes].map((nodeKey) => identities.get(nodeKey));
+    const identityValid = records.every(Boolean);
+    const referencedProjects = new Set(records.filter(Boolean).map((record) => record.projectId));
+    const projectValid =
+      identityValid &&
+      referencedProjects.size === 1 &&
+      projectIds.has([...referencedProjects][0]);
+    checks.push(
+      diagnosticCheck({
+        id: `direct-conversations.identity.${label}`,
+        scope: "direct-conversations",
+        status: identityValid && projectValid ? "pass" : "fail",
+        summary:
+          identityValid && projectValid
+            ? "Direct Conversation members resolve to one retained Project identity"
+            : "Direct Conversation member or Project identity is missing or inconsistent",
+        verification: "directory",
+        errorCode:
+          identityValid && projectValid ? null : "ECONVERSATIONIDENTITY",
+      }),
+    );
+    let sourceValid = true;
+    let sourceUnavailable = false;
+    for (const message of conversation.messages) {
+      if (message.sourceKind === "claude-job") {
+        if (!jobsById.has(message.logicalMessageId)) sourceValid = false;
+        continue;
+      }
+      if (!projections) {
+        sourceUnavailable = true;
+        continue;
+      }
+      const source = ledgerByMessage.get(message.logicalMessageId);
+      if (
+        !source ||
+        source.logicalMessage.senderNodeKey !== message.senderNodeKey ||
+        source.delivery?.targetNodeKey !== message.recipientNodeKey ||
+        source.logicalMessage.conversationId !== message.conversationId ||
+        source.logicalMessage.conversationSequence !== message.sequence
+      ) {
+        sourceValid = false;
+      }
+    }
+    checks.push(
+      diagnosticCheck({
+        id: `direct-conversations.sources.${label}`,
+        scope: "direct-conversations",
+        status: sourceUnavailable ? "unknown" : sourceValid ? "pass" : "fail",
+        summary: sourceUnavailable
+          ? "Direct Conversation source evidence could not be rebuilt"
+          : sourceValid
+            ? "Direct Conversation messages match their retained Ledger or Job source"
+            : "Direct Conversation message source is missing or mismatched",
+        verification: sourceUnavailable ? "unavailable" : "records",
+        errorCode: sourceUnavailable
+          ? "ECONVERSATIONLEDGERUNAVAILABLE"
+          : sourceValid
+            ? null
+            : "ECONVERSATIONSOURCE",
+      }),
+    );
+  }
+
+  for (const conversation of groups.records) {
+    const label = safeLabel(conversation.conversationId);
+    const members = new Set(
+      conversation.membershipSnapshots.flatMap((snapshot) => snapshot.members),
+    );
+    const memberRecords = [...members].map((nodeKey) => identities.get(nodeKey));
+    const identityValid = memberRecords.every(
+      (record) => record?.projectId === conversation.projectId,
+    );
+    const projectValid = projectIds.has(conversation.projectId);
+    checks.push(
+      diagnosticCheck({
+        id: `group-conversations.identity.${label}`,
+        scope: "group-conversations",
+        status: identityValid && projectValid ? "pass" : "fail",
+        summary:
+          identityValid && projectValid
+            ? "Group Conversation snapshots resolve to their retained Project identity"
+            : "Group Conversation member or Project identity is missing or inconsistent",
+        verification: "directory",
+        errorCode:
+          identityValid && projectValid ? null : "EGROUPCONVERSATIONIDENTITY",
+      }),
+    );
+    let fanoutValid = true;
+    let sourceUnavailable = false;
+    for (const message of conversation.messages) {
+      if (!projections) {
+        sourceUnavailable = true;
+        continue;
+      }
+      const source = ledgerByMessage.get(message.logicalMessageId);
+      const envelope = source?.logicalMessage?.group;
+      const recipientNodeKeys = (source?.groupDeliveries || []).map(
+        (delivery) => delivery.targetNodeKey,
+      );
+      if (
+        !source ||
+        source.logicalMessage.senderNodeKey !== message.senderNodeKey ||
+        envelope?.conversationId !== conversation.conversationId ||
+        envelope.sequence !== message.sequence ||
+        envelope.membershipVersion !== message.membershipVersion ||
+        !exactStringSet(envelope.recipientNodeKeys, message.recipientNodeKeys) ||
+        !exactStringSet(recipientNodeKeys, message.recipientNodeKeys)
+      ) {
+        fanoutValid = false;
+      }
+    }
+    checks.push(
+      diagnosticCheck({
+        id: `group-conversations.fanout.${label}`,
+        scope: "group-conversations",
+        status: sourceUnavailable ? "unknown" : fanoutValid ? "pass" : "fail",
+        summary: sourceUnavailable
+          ? "Group fan-out Ledger evidence could not be rebuilt"
+          : fanoutValid
+            ? "Group messages match their immutable membership and per-recipient Deliveries"
+            : "Group message fan-out is missing or mismatched",
+        verification: sourceUnavailable ? "unavailable" : "delivery-ledger",
+        errorCode: sourceUnavailable
+          ? "EGROUPLEDGERUNAVAILABLE"
+          : fanoutValid
+            ? null
+            : "EGROUPFANOUT",
+      }),
+    );
+  }
+
+  const plansById = new Map(plans.records.map((record) => [record.planId, record]));
+  const selectionsById = new Map(
+    selections.records.map((record) => [record.selectionId, record]),
+  );
+  for (const plan of plans.records) {
+    const participants = [plan.senderNodeKey, ...plan.recipientNodeKeys];
+    const identityValid = participants.every(
+      (nodeKey) => identities.get(nodeKey)?.projectId === plan.projectId,
+    );
+    checks.push(
+      diagnosticCheck({
+        id: `team-cast-plans.identity.${safeLabel(plan.planId)}`,
+        scope: "team-cast-plans",
+        status: identityValid && projectIds.has(plan.projectId) ? "pass" : "fail",
+        summary:
+          identityValid && projectIds.has(plan.projectId)
+            ? "Team Cast plan participants resolve to one retained Project"
+            : "Team Cast plan participant or Project identity is missing or inconsistent",
+        verification: "directory",
+        errorCode:
+          identityValid && projectIds.has(plan.projectId)
+            ? null
+            : "ETEAMCASTIDENTITY",
+      }),
+    );
+  }
+  for (const selection of selections.records) {
+    const plan = plansById.get(selection.planId);
+    const selectionValid = Boolean(
+      plan &&
+        plan.senderNodeKey === selection.senderNodeKey &&
+        plan.projectId === selection.projectId &&
+        plan.expiresAt === selection.expiresAt &&
+        selection.recipientNodeKeys.every((nodeKey) =>
+          plan.recipientNodeKeys.includes(nodeKey),
+        ) &&
+        (selection.wakePolicy !== "wake-all" ||
+          exactStringSet(selection.recipientNodeKeys, plan.recipientNodeKeys)),
+    );
+    checks.push(
+      diagnosticCheck({
+        id: `team-cast-selections.plan.${safeLabel(selection.selectionId)}`,
+        scope: "team-cast-selections",
+        status: selectionValid ? "pass" : "fail",
+        summary: selectionValid
+          ? "Team Cast selection is a bounded subset of its immutable plan"
+          : "Team Cast selection has a missing or mismatched immutable plan",
+        verification: "records",
+        errorCode: selectionValid ? null : "ETEAMCASTSELECTIONPLAN",
+      }),
+    );
+  }
+  if (projections) {
+    for (const record of projections.filter(
+      (candidate) => candidate.logicalMessage.teamCast,
+    )) {
+      const envelope = record.logicalMessage.teamCast;
+      const plan = plansById.get(envelope.planId);
+      const selection = selectionsById.get(envelope.selectionId);
+      const recipientNodeKeys = (record.teamDeliveries || []).map(
+        (delivery) => delivery.targetNodeKey,
+      );
+      const consistent = Boolean(
+        plan &&
+          selection &&
+          selection.planId === plan.planId &&
+          record.logicalMessage.senderNodeKey === selection.senderNodeKey &&
+          envelope.projectId === selection.projectId &&
+          envelope.wakePolicy === selection.wakePolicy &&
+          envelope.recipientSetSha256 === selection.recipientSetSha256 &&
+          exactStringSet(envelope.recipientNodeKeys, selection.recipientNodeKeys) &&
+          exactStringSet(recipientNodeKeys, selection.recipientNodeKeys),
+      );
+      checks.push(
+        diagnosticCheck({
+          id: `team-cast-deliveries.fanout.${safeLabel(record.logicalMessage.messageId)}`,
+          scope: "team-cast-deliveries",
+          status: consistent ? "pass" : "fail",
+          summary: consistent
+            ? "Team Cast Ledger fan-out matches its immutable plan and selection"
+            : "Team Cast Ledger fan-out is missing or mismatched",
+          verification: "delivery-ledger",
+          errorCode: consistent ? null : "ETEAMCASTFANOUT",
+        }),
+      );
+    }
+  } else if (selections.records.length > 0) {
+    checks.push(
+      diagnosticCheck({
+        id: "team-cast-deliveries.ledger",
+        scope: "team-cast-deliveries",
+        status: "unknown",
+        summary: "Team Cast Ledger evidence could not be rebuilt",
+        verification: "unavailable",
+        errorCode: "ETEAMCASTLEDGERUNAVAILABLE",
+      }),
+    );
   }
   return checks;
 }

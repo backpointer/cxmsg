@@ -52,7 +52,8 @@ Every check contains:
   `directory-projects`, `directory-nodes`, `directory-node-tombstones`,
   `directory-successors`, `directory-execution-threads`, `directory-clusters`,
   `directory-cluster-memberships`, `directory-cluster-tombstones`, or
-  `schedules`.
+  `schedules`, `direct-conversations`, `group-conversations`,
+  `team-cast-plans`, `team-cast-selections`, or `team-cast-deliveries`.
 - `status` is `pass`, `warn`, `fail`, `unknown`, or `skipped`.
 - `summary` is bounded operator text with no private body data.
 - `verification` is bounded evidence such as `metadata`, `registry`,
@@ -185,6 +186,18 @@ For `after-job`, `ETRIGGERJOBMISSING` means the exact referenced owner-only Job
 record disappeared, `ETRIGGERJOBSCHEMA` means its bounded metadata is invalid,
 and `ETRIGGERBLOCKED` means its durable status is `unknown`. None of these
 findings permits manual dispatch or changes the Delivery state.
+
+Conversation findings validate each owner record with the same bounded schema
+used by its Module, then aggregate stable Node and Project reference results.
+Direct message sources must resolve to matching Delivery Ledger or Job
+evidence. Group messages must match their immutable membership version and the
+exact per-recipient Delivery set. Team Cast selections must be bounded subsets
+of an existing immutable plan, while `wake-all` must retain the complete plan
+set; a prepared Team Cast Ledger record must match the plan, selection,
+recipient-set digest, and every per-recipient Delivery. Reports omit Message
+Body data and digests, Job content, Endpoint addresses, and capabilities.
+These checks never synthesize a missing source, replay or refan out a message,
+or modify membership.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.

@@ -3,6 +3,7 @@ import {
   inspectAppServer,
   inspectAttachments,
   inspectBridges,
+  inspectConversationState,
   inspectJobs,
   inspectMessageBodies,
   inspectNodeDirectory,
@@ -58,6 +59,12 @@ export async function runDoctor({
     ...(adapters.inspectRouteState || inspectRouteState)({
       stateDir,
       sessions: state.allSessions || state.sessions,
+    }),
+  );
+  checks.push(
+    ...(adapters.inspectConversationState || inspectConversationState)({
+      stateDir,
+      jobs: state.jobs,
     }),
   );
   checks.push(...(adapters.inspectJobs || inspectJobs)(state.jobs));

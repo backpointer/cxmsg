@@ -198,6 +198,10 @@ they carry different authority and delivery semantics.
 - **Doctor Module**: the read-only diagnostic Module that collects evidence
   through existing runtime Interfaces and reports health without changing
   local state or starting model work.
+- **Conversation Consistency Inspector**: the Doctor component that compares
+  Direct and Group metadata with Directory, Job, Delivery Ledger, Team Cast
+  plan, selection, and per-recipient evidence. It reports mismatches but never
+  replays, refans out, migrates, or repairs them.
 - **Repair**: an explicit, separately authorized mutation associated with one
   Doctor finding. Repair is not part of the default Doctor Interface.
 - **Reconciliation**: comparing durable records with current App Server,

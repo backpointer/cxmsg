@@ -207,6 +207,10 @@ function validPlan(plan) {
   );
 }
 
+export function validTeamCastPlanRecord(record) {
+  return validPlan(record);
+}
+
 function validTeamCastSelection(selection) {
   const recipientLimit =
     selection?.wakePolicy === "mention-wake"
@@ -243,6 +247,10 @@ function validTeamCastSelection(selection) {
       Date.parse(selection.expiresAt) > Date.parse(selection.createdAt) &&
       Object.keys(selection).every((field) => SELECTION_FIELDS.has(field)),
   );
+}
+
+export function validTeamCastSelectionRecord(record) {
+  return validTeamCastSelection(record);
 }
 
 function secureRead(filename) {

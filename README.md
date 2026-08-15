@@ -683,8 +683,11 @@ cxmsg doctor --deep --target worker
 ```
 
 The default pass uses only passive process, registry, file, socket metadata,
-Job, grant, Node Directory, route-binding, Quarantine, bridge, and relay evidence. `--deep`
-additionally performs
+Job, grant, Node Directory, Conversation, Team Cast fan-out, Delivery Ledger,
+Scheduler, route-binding, Quarantine, bridge, and relay evidence. It verifies
+that Direct and Group message metadata resolve to retained owner records and
+that every prepared Team Cast recipient matches its immutable plan and
+selection. `--deep` additionally performs
 non-mutating App Server, Claude bridge, and host relay handshakes; resolves
 registered threads with `thread/read(includeTurns:false)`; and checks stored
 permission profile references. Neither mode sends a peer message, starts or
