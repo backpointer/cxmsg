@@ -28,6 +28,7 @@ import {
   SCHEDULED_WAKE_POLICIES,
 } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
+import { recordDirectMessageIfKnown } from "./conversations.js";
 import {
   MAX_STORED_MESSAGE_BYTES,
   readWholeMessageBody,
@@ -788,6 +789,17 @@ export async function routePeerMessage(
     }
     const now = new Date().toISOString();
     const messageBytes = Buffer.byteLength(message, "utf8");
+    const conversation =
+      decision.state === "admitted" && senderNodeKey && targetRecord?.threadId
+        ? await recordDirectMessageIfKnown({
+            logicalMessageId,
+            senderNodeKey,
+            recipientNodeKey: directoryNodeKey("codex", targetRecord.threadId),
+            replyToMessageId,
+            sourceKind: "delivery-ledger",
+            recordedAt: now,
+          })
+        : null;
     const bodyReference =
       decision.state === "admitted"
         ? await storeMessageBody({ messageId: logicalMessageId, body: message })
@@ -813,6 +825,12 @@ export async function routePeerMessage(
         senderThreadId: senderRecord?.threadId || null,
         ...(senderNodeKey ? { senderNodeKey } : {}),
         ...(replyToMessageId ? { replyToMessageId } : {}),
+        ...(conversation
+          ? {
+              conversationId: conversation.conversation.conversationId,
+              conversationSequence: conversation.message.sequence,
+            }
+          : {}),
         body: {
           messageId: logicalMessageId,
           bytes: messageBytes,

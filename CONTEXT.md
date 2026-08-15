@@ -55,8 +55,9 @@ they carry different authority and delivery semantics.
   Message Body or Endpoint and is distinct from a Node Directory Tombstone.
 - **Conversation**: a durable ordered context for Logical Messages and replies.
   A Conversation is either Direct or Group and never conveys user authority.
-- **Direct Conversation**: the canonical Conversation between exactly two
-  Nodes.
+- **Direct Conversation**: the canonical owner-private Conversation for an
+  unordered pair of stable Node identities. It orders retained metadata and
+  replies but never injects history or conveys authority.
 - **Group Conversation**: a Conversation with explicitly versioned membership
   and recipient-specific fan-out.
 

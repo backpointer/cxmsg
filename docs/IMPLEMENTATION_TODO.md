@@ -151,18 +151,18 @@ and cannot be confused with a Scheduled Peer Message.
 ### T6 — Direct Conversation
 
 - Priority: P1
-- Status: NEXT
+- Status: COMPLETE
 - Canonical phase: Phase 5
 
-- [ ] Create one canonical Direct Conversation for an unordered pair of Node
+- [x] Create one canonical Direct Conversation for an unordered pair of Node
       identities.
-- [ ] Assign durable per-Conversation Logical Message ordering.
-- [ ] Attach replies to the original Logical Message across retries and
+- [x] Assign durable per-Conversation Logical Message ordering.
+- [x] Attach replies to the original Logical Message across retries and
       Cross-runtime Delivery Jobs.
-- [ ] Expose bounded owner-private history without injecting history into a
+- [x] Expose bounded owner-private history without injecting history into a
       model turn automatically.
-- [ ] Render Tombstoned members and define explicit successor migration.
-- [ ] Keep Conversation membership informational and non-authoritative.
+- [x] Render Tombstoned members and define explicit successor migration.
+- [x] Keep Conversation membership informational and non-authoritative.
 
 Done when Codex↔Codex and Codex↔Claude use the same Conversation invariants
 while Endpoint changes and retries do not fork history.
@@ -170,7 +170,7 @@ while Endpoint changes and retries do not fork history.
 ### T7 — Group Conversation, store-only first
 
 - Priority: P2
-- Status: BLOCKED on T6
+- Status: NEXT
 - Canonical phase: Phase 6
 
 - [ ] Add versioned Group Conversation membership independent from Cluster

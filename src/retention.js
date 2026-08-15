@@ -3,6 +3,7 @@ import { listDeliveryLedgerIndexed } from "./delivery-ledger.js";
 import { listJobs } from "./jobs.js";
 import { listMessageBodies } from "./message-bodies.js";
 import { listQuarantineForRetention } from "./route-admission.js";
+import { listConversationMessageIds } from "./conversations.js";
 
 export const DELIVERY_RETENTION_MIN_AGE_MS = 90 * 24 * 60 * 60 * 1_000;
 export const MESSAGE_BODY_RETENTION_MIN_AGE_MS = 30 * 24 * 60 * 60 * 1_000;
@@ -22,7 +23,7 @@ function timestamp(label, value) {
   return parsed;
 }
 
-function protectedMessageIds(ledger, jobs) {
+function protectedMessageIds(ledger, jobs, conversationMessageIds = []) {
   const protectedIds = new Map();
   const protect = (messageId, reason) => {
     if (!messageId) return;
@@ -41,6 +42,9 @@ function protectedMessageIds(ledger, jobs) {
     if (job.correlation?.kind !== "peer-reply") continue;
     protect(job.correlation.logicalMessageId, "job_correlation");
     protect(job.correlation.replyToMessageId, "job_correlation");
+  }
+  for (const messageId of conversationMessageIds) {
+    protect(messageId, "conversation_history");
   }
   return protectedIds;
 }
@@ -87,6 +91,7 @@ export function planRetention(
     bodies = [],
     quarantine = [],
     jobs = [],
+    conversationMessageIds = [],
   },
   { now = Date.now() } = {},
 ) {
@@ -101,7 +106,11 @@ export function planRetention(
   }
 
   const include = (kind) => scope === "all" || scope === kind;
-  const protectedIds = protectedMessageIds(ledger, jobs);
+  const protectedIds = protectedMessageIds(
+    ledger,
+    jobs,
+    conversationMessageIds,
+  );
   const ledgerById = new Map(
     ledger.map((record) => [record.logicalMessage.messageId, record]),
   );
@@ -240,6 +249,7 @@ export function planRetention(
         "unknown_delivery",
         "reply_chain",
         "job_correlation",
+        "conversation_history",
         "quarantined_delivery",
       ],
     },
@@ -255,6 +265,7 @@ export async function buildRetentionPlan(
     bodyReader = listMessageBodies,
     quarantineReader = listQuarantineForRetention,
     jobReader = listJobs,
+    conversationReader = listConversationMessageIds,
     now = Date.now(),
   } = {},
 ) {
@@ -276,6 +287,7 @@ export async function buildRetentionPlan(
       bodies,
       quarantine: needsQuarantine ? quarantineReader() : [],
       jobs: needsLedger ? jobReader() : [],
+      conversationMessageIds: needsLedger ? conversationReader() : [],
     },
     { now },
   );

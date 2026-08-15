@@ -291,6 +291,21 @@ automatically re-enqueued, so ambiguous worker startup cannot duplicate model
 work. Scheduled Jobs retain the same owner-only task and result protections as
 immediate Delegations and never write an ordinary Delivery Ledger record.
 
+Direct Conversation records are owner-private metadata projections. They retain
+stable Node keys, Logical Message IDs, ordering, reply references, source kind,
+and timestamps, but never copy message bodies, tasks, results, Endpoints,
+paths, grants, approvals, or capability tokens. Membership is informational
+and cannot authorize a send, bypass Route Admission, wake a Node, grant a role,
+or continue a predecessor identity automatically. History commands are bounded
+local reads and never inject retained content into a model turn.
+
+An explicit member migration requires the exact stored `successor-of`
+relation. It transfers only Conversation continuity; every permission, role,
+grant, route, schedule, and Project check remains owned by its original
+subsystem. Malformed, linked, non-owner, overly permissive, oversized, or
+identity-inconsistent Conversation storage fails closed. Retention preserves
+Ledger and body records referenced by Conversation history.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

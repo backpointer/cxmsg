@@ -13,6 +13,7 @@ import {
   updateJob,
 } from "./jobs.js";
 import { writeCoordinationEvent } from "./observability.js";
+import { recordDirectMessageIfKnown } from "./conversations.js";
 
 const ACK_PATTERN =
   /^<cxmsg-ack in-reply-to="([0-9a-f-]{36})" status="(accepted|completed|retryable_error|failed)"(?: code="([^"]{1,32})")?(?: retry-after="(\d{1,5})")?>\n([\s\S]*)\n<\/cxmsg-ack>$/i;
@@ -84,19 +85,28 @@ export async function createClaudeDeliveryJob({
   logicalMessageId = null,
   replyToMessageId = null,
 }) {
-  if ((logicalMessageId === null) !== (replyToMessageId === null)) {
-    throw new Error("Claude peer reply correlation requires both Logical Message IDs");
+  if (replyToMessageId !== null && logicalMessageId === null) {
+    throw new Error("Claude peer reply correlation requires a Logical Message ID");
   }
   if (
     logicalMessageId !== null &&
     (!UUID_PATTERN.test(logicalMessageId) ||
-      !UUID_PATTERN.test(replyToMessageId) ||
-      logicalMessageId === replyToMessageId)
+      (replyToMessageId !== null &&
+        (!UUID_PATTERN.test(replyToMessageId) ||
+          logicalMessageId === replyToMessageId)))
   ) {
     throw new Error("Claude peer reply correlation is invalid");
   }
+  const jobId = logicalMessageId || randomUUID();
+  const conversation = await recordDirectMessageIfKnown({
+    logicalMessageId: jobId,
+    senderNodeKey: `codex:${sourceRecord.threadId}`,
+    recipientNodeKey: `claude:${peer.sessionId}`,
+    replyToMessageId,
+    sourceKind: "claude-job",
+  });
   const spec = {
-    ...(logicalMessageId ? { jobId: logicalMessageId } : {}),
+    jobId,
     from,
     target: peer.name,
     targetThreadId: sourceRecord.threadId,
@@ -125,13 +135,19 @@ export async function createClaudeDeliveryJob({
     },
     ack: null,
     correlation:
-      logicalMessageId === null
+      replyToMessageId === null
         ? null
         : {
             kind: "peer-reply",
-            logicalMessageId,
+            logicalMessageId: jobId,
             replyToMessageId,
           },
+    conversation: conversation
+      ? {
+          conversationId: conversation.conversation.conversationId,
+          sequence: conversation.message.sequence,
+        }
+      : null,
     ackTimeoutSeconds,
   });
   let job;
@@ -144,9 +160,15 @@ export async function createClaudeDeliveryJob({
         job.from !== from ||
         job.task !== message ||
         job.claudeTarget?.sessionId !== peer.sessionId ||
-        job.correlation?.kind !== "peer-reply" ||
-        job.correlation.logicalMessageId !== logicalMessageId ||
-        job.correlation.replyToMessageId !== replyToMessageId
+        (replyToMessageId === null && job.correlation !== null) ||
+        (replyToMessageId !== null &&
+          (job.correlation?.kind !== "peer-reply" ||
+            job.correlation.logicalMessageId !== logicalMessageId ||
+            job.correlation.replyToMessageId !== replyToMessageId)) ||
+        (conversation &&
+          (job.conversation?.conversationId !==
+            conversation.conversation.conversationId ||
+            job.conversation?.sequence !== conversation.message.sequence))
       ) {
         throw new Error(`Claude peer reply idempotency conflict: ${logicalMessageId}`);
       }

@@ -450,6 +450,41 @@ Conversation, route, transport reachability, wake, grant, permission, approval,
 or fan-out. Default CLI output exposes only member counts; `--members` is an
 explicit local disclosure option, and `--history` reads retained versions.
 
+## Direct Conversations
+
+cxmsg records one owner-private Direct Conversation for each unordered pair of
+known stable Node identities. Codex-to-Codex Ledger messages and correlated
+Codex-to-Claude Jobs share the same ordering and reply invariants. Retries reuse
+the existing sequence; names, sockets, PIDs, paths, and Endpoint changes do not
+fork history.
+
+Inspect the metadata-only projection locally:
+
+```bash
+cxmsg conversation list --json
+cxmsg conversation show <conversation-id> --json
+cxmsg conversation history <conversation-id> --limit 50 --json
+```
+
+History includes Node keys, Logical Message IDs, reply links, source kind, and
+current Ledger or Job status. It never includes message bodies and is never
+injected into a model turn automatically. Conversation membership creates no
+role, permission, approval, Delegation, wake, or cross-Project authority.
+
+Create an empty Direct Conversation only after both Nodes are present in the
+Directory, or explicitly continue one after recording the exact successor
+relation:
+
+```bash
+cxmsg conversation direct ensure codex <thread-id> claude <session-id>
+cxmsg conversation migrate <conversation-id> codex <old-id> codex <new-id>
+```
+
+Original members remain visible when Tombstoned; migration changes only the
+current member projection. Retention protects Ledger and Message Body records
+referenced by Conversation history. See
+[Direct Conversation v1](docs/DIRECT_CONVERSATION_V1.md).
+
 When a Directory Project exists, `cxmsg route bind` also pins the binding to
 the private Project UUID and stable Codex Node key. Reusing the same routing
 label for another Project or replacing the registered thread cannot inherit
@@ -1270,6 +1305,7 @@ not needed.
 - [Coordination graph and conversation plan](docs/COORDINATION_GRAPH_CONVERSATIONS.md)
 - [Prioritized implementation TODO](docs/IMPLEMENTATION_TODO.md)
 - [Scheduled Delegation v1](docs/SCHEDULED_DELEGATION_V1.md)
+- [Direct Conversation v1](docs/DIRECT_CONVERSATION_V1.md)
 - [Retention policy v1](docs/RETENTION_POLICY_V1.md)
 - [Doctor JSON schema v1](docs/DOCTOR_SCHEMA_V1.md)
 - [Domain language](CONTEXT.md)

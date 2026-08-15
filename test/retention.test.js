@@ -17,6 +17,7 @@ const ids = {
   recent: "61345678-1234-4234-8234-123456789abc",
   orphanBody: "71345678-1234-4234-8234-123456789abc",
   quarantine: "81345678-1234-4234-8234-123456789abc",
+  conversation: "a1345678-1234-4234-8234-123456789abc",
 };
 
 function delivery(messageId, state, updatedAt = OLD, replyToMessageId = null) {
@@ -58,6 +59,7 @@ test("retention planning protects live, ambiguous, reply, and Job-correlated evi
     delivery(ids.reply, "turn_started", OLD, ids.replyTarget),
     delivery(ids.job, "turn_started"),
     delivery(ids.recent, "turn_started", RECENT),
+    delivery(ids.conversation, "turn_started"),
   ];
   const plan = retention.planRetention(
     {
@@ -71,6 +73,7 @@ test("retention planning protects live, ambiguous, reply, and Job-correlated evi
         body(ids.job),
         body(ids.recent, RECENT),
         body(ids.orphanBody, OLD, 300),
+        body(ids.conversation),
       ],
       quarantine: [
         {
@@ -95,6 +98,7 @@ test("retention planning protects live, ambiguous, reply, and Job-correlated evi
           },
         },
       ],
+      conversationMessageIds: [ids.conversation],
     },
     { now: NOW },
   );
@@ -107,7 +111,7 @@ test("retention planning protects live, ambiguous, reply, and Job-correlated evi
   );
   assert.match(
     JSON.stringify(plan.categories.ledger.blocked),
-    /nonterminal_unknown|reply_chain|job_correlation/,
+    /nonterminal_unknown|reply_chain|job_correlation|conversation_history/,
   );
   assert.equal(plan.categories.ledger.retainedByAge, 1);
   assert.deepEqual(

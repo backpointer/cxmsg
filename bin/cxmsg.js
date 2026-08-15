@@ -78,6 +78,14 @@ import {
   validateDelegationAuthority,
 } from "../src/delegation-authority.js";
 import {
+  directConversationHistory,
+  ensureDirectConversation,
+  listDirectConversations,
+  migrateDirectConversationMember,
+  publicDirectConversation,
+  readDirectConversation,
+} from "../src/conversations.js";
+import {
   activeJobsForTarget,
   createJob,
   createScheduledDelegationJob,
@@ -265,6 +273,11 @@ function usage(exitCode = 0) {
   cxmsg directory execution sync [--json]
   cxmsg directory execution-threads [--json]
   cxmsg directory execution-thread show <thread-id> [--json]
+  cxmsg conversation direct ensure <codex|claude> <native-id> <codex|claude> <native-id> [--json]
+  cxmsg conversation list [--json]
+  cxmsg conversation show <conversation-id> [--json]
+  cxmsg conversation history <conversation-id> [--limit <count>] [--before <sequence>] [--json]
+  cxmsg conversation migrate <conversation-id> <codex|claude> <predecessor-id> <codex|claude> <successor-id> [--json]
   cxmsg message info <message-id|reply-handle|content-ref> [--json]
   cxmsg message show <message-id|reply-handle|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -2998,6 +3011,111 @@ async function commandDirectory(args) {
   usage(2);
 }
 
+function conversationNodeKey(runtimeKind, nativeId) {
+  if (!["codex", "claude"].includes(runtimeKind)) {
+    throw new Error("Conversation runtime must be codex or claude");
+  }
+  if (!/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(nativeId || "")) {
+    throw new Error("Conversation native id must be a UUID");
+  }
+  return `${runtimeKind}:${nativeId.toLowerCase()}`;
+}
+
+async function commandConversation(args) {
+  const operation = args.shift();
+  if (operation === "direct") {
+    if (args.shift() !== "ensure") usage(2);
+    const first = conversationNodeKey(args.shift(), args.shift());
+    const second = conversationNodeKey(args.shift(), args.shift());
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const result = await ensureDirectConversation(first, second);
+    const output = {
+      ...publicDirectConversation(result.conversation),
+      created: result.created,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.created ? "created" : "found"} Direct Conversation ${output.conversationId}\n`,
+    );
+    return;
+  }
+  if (operation === "list") {
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const records = listDirectConversations().map(publicDirectConversation);
+    jsonOrLines(
+      records,
+      jsonOutput,
+      (record) =>
+        `${record.conversationId}\t${record.messageCount}\t${record.currentMembers.map((member) => member.nodeKey).join(" <-> ")}`,
+    );
+    return;
+  }
+  if (operation === "show") {
+    const conversationId = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (!conversationId || args.some((value) => value !== "--json")) usage(2);
+    const record = readDirectConversation(conversationId);
+    if (!record) throw new Error(`unknown Direct Conversation: ${conversationId}`);
+    const output = publicDirectConversation(record);
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${output.conversationId}\t${output.messageCount}\t${output.currentMembers.map((member) => member.nodeKey).join(" <-> ")}\n`,
+    );
+    return;
+  }
+  if (operation === "history") {
+    const conversationId = args.shift();
+    let limit = 50;
+    let beforeSequence = Number.MAX_SAFE_INTEGER;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--limit") limit = Number(args.shift());
+      else if (option === "--before") beforeSequence = Number(args.shift());
+      else usage(2);
+    }
+    const records = directConversationHistory(conversationId, {
+      limit,
+      beforeSequence,
+    });
+    jsonOrLines(
+      records,
+      jsonOutput,
+      (record) =>
+        `${record.sequence}\t${record.logicalMessageId}\t${record.status}\t${record.senderNodeKey}->${record.recipientNodeKey}`,
+    );
+    return;
+  }
+  if (operation === "migrate") {
+    const conversationId = args.shift();
+    const predecessorNodeKey = conversationNodeKey(args.shift(), args.shift());
+    const successorNodeKey = conversationNodeKey(args.shift(), args.shift());
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const result = await migrateDirectConversationMember({
+      conversationId,
+      predecessorNodeKey,
+      successorNodeKey,
+    });
+    const output = {
+      ...publicDirectConversation(result.conversation),
+      migrated: result.migrated,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.migrated ? "migrated" : "unchanged"} Direct Conversation ${conversationId}\n`,
+    );
+    return;
+  }
+  usage(2);
+}
+
 async function commandQuarantine(args) {
   const operation = args.shift();
   if (operation !== "list") usage(2);
@@ -3197,6 +3315,9 @@ async function main() {
       break;
     case "deliveries":
       await commandDeliveries(args);
+      break;
+    case "conversation":
+      await commandConversation(args);
       break;
     case "retention":
       await commandRetention(args);

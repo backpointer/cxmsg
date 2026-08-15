@@ -166,6 +166,17 @@ function validSenderNode(message) {
   return message.senderThreadId === null || message.senderThreadId === undefined;
 }
 
+function validConversationProjection(message) {
+  const conversationId = message.conversationId;
+  const conversationSequence = message.conversationSequence;
+  if (conversationId === undefined && conversationSequence === undefined) return true;
+  return Boolean(
+    UUID_PATTERN.test(conversationId || "") &&
+      Number.isSafeInteger(conversationSequence) &&
+      conversationSequence > 0,
+  );
+}
+
 function validBatch(record) {
   const message = record?.logicalMessage;
   const delivery = record?.deliveries?.[0];
@@ -181,6 +192,7 @@ function validBatch(record) {
         message.senderThreadId === null ||
         UUID_PATTERN.test(message.senderThreadId || "")) &&
       validSenderNode(message) &&
+      validConversationProjection(message) &&
       (message.replyToMessageId === undefined ||
         (UUID_PATTERN.test(message.replyToMessageId || "") &&
           message.replyToMessageId !== message.messageId)) &&

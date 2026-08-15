@@ -710,15 +710,26 @@ reference checks expose no turn or message content. The current implementation
 uses bounded reconciliation polling; durable App Server notification cursors
 remain later Turn Lifecycle work.
 
-This slice still has no scheduled Delegation, automatic retry, or Conversation
-fan-out. Those remain separate Phase 4/6 gates rather than inferred
-capabilities.
+This slice still has no automatic retry or Conversation fan-out. Scheduled
+Delegation is implemented through its separate retained Job path; fan-out
+remains a Phase 6 gate rather than an inferred capability.
 
 ### Phase 5: Direct Conversation
 
 - create canonical Node-pair Conversations;
 - add Logical Message ordering and correlated replies;
 - expose bounded local history without changing wake behavior.
+
+Implementation status: complete in 0.31.0. One deterministic Conversation ID
+represents an unordered stable Node pair. Owner-private records assign a
+contiguous sequence to Ledger messages and correlated Claude Delivery Jobs,
+deduplicate retries by Logical Message ID, and retain parent-message and
+cross-Conversation reply provenance without copying bodies. Bounded CLI reads
+resolve only redacted Ledger or Job status and never inject history or start a
+turn. Original Tombstoned members remain renderable, while continuation through
+a successor requires an explicit Conversation migration backed by the exact
+Directory relation. Retention protects referenced Ledger and body evidence.
+Membership remains non-authoritative.
 
 ### Phase 6: Group Conversation
 
