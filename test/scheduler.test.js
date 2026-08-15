@@ -30,6 +30,7 @@ const ids = {
   triggerJob: "a2345678-2234-4234-8234-123456789abc",
   triggerDispatch: "b2345678-2234-4234-8234-123456789abc",
   triggerRegression: "c2345678-2234-4234-8234-123456789abc",
+  externalWriter: "d2345678-2234-4234-8234-123456789abc",
 };
 
 async function scheduledRecord(messageId, body, wakePolicy = "when-idle", trigger = {}) {
@@ -284,6 +285,42 @@ test("when-idle stays queued while busy and starts exactly once after idle", asy
     ],
   );
   assert.doesNotMatch(JSON.stringify(events), /scheduled coordination/);
+});
+
+test("register-only notLoaded targets stay queued without a resume attempt", async () => {
+  const record = await scheduledRecord(ids.externalWriter, "wait for explicit attach");
+  let starts = 0;
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    {
+      now: () => Date.parse("2026-08-15T00:04:00.000Z"),
+      session: () => ({
+        name: "auditor",
+        threadId: ids.targetThread,
+        adopted: true,
+      }),
+      readThread: async () => ({
+        id: ids.targetThread,
+        status: { type: "notLoaded" },
+      }),
+      deliver: async () => {
+        starts += 1;
+        assert.fail("an external writer candidate must not be resumed or started");
+      },
+    },
+  );
+  assert.deepEqual(outcome, {
+    state: "blocked",
+    messageId: ids.externalWriter,
+    errorCode: "EEXTERNALWRITERUNVERIFIED",
+  });
+  assert.equal(starts, 0);
+  const retained = ledger.readDeliveryLedger(ids.externalWriter).delivery;
+  assert.equal(retained.state, "scheduled");
+  assert.equal(retained.claimCount, 0);
+  assert.equal(retained.attempts.length, 0);
 });
 
 test("a target becoming busy after claim releases it without a dispatch attempt", async () => {

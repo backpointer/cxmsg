@@ -76,6 +76,22 @@ cxmsg send \
   "Review handoff <id> at commit <sha>."
 ```
 
+Use the delivered Logical Message ID for a strictly correlated response:
+
+```bash
+cxmsg reply <logical-message-id> "Review passed at commit <sha>."
+```
+
+`reply` derives its destination from the original Ledger record instead of
+accepting a target name. New sends pin both the sender and recipient thread IDs;
+the reply is rejected before context injection if either name now resolves to a
+different thread. A routed reply also requires both current bindings and
+inverts the original `sender_role` and `target_role` within the same Project and
+task. Therefore a routed request intended to receive a strict reply must include
+`--sender-role`. Records created before sender-thread pinning remain readable but
+cannot be used as strict reply targets. `reply` is still an untrusted Peer
+Message and creates no authority or approval.
+
 Once a target is bound, an untyped, expired, wrong-Project, wrong-role, or
 stale-thread message is stored in owner-only Quarantine before any App Server
 turn is started or steered. Inspect redacted metadata only with:
@@ -453,7 +469,10 @@ otherwise contain letters, digits, `.`, `_`, or `-`.
 
 The existing thread must be addressable by the same App Server. A regular
 standalone `codex` TUI keeps an active-writer lock; close it before resuming the
-thread through `cxmsg attach worker`.
+thread through `cxmsg attach worker`. A register-only thread that is
+`notLoaded` remains `stored-or-external`: peer delivery and Claude terminal
+notification refuse to auto-resume it with `EEXTERNALWRITERUNVERIFIED`, rather
+than competing with a possible standalone rollout writer.
 
 ## Local web views
 
@@ -931,9 +950,10 @@ signal.
   claim acquisition. It still uses `approvalPolicy: "never"`.
 - The message body is supplied as `additionalContext` with kind `untrusted`.
 - Inline Message Bodies larger than 2 KiB are split on UTF-8 boundaries into ordered
-  `additionalContext` fragments. Every fragment carries the same message ID,
-  total byte count, and SHA-256 digest, so a receiver can detect a missing or
-  reordered fragment instead of silently accepting a TUI-truncated message.
+  `additionalContext` fragments. One common envelope carries the sender,
+  recipient, route, total byte count, fragment count, and SHA-256 digest; each
+  fragment carries only its sequence number and body slice. This avoids repeating
+  token-heavy routing metadata while still exposing missing or reordered fragments.
 - Message Bodies over 16 KiB and through 256 KiB are written first to the
   owner-only Message Body Store. The injected envelope contains a 2 KiB preview,
   opaque Content Reference, total byte count, and SHA-256 digest. It never
@@ -946,11 +966,16 @@ signal.
   body is represented only by byte count, digest, and optional Content
   Reference. Dispatch-attempt and evidence records remain distinct; neither
   `turn_started` nor a peer reply proves durable task completion.
+- New Logical Messages pin the sender thread as well as the recipient thread.
+  `cxmsg reply` records `replyTo` in the untrusted model envelope and
+  `replyToMessageId` in the Ledger, and delivers only when the current sender
+  and target invert the original identities exactly.
 - Scheduled claim ownership and lease timestamps are concurrency fields, not
   delivery evidence. A missing or expired claim never authorizes manual replay.
 - Peer-triggered turns cannot open an approval path. Operations outside the
   target's existing sandbox and permissions fail normally.
-- Offline stored threads are resumed before delivery.
+- Offline cxmsg-managed threads are resumed before delivery. A register-only
+  `stored-or-external` thread is never auto-resumed; attach it explicitly first.
 
 ## Delegated jobs
 

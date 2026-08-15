@@ -102,18 +102,23 @@ export function splitUtf8(value, maxBytes) {
 
 export function peerMessageInput({
   from,
+  to = null,
   message,
   messageId = randomUUID(),
+  replyTo = null,
   bodyReference = null,
   route = null,
 }) {
   validateSessionName(from);
+  if (to !== null) validateSessionName(to);
   validateStoredMessage(message);
 
   const common = {
     protocol: "cxmsg/1",
     id: messageId,
     from,
+    ...(to ? { to } : {}),
+    ...(replyTo ? { replyTo } : {}),
     sentAt: new Date().toISOString(),
     authority: "untrusted-peer",
     ...(route ? { route } : {}),
@@ -155,6 +160,17 @@ export function peerMessageInput({
         value: JSON.stringify({ ...common, message }),
       };
     } else {
+      additionalContext[`cxmsg:${messageId}`] = {
+        kind: "untrusted",
+        value: JSON.stringify({
+          ...common,
+          body: {
+            bytes: messageBytes,
+            sha256: messageSha256,
+            fragments: parts.length,
+          },
+        }),
+      };
       parts.forEach((part, index) => {
         const partNumber = index + 1;
         additionalContext[
@@ -162,13 +178,7 @@ export function peerMessageInput({
         ] = {
           kind: "untrusted",
           value: JSON.stringify({
-            ...common,
-            fragment: {
-              index: partNumber,
-              total: parts.length,
-              messageBytes,
-              messageSha256,
-            },
+            fragment: partNumber,
             message: part,
           }),
         };
@@ -273,9 +283,9 @@ export async function deliverPeerMessage(
   client,
   thread,
   payload,
-  { storeBody = storeMessageBody } = {},
+  { storeBody = storeMessageBody, allowResume = true } = {},
 ) {
-  const current = await readThreadForInput(client, thread);
+  const current = await readThreadForInput(client, thread, { allowResume });
 
   if (current.canAcceptDirectInput === false) {
     throw new Error(`session ${displaySessionName(current.name) || current.id} cannot accept direct input`);
@@ -289,6 +299,7 @@ export async function deliverPeerMessage(
       : null;
   const peerInput = peerMessageInput({
     ...payload,
+    to: payload.to || displaySessionName(current.name),
     message,
     messageId,
     bodyReference,
@@ -331,9 +342,9 @@ export async function deliverPeerMessageWhenIdle(
   client,
   thread,
   payload,
-  { storeBody = storeMessageBody, beforeStart = null } = {},
+  { storeBody = storeMessageBody, beforeStart = null, allowResume = true } = {},
 ) {
-  const current = await readThreadForInput(client, thread);
+  const current = await readThreadForInput(client, thread, { allowResume });
 
   if (current.canAcceptDirectInput === false) {
     throw new Error(`session ${displaySessionName(current.name) || current.id} cannot accept direct input`);
@@ -348,6 +359,7 @@ export async function deliverPeerMessageWhenIdle(
       : null;
   const peerInput = peerMessageInput({
     ...payload,
+    to: payload.to || displaySessionName(current.name),
     message,
     messageId,
     bodyReference,

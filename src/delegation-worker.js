@@ -14,7 +14,10 @@ import {
   truncateUtf8,
 } from "./messaging.js";
 import { classifyExecutionThread } from "./node-directory.js";
-import { readSessionRecord } from "./registry.js";
+import {
+  readSessionRecord,
+  sessionAllowsAppServerResume,
+} from "./registry.js";
 import { readThreadMetadata } from "./thread-activity.js";
 
 export const EXECUTION_MODES = new Set(["fork", "inline"]);
@@ -99,6 +102,8 @@ async function mirrorResult(client, job) {
     const delivery = await deliverPeerMessage(client, thread, {
       from: job.from,
       message: mirrorMessage(job),
+    }, {
+      allowResume: sessionAllowsAppServerResume(targetRecord),
     });
     return await updateJob(job, {
       mirrorDelivery: {

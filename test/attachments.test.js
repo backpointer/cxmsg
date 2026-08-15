@@ -7,6 +7,7 @@ import test from "node:test";
 const stateDir = mkdtempSync(path.join(os.tmpdir(), "cxmsg-attachments-"));
 process.env.CXMSG_STATE_DIR = stateDir;
 const attachments = await import(`../src/attachments.js?test=${Date.now()}`);
+const registry = await import(`../src/registry.js?test=${Date.now()}`);
 
 function record(overrides = {}) {
   return {
@@ -78,4 +79,13 @@ test("presentation distinguishes managed background sessions from adopted writer
     attachments.sessionPresentation({ adopted: true }, record()),
     "foreground",
   );
+  assert.equal(registry.sessionAllowsAppServerResume({ adopted: true }), false);
+  assert.equal(
+    registry.sessionAllowsAppServerResume({
+      adopted: true,
+      managedByCxmsgAt: "2026-08-15T00:00:00.000Z",
+    }),
+    true,
+  );
+  assert.equal(registry.sessionAllowsAppServerResume({}), true);
 });

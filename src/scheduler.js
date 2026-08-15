@@ -36,7 +36,10 @@ import {
   deliverPeerMessageWhenIdle,
   TargetBusyError,
 } from "./messaging.js";
-import { readSessionRecord } from "./registry.js";
+import {
+  readSessionRecord,
+  sessionAllowsAppServerResume,
+} from "./registry.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 import {
   findThreadTurn,
@@ -278,6 +281,14 @@ export async function dispatchScheduledDelivery(
   }
   const observed = await readThread(client, target.threadId);
   if (observed.status?.type === "active") return { state: "busy", messageId };
+  const allowResume = sessionAllowsAppServerResume(target);
+  if (observed.status?.type === "notLoaded" && !allowResume) {
+    return {
+      state: "blocked",
+      messageId,
+      errorCode: "EEXTERNALWRITERUNVERIFIED",
+    };
+  }
 
   const claimResult = await claimScheduledDelivery(messageId, {
     workerId,
@@ -339,9 +350,11 @@ export async function dispatchScheduledDelivery(
         from: record.logicalMessage.from,
         message,
         messageId,
+        replyTo: record.logicalMessage.replyToMessageId || null,
         route: record.logicalMessage.route,
       },
       {
+        allowResume,
         beforeStart: async () => {
           attempt = await beginScheduledDelivery(messageId, {
             claimId: claimResult.claim.claimId,

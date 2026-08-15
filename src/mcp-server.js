@@ -130,6 +130,7 @@ function publicDelivery(job) {
           deliveredAt: job.wake.deliveredAt,
           delivery: job.wake.delivery,
           turnId: job.wake.turnId,
+          errorCode: job.wake.errorCode,
           error: job.wake.error,
         }
       : null,

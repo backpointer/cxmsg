@@ -233,6 +233,90 @@ export function listRouteBindings() {
     .map((state) => state.record);
 }
 
+export function planPeerReply({
+  from,
+  replyToMessageId,
+  logicalMessageId = randomUUID(),
+}) {
+  validateName("reply sender", from);
+  validateUuid("reply-to message id", replyToMessageId);
+  validateUuid("logical message id", logicalMessageId);
+  if (replyToMessageId === logicalMessageId) {
+    throw new Error("a peer reply cannot reference itself");
+  }
+
+  const original = readDeliveryLedger(replyToMessageId);
+  if (!original) throw new Error(`unknown peer message: ${replyToMessageId}`);
+  if (original.delivery.admissionState !== "admitted") {
+    throw new Error("cannot reply to a quarantined peer message");
+  }
+  if (original.delivery.target !== from) {
+    throw new Error("peer reply sender is not the original recipient");
+  }
+
+  const target = original.logicalMessage.from;
+  const expectedSenderThreadId = original.delivery.targetThreadId;
+  const expectedTargetThreadId = original.logicalMessage.senderThreadId;
+  if (!expectedSenderThreadId || !expectedTargetThreadId) {
+    throw new Error("original peer message lacks pinned bidirectional thread identity");
+  }
+  const senderRecord = readSessionRecord(from);
+  const targetRecord = readSessionRecord(target);
+  if (!senderRecord || senderRecord.threadId !== expectedSenderThreadId) {
+    throw new Error("peer reply sender thread identity changed");
+  }
+  if (!targetRecord || targetRecord.threadId !== expectedTargetThreadId) {
+    throw new Error("peer reply target thread identity changed");
+  }
+
+  const senderBinding = routeBindingState(from);
+  const targetBinding = routeBindingState(target);
+  if (senderBinding.state === "invalid" || targetBinding.state === "invalid") {
+    throw new Error("peer reply route binding is invalid");
+  }
+
+  const originalRoute = original.logicalMessage.route;
+  let route = null;
+  if (originalRoute) {
+    if (senderBinding.state !== "valid" || targetBinding.state !== "valid") {
+      throw new Error("routed peer reply requires both current route bindings");
+    }
+    if (
+      senderBinding.record.threadId !== expectedSenderThreadId ||
+      targetBinding.record.threadId !== expectedTargetThreadId ||
+      senderBinding.record.projectId !== originalRoute.project_id ||
+      targetBinding.record.projectId !== originalRoute.project_id ||
+      senderBinding.record.role !== originalRoute.target_role ||
+      !originalRoute.sender_role ||
+      targetBinding.record.role !== originalRoute.sender_role
+    ) {
+      throw new Error("peer reply route identity does not invert the original route");
+    }
+    route = {
+      schema_version: 1,
+      project_id: originalRoute.project_id,
+      target_role: targetBinding.record.role,
+      logical_message_id: logicalMessageId,
+      payload_type: "response",
+      wake_policy: "immediate",
+      sender_role: senderBinding.record.role,
+      ...(originalRoute.task_id ? { task_id: originalRoute.task_id } : {}),
+    };
+  } else if (senderBinding.state !== "missing" || targetBinding.state !== "missing") {
+    throw new Error("unrouted peer reply requires both sessions to remain unbound");
+  }
+
+  return {
+    from,
+    target,
+    logicalMessageId,
+    replyToMessageId,
+    expectedSenderThreadId,
+    expectedTargetThreadId,
+    route,
+  };
+}
+
 function admission(
   bindingState,
   route,
@@ -353,6 +437,10 @@ function validLegacyRouteDeliveryRecord(record, messageId) {
       UUID_PATTERN.test(record.logicalMessageId || "") &&
       NAME_PATTERN.test(record.from || "") &&
       NAME_PATTERN.test(record.target || "") &&
+      (record.senderThreadId === undefined ||
+        UUID_PATTERN.test(record.senderThreadId || "")) &&
+      (record.replyToMessageId === undefined ||
+        UUID_PATTERN.test(record.replyToMessageId || "")) &&
       (record.targetThreadId === undefined ||
         UUID_PATTERN.test(record.targetThreadId || "")) &&
       Number.isSafeInteger(record.messageBytes) &&
@@ -384,6 +472,12 @@ function ledgerRouteDelivery(record) {
     logicalMessageId: message.messageId,
     deliveryId: delivery.deliveryId,
     from: message.from,
+    ...(message.senderThreadId
+      ? { senderThreadId: message.senderThreadId }
+      : {}),
+    ...(message.replyToMessageId
+      ? { replyToMessageId: message.replyToMessageId }
+      : {}),
     target: delivery.target,
     ...(delivery.targetThreadId
       ? { targetThreadId: delivery.targetThreadId }
@@ -497,6 +591,7 @@ export async function routePeerMessage(
     message,
     route = null,
     logicalMessageId = route?.logical_message_id || randomUUID(),
+    replyToMessageId = null,
   },
   dispatch,
   { log = writeCoordinationEvent, validateTrigger = null } = {},
@@ -504,6 +599,12 @@ export async function routePeerMessage(
   validateName("sender", from);
   validateName("target", target);
   validateUuid("logical message id", logicalMessageId);
+  if (replyToMessageId !== null) {
+    validateUuid("reply-to message id", replyToMessageId);
+    if (replyToMessageId === logicalMessageId) {
+      throw new Error("a peer reply cannot reference itself");
+    }
+  }
   if (typeof message !== "string" || !message.trim()) throw new Error("message must not be empty");
   if (Buffer.byteLength(message, "utf8") > MAX_STORED_MESSAGE_BYTES) {
     throw new Error(`message exceeds ${MAX_STORED_MESSAGE_BYTES} bytes`);
@@ -524,6 +625,7 @@ export async function routePeerMessage(
       if (
         existing.from !== from ||
         existing.target !== target ||
+        (existing.replyToMessageId || null) !== replyToMessageId ||
         existing.messageSha256 !== messageSha256 ||
         existing.routeFingerprint !== fingerprint
       ) {
@@ -536,12 +638,28 @@ export async function routePeerMessage(
     const targetBinding = routeBindingState(target);
     const senderBinding = routeBindingState(from);
     const targetRecord = readSessionRecord(target);
+    const senderRecord = readSessionRecord(from);
+    if (replyToMessageId) {
+      const reply = planPeerReply({
+        from,
+        replyToMessageId,
+        logicalMessageId,
+      });
+      if (
+        reply.target !== target ||
+        reply.expectedSenderThreadId !== senderRecord?.threadId ||
+        reply.expectedTargetThreadId !== targetRecord?.threadId ||
+        routeFingerprint(reply.route) !== fingerprint
+      ) {
+        throw new Error("peer reply routing identity changed before delivery");
+      }
+    }
     const decision = admission(
       targetBinding,
       normalizedRoute,
       senderBinding,
       targetRecord,
-      readSessionRecord(from),
+      senderRecord,
     );
     if (
       decision.state === "admitted" &&
@@ -583,6 +701,8 @@ export async function routePeerMessage(
       logicalMessage: {
         messageId: logicalMessageId,
         from,
+        senderThreadId: senderRecord?.threadId || null,
+        ...(replyToMessageId ? { replyToMessageId } : {}),
         body: {
           messageId: logicalMessageId,
           bytes: messageBytes,
@@ -635,6 +755,7 @@ export async function routePeerMessage(
     const result = await dispatch({
       logicalMessageId,
       route: normalizedRoute,
+      replyToMessageId,
     });
     const completed = ledgerRouteDelivery(
       await appendDeliveryEvidence(logicalMessageId, {

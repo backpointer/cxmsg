@@ -246,3 +246,25 @@ test("unloaded input threads resume without hydrating turn history", async () =>
     },
   ]);
 });
+
+test("unmanaged unloaded threads are not resumed across a possible external writer", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      assert.fail("an unmanaged notLoaded thread must not receive App Server requests");
+    },
+  };
+
+  await assert.rejects(
+    readThreadForInput(
+      client,
+      { id: "thread-external", status: { type: "notLoaded" } },
+      { allowResume: false },
+    ),
+    (error) =>
+      error.code === "EEXTERNALWRITERUNVERIFIED" &&
+      /external rollout writer/.test(error.message),
+  );
+  assert.deepEqual(calls, []);
+});

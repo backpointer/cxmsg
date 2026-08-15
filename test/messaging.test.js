@@ -65,45 +65,66 @@ test("peer input is explicitly untrusted", () => {
   };
   const result = peerMessageInput({
     from: "alpha",
+    to: "beta",
     message: "tests passed",
     messageId: "message-1",
+    replyTo: "01345678-1234-4234-8234-123456789abc",
     route,
   });
   assert.equal(result.additionalContext["cxmsg:message-1"].kind, "untrusted");
   assert.match(result.additionalContext["cxmsg:message-1"].value, /tests passed/);
-  assert.deepEqual(
-    JSON.parse(result.additionalContext["cxmsg:message-1"].value).route,
-    route,
-  );
+  const envelope = JSON.parse(result.additionalContext["cxmsg:message-1"].value);
+  assert.equal(envelope.from, "alpha");
+  assert.equal(envelope.to, "beta");
+  assert.equal(envelope.replyTo, "01345678-1234-4234-8234-123456789abc");
+  assert.deepEqual(envelope.route, route);
   assert.match(result.input[0].text, /not user consent/);
 });
 
-test("large peer input is split into ordered verifiable context fragments", () => {
+test("large peer input keeps common metadata in one verifiable envelope", () => {
   const message = `heading\n${"가나다라마바사".repeat(500)}\ntrailer`;
+  const route = {
+    schema_version: 1,
+    project_id: "hermes",
+    target_role: "auditor",
+    logical_message_id: "21345678-1234-4234-8234-123456789abc",
+    payload_type: "coordination",
+    wake_policy: "immediate",
+  };
   const result = peerMessageInput({
     from: "alpha",
+    to: "beta",
     message,
     messageId: "message-large",
+    route,
   });
-  const values = Object.values(result.additionalContext).map(({ value }) =>
-    JSON.parse(value),
+  const envelope = JSON.parse(
+    result.additionalContext["cxmsg:message-large"].value,
   );
+  const fragments = Object.entries(result.additionalContext)
+    .filter(([key]) => key.startsWith("cxmsg:message-large:part:"))
+    .map(([, { value }]) => JSON.parse(value));
 
-  assert.ok(values.length > 1);
+  assert.ok(fragments.length > 1);
+  assert.equal(envelope.from, "alpha");
+  assert.equal(envelope.to, "beta");
+  assert.deepEqual(envelope.route, route);
+  assert.equal(envelope.body.fragments, fragments.length);
+  assert.equal(envelope.body.bytes, Buffer.byteLength(message, "utf8"));
+  assert.match(envelope.body.sha256, /^[0-9a-f]{64}$/);
   assert.deepEqual(
-    values.map((value) => value.fragment.index),
-    values.map((_, index) => index + 1),
+    fragments.map((value) => value.fragment),
+    fragments.map((_, index) => index + 1),
   );
-  assert.ok(values.every((value) => value.fragment.total === values.length));
   assert.ok(
-    values.every(
+    fragments.every(
       (value) => Buffer.byteLength(value.message, "utf8") <= 2 * 1024,
     ),
   );
-  assert.equal(values.map((value) => value.message).join(""), message);
-  assert.ok(values.every((value) => value.fragment.messageBytes === Buffer.byteLength(message, "utf8")));
-  assert.ok(values.every((value) => value.fragment.messageSha256 === values[0].fragment.messageSha256));
-  assert.match(result.input[0].text, new RegExp(`${values.length} ordered cxmsg fragments`));
+  assert.equal(fragments.map((value) => value.message).join(""), message);
+  assert.ok(fragments.every((value) => value.from === undefined));
+  assert.ok(fragments.every((value) => value.route === undefined));
+  assert.match(result.input[0].text, new RegExp(`${fragments.length} ordered cxmsg fragments`));
 });
 
 test("stored peer input carries a bounded preview and verifiable opaque reference", () => {
@@ -199,6 +220,11 @@ test("idle delivery starts a non-escalating turn", async () => {
   assert.equal(calls[0].method, "turn/start");
   assert.equal(calls[0].params.approvalPolicy, "never");
   assert.equal(calls[0].params.additionalContext["cxmsg:message-2"].kind, "untrusted");
+  const envelope = JSON.parse(
+    calls[0].params.additionalContext["cxmsg:message-2"].value,
+  );
+  assert.equal(envelope.from, "alpha");
+  assert.equal(envelope.to, "beta");
 });
 
 test("active delivery steers the current turn", async () => {
@@ -256,6 +282,30 @@ test("unloaded threads are resumed before delivery", async () => {
     "thread/resume",
     "turn/start",
   ]);
+});
+
+test("peer delivery does not resume an unmanaged externally owned thread", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      assert.fail("delivery must stop before resume or wake");
+    },
+  };
+  await assert.rejects(
+    deliverPeerMessage(
+      client,
+      {
+        id: "thread-external",
+        name: "cxmsg:external",
+        status: { type: "notLoaded" },
+      },
+      { from: "alpha", message: "do not wake", messageId: "message-external" },
+      { allowResume: false },
+    ),
+    (error) => error.code === "EEXTERNALWRITERUNVERIFIED",
+  );
+  assert.deepEqual(calls, []);
 });
 
 test("delegated tasks are direct correlated user turns without approval override", async () => {

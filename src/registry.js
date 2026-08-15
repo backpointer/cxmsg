@@ -64,6 +64,13 @@ export function listSessionRecords() {
     .filter(Boolean);
 }
 
+export function sessionAllowsAppServerResume(record) {
+  return Boolean(
+    record &&
+      (record.adopted !== true || typeof record.managedByCxmsgAt === "string"),
+  );
+}
+
 export function writeSessionRecord(record) {
   validateSessionName(record.name);
   if (!validRecord(record)) throw new Error("invalid cxmsg session record");

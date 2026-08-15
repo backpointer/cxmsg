@@ -43,7 +43,10 @@ import {
   truncateUtf8,
   validateSessionName,
 } from "./messaging.js";
-import { readSessionRecord } from "./registry.js";
+import {
+  readSessionRecord,
+  sessionAllowsAppServerResume,
+} from "./registry.js";
 import {
   parseTypedPeerEnvelope,
   routePeerMessage,
@@ -59,7 +62,7 @@ import {
 } from "./socket-probe.js";
 
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
-export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 9;
+export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 11;
 
 function bridgeRecordPath(target) {
   return path.join(CLAUDE_BRIDGES_DIR, `${validateSessionName(target)}.json`);
@@ -278,6 +281,8 @@ export async function deliverClaudeMessage(
         message,
         messageId: logicalMessageId,
         route,
+      }, {
+        allowResume: sessionAllowsAppServerResume(targetRecord),
       });
     });
   if (bypassAdmission) {
@@ -369,6 +374,7 @@ export async function handleClaudeDeliveryAck(
         deliveredAt: new Date().toISOString(),
         delivery: wake.delivery,
         turnId: wake.turnId,
+        errorCode: null,
         error: null,
       },
     }));
@@ -389,6 +395,7 @@ export async function handleClaudeDeliveryAck(
         ...current.wake,
         status: "failed",
         attemptedAt: new Date().toISOString(),
+        errorCode: error?.code || "wake_error",
         error: error.message,
       },
     }));

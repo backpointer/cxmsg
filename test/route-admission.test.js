@@ -32,6 +32,26 @@ registry.writeSessionRecord({
   threadId: "a7345678-1234-4234-8234-123456789abc",
   cwd: path.resolve("."),
 });
+registry.writeSessionRecord({
+  name: "reply-requester",
+  threadId: "b9345678-1234-4234-8234-123456789abc",
+  cwd: path.resolve("."),
+});
+registry.writeSessionRecord({
+  name: "reply-responder",
+  threadId: "c9345678-1234-4234-8234-123456789abc",
+  cwd: path.resolve("."),
+});
+registry.writeSessionRecord({
+  name: "bound-requester",
+  threadId: "d9345678-1234-4234-8234-123456789abc",
+  cwd: path.resolve("."),
+});
+registry.writeSessionRecord({
+  name: "bound-responder",
+  threadId: "e9345678-1234-4234-8234-123456789abc",
+  cwd: path.resolve("."),
+});
 
 test.after(() => {
   rmSync(stateDir, { recursive: true, force: true });
@@ -60,6 +80,11 @@ const ids = {
   afterTurn: "b4345678-2234-4234-8234-123456789abc",
   afterJob: "c4345678-2234-4234-8234-123456789abc",
   crossProjectTrigger: "f4345678-2234-4234-8234-123456789abc",
+  replyOriginal: "d9345678-1234-4234-8234-123456789abc",
+  reply: "e9345678-1234-4234-8234-123456789abc",
+  replyLegacy: "f9345678-1234-4234-8234-123456789abc",
+  routedReplyOriginal: "ac345678-1234-4234-8234-123456789abc",
+  routedReply: "bc345678-1234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -109,6 +134,155 @@ test("unbound targets remain compatible and logical messages wake at most once",
   assert.equal(duplicate.deduplicated, true);
   assert.equal(duplicate.status, "turn_started");
   assert.equal(dispatches, 1);
+});
+
+test("peer replies invert pinned thread identities and preserve correlation", async () => {
+  await routes.routePeerMessage(
+    {
+      from: "reply-requester",
+      target: "reply-responder",
+      message: "which result passed?",
+      logicalMessageId: ids.replyOriginal,
+    },
+    async () => ({
+      delivery: "started",
+      turnId: "da345678-1234-4234-8234-123456789abc",
+    }),
+  );
+
+  const reply = routes.planPeerReply({
+    from: "reply-responder",
+    replyToMessageId: ids.replyOriginal,
+    logicalMessageId: ids.reply,
+  });
+  assert.equal(reply.target, "reply-requester");
+  assert.equal(reply.expectedSenderThreadId, "c9345678-1234-4234-8234-123456789abc");
+  assert.equal(reply.expectedTargetThreadId, "b9345678-1234-4234-8234-123456789abc");
+  assert.equal(reply.route, null);
+
+  let dispatches = 0;
+  const outcome = await routes.routePeerMessage(
+    { ...reply, message: "the isolated audit passed" },
+    async ({ replyToMessageId }) => {
+      dispatches += 1;
+      assert.equal(replyToMessageId, ids.replyOriginal);
+      return {
+        delivery: "started",
+        turnId: "ea345678-1234-4234-8234-123456789abc",
+      };
+    },
+  );
+  assert.equal(outcome.status, "turn_started");
+  assert.equal(dispatches, 1);
+  assert.equal(routes.readRouteDelivery(ids.reply).replyToMessageId, ids.replyOriginal);
+  assert.throws(
+    () =>
+      routes.planPeerReply({
+        from: "reply-requester",
+        replyToMessageId: ids.replyOriginal,
+        logicalMessageId: "fa345678-1234-4234-8234-123456789abc",
+      }),
+    /not the original recipient/,
+  );
+
+  registry.writeSessionRecord({
+    name: "reply-requester",
+    threadId: "ab345678-1234-4234-8234-123456789abc",
+    cwd: path.resolve("."),
+  });
+  assert.throws(
+    () =>
+      routes.planPeerReply({
+        from: "reply-responder",
+        replyToMessageId: ids.replyOriginal,
+        logicalMessageId: "bb345678-1234-4234-8234-123456789abc",
+      }),
+    /target thread identity changed/,
+  );
+});
+
+test("strict replies reject legacy messages without a pinned sender thread", async () => {
+  await routes.routePeerMessage(
+    {
+      from: "legacy-sender",
+      target: "reply-responder",
+      message: "legacy request",
+      logicalMessageId: ids.replyLegacy,
+    },
+    async () => ({
+      delivery: "started",
+      turnId: "ca345678-1234-4234-8234-123456789abc",
+    }),
+  );
+  assert.throws(
+    () =>
+      routes.planPeerReply({
+        from: "reply-responder",
+        replyToMessageId: ids.replyLegacy,
+        logicalMessageId: "cb345678-1234-4234-8234-123456789abc",
+      }),
+    /lacks pinned bidirectional thread identity/,
+  );
+});
+
+test("routed replies invert project roles and reject altered response routes", async () => {
+  routes.writeRouteBinding({
+    sessionName: "bound-requester",
+    threadId: "d9345678-1234-4234-8234-123456789abc",
+    projectId: "hermes",
+    role: "implementer",
+  });
+  routes.writeRouteBinding({
+    sessionName: "bound-responder",
+    threadId: "e9345678-1234-4234-8234-123456789abc",
+    projectId: "hermes",
+    role: "reviewer",
+  });
+  await routes.routePeerMessage(
+    {
+      from: "bound-requester",
+      target: "bound-responder",
+      message: "review the pinned result",
+      route: route(ids.routedReplyOriginal, {
+        target_role: "reviewer",
+        sender_role: "implementer",
+        task_id: "TASK-REPLY",
+      }),
+    },
+    async () => ({
+      delivery: "started",
+      turnId: "cc345678-1234-4234-8234-123456789abc",
+    }),
+  );
+
+  const reply = routes.planPeerReply({
+    from: "bound-responder",
+    replyToMessageId: ids.routedReplyOriginal,
+    logicalMessageId: ids.routedReply,
+  });
+  assert.deepEqual(reply.route, {
+    schema_version: 1,
+    project_id: "hermes",
+    target_role: "implementer",
+    logical_message_id: ids.routedReply,
+    payload_type: "response",
+    wake_policy: "immediate",
+    sender_role: "reviewer",
+    task_id: "TASK-REPLY",
+  });
+
+  await assert.rejects(
+    routes.routePeerMessage(
+      {
+        ...reply,
+        route: { ...reply.route, target_role: "coordinator" },
+        message: "misrouted answer",
+      },
+      async () => assert.fail("an altered reply route must not dispatch"),
+    ),
+    /routing identity changed/,
+  );
+  assert.equal(routes.readRouteDelivery(ids.routedReply), null);
 });
 
 test("bound targets admit only an exact project and role route", async () => {

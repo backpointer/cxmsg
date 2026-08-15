@@ -63,13 +63,24 @@ export async function listRecentTurns(
   return client.request("thread/turns/list", params);
 }
 
-export async function readThreadForInput(client, threadOrId) {
+export async function readThreadForInput(
+  client,
+  threadOrId,
+  { allowResume = true } = {},
+) {
   let thread =
     typeof threadOrId === "string"
       ? await readThreadMetadata(client, threadOrId)
       : threadOrId;
 
   if (thread.status?.type === "notLoaded") {
+    if (!allowResume) {
+      const error = new AppServerError(
+        "thread is not loaded and may have an external rollout writer; attach it with cxmsg before delivery",
+      );
+      error.code = "EEXTERNALWRITERUNVERIFIED";
+      throw error;
+    }
     const resumed = await client.request("thread/resume", {
       threadId: thread.id,
       includeTurns: false,

@@ -139,6 +139,12 @@ function validBatch(record) {
       message?.messageId &&
       UUID_PATTERN.test(message.messageId) &&
       NAME_PATTERN.test(message.from || "") &&
+      (message.senderThreadId === undefined ||
+        message.senderThreadId === null ||
+        UUID_PATTERN.test(message.senderThreadId || "")) &&
+      (message.replyToMessageId === undefined ||
+        (UUID_PATTERN.test(message.replyToMessageId || "") &&
+          message.replyToMessageId !== message.messageId)) &&
       validBody(message.body, message.messageId) &&
       typeof message.routeFingerprint === "string" &&
       SHA256_PATTERN.test(message.routeFingerprint) &&

@@ -144,6 +144,7 @@ import {
   listRouteBindings,
   reconcileRouteDelivery,
   routeBindingState,
+  planPeerReply,
   routePeerMessage,
   writeRouteBinding,
 } from "../src/route-admission.js";
@@ -159,6 +160,7 @@ import {
   listSessionRecords,
   readSessionRecord,
   removeSessionRecord,
+  sessionAllowsAppServerResume,
   withSessionLock,
   writeSessionRecord,
 } from "../src/registry.js";
@@ -209,6 +211,8 @@ function usage(exitCode = 0) {
              [--wake-policy immediate|when-idle|after-turn|after-job]
              [--after-turn <turn-id>|--after-job <job-id>]
              [--] <target> <message...>
+  cxmsg reply [--from <name>] [--logical-message-id <uuid>]
+              <reply-to-message-id> <message...>
   cxmsg route bind <session> --project <id> --role <role>
   cxmsg route show <session> [--json]
   cxmsg route list [--json]
@@ -547,6 +551,7 @@ function deliveryProjection(record) {
     deliveryId: delivery.deliveryId,
     from: record.logicalMessage.from,
     target: delivery.target,
+    replyToMessageId: record.logicalMessage.replyToMessageId || null,
     admissionState: delivery.admissionState,
     admissionReason: delivery.admissionReason,
     wakePolicy: delivery.wakePolicy,
@@ -2066,6 +2071,8 @@ async function commandSend(args) {
           message,
           messageId,
           route: admittedRoute,
+        }, {
+          allowResume: sessionAllowsAppServerResume(targetRecord),
         });
       });
     },
@@ -2096,6 +2103,60 @@ async function commandSend(args) {
   const delivery = outcome.result;
   process.stdout.write(
     `delivered ${delivery.messageId} to ${target} (${delivery.delivery}, turn ${delivery.turnId})\n`,
+  );
+}
+
+async function commandReply(args) {
+  let from = process.env.CODEX_SESSION_NAME || "";
+  let logicalMessageId = randomUUID();
+  while (args[0]?.startsWith("--")) {
+    const option = args.shift();
+    if (option === "--") break;
+    const value = args.shift();
+    if (!value) throw new Error(`${option} requires a value`);
+    if (option === "--from") from = value;
+    else if (option === "--logical-message-id") logicalMessageId = value;
+    else throw new Error(`unknown reply option: ${option}`);
+  }
+  validateSessionName(from);
+  const replyToMessageId = args.shift();
+  const message = validateStoredMessage(args.join(" "));
+  const reply = planPeerReply({ from, replyToMessageId, logicalMessageId });
+  const targetRecord = readSessionRecord(reply.target);
+
+  const outcome = await routePeerMessage(
+    { ...reply, message },
+    async ({
+      logicalMessageId: messageId,
+      route: admittedRoute,
+      replyToMessageId: admittedReplyTo,
+    }) => {
+      await ensureServer();
+      return withAppServer(async (client) => {
+        const thread = await readThreadMetadata(client, targetRecord.threadId);
+        return deliverPeerMessage(client, thread, {
+          from,
+          message,
+          messageId,
+          replyTo: admittedReplyTo,
+          route: admittedRoute,
+        }, {
+          allowResume: sessionAllowsAppServerResume(targetRecord),
+        });
+      });
+    },
+  );
+
+  if (outcome.admissionState === "quarantined") {
+    process.stderr.write(
+      `cxmsg: quarantined reply ${outcome.logicalMessageId} for ${reply.target}: ${outcome.reason}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write(
+    `${outcome.deduplicated ? "deduplicated" : "replied"} ${outcome.logicalMessageId} ` +
+      `to ${replyToMessageId} for ${reply.target}\n`,
   );
 }
 
@@ -2826,6 +2887,9 @@ async function main() {
       break;
     case "send":
       await commandSend(args);
+      break;
+    case "reply":
+      await commandReply(args);
       break;
     case "route":
       await commandRoute(args);

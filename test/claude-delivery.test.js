@@ -145,6 +145,44 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     );
     assert.equal(wakes.length, 1);
 
+    const blockedWake = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "preserve an externally owned writer failure",
+    });
+    const blockedWakeAck = parseClaudeDeliveryAck(
+      `<cxmsg-ack in-reply-to="${blockedWake.jobId}" status="completed">\nStored result\n</cxmsg-ack>`,
+    );
+    await assert.rejects(
+      handleClaudeDeliveryAck(
+        "coordinator",
+        {
+          fromSession: peer.sessionId,
+          fromAddress: peer.address,
+          fromName: peer.name,
+          messageId: "52345678-1234-1234-1234-123456789abc",
+        },
+        blockedWakeAck,
+        {
+          deliverMessage: async () => {
+            const error = new Error("external rollout writer is not managed");
+            error.code = "EEXTERNALWRITERUNVERIFIED";
+            throw error;
+          },
+        },
+      ),
+      (error) => error.code === "EEXTERNALWRITERUNVERIFIED",
+    );
+    const storedBlockedWake = readJob(blockedWake.jobId);
+    assert.equal(storedBlockedWake.status, "completed");
+    assert.equal(storedBlockedWake.result, "Stored result");
+    assert.equal(storedBlockedWake.wake.status, "failed");
+    assert.equal(
+      storedBlockedWake.wake.errorCode,
+      "EEXTERNALWRITERUNVERIFIED",
+    );
+
     const wrongSession = "77654321-4321-4321-4321-cba987654321";
     const sessionMismatch = await createClaudeDeliveryJob({
       from: "coordinator",
