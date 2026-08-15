@@ -91,8 +91,11 @@ requires an explicit re-bind of the intended session; `EQUARANTINED` is an
 operator-review warning and never authorizes automatic release.
 `EROUTEUNCONFIRMED` requests one bounded positive-evidence reconciliation.
 After a complete or incomplete scan records no positive acceptance evidence,
-`EROUTERECONCILEDUNKNOWN` preserves the Delivery as unknown and explicitly
-forbids replay or repeated reconciliation without new positive evidence.
+the latest durable evidence must have both kind `reconciliation` and code
+`EACCEPTANCEUNVERIFIED`. `EROUTERECONCILEDUNKNOWN` then preserves the Delivery
+as unknown and explicitly forbids replay or repeated reconciliation without
+new positive evidence. The error code alone is not sufficient for this
+classification.
 
 Node Directory findings validate bounded owner-only Project, Project transition,
 Node, Tombstone, and successor records; unique routing/discovery identity; Node-to-Project

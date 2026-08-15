@@ -558,6 +558,7 @@ function inspectDeliveryLedger(
         attemptStartedAt: activeAttempt?.startedAt || null,
         claimLeaseUntil: delivery.claim?.leaseUntil || null,
         errorCode: delivery.errorCode || null,
+        latestEvidenceKind: delivery.evidence.at(-1)?.evidenceKind || null,
         updatedAt: record.teamDeliveries
           ? record.teamDeliveries.reduce(
               (latest, candidate) =>
@@ -3117,7 +3118,8 @@ export function inspectRouteState({
       const reconciledUnknown =
         !legacyIdentity &&
         delivery.status === "unknown" &&
-        delivery.errorCode === "EACCEPTANCEUNVERIFIED";
+        delivery.errorCode === "EACCEPTANCEUNVERIFIED" &&
+        delivery.latestEvidenceKind === "reconciliation";
       checks.push(
         diagnosticCheck({
           id: `${deliveryScope}.reconcile.${safeLabel(delivery.logicalMessageId)}`,

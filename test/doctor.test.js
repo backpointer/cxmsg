@@ -814,6 +814,32 @@ test("Route Inspector does not recommend repeating a negative reconciliation", a
       checks.some((check) => check.errorCode === "EROUTEUNCONFIRMED"),
       false,
     );
+
+    records[2] = {
+      ...records[2],
+      evidenceKind: "dispatch-result",
+    };
+    await fs.writeFile(
+      path.join(segments, "segment-00000001.jsonl"),
+      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      { mode: 0o600 },
+    );
+    const nonReconciliation = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+    });
+    assert.equal(
+      nonReconciliation.some(
+        (check) => check.errorCode === "EROUTERECONCILEDUNKNOWN",
+      ),
+      false,
+    );
+    assert.equal(
+      nonReconciliation.find(
+        (check) => check.errorCode === "EROUTEUNCONFIRMED",
+      ).status,
+      "warn",
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
