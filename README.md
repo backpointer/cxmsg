@@ -286,6 +286,10 @@ backup. Interrupted pair moves remain journaled and `recover` rolls them
 forward; Doctor reports them without mutation. Restore requires the exact
 archive ID, rechecks the active Repair quota and every content digest, and can
 run only once. Archive and restore never start a model turn or create authority.
+Archive revalidates its selection after first rolling forward any older
+incomplete Repair-archive journal under the same lease. Thus a stale archive
+request never moves one of its own candidates, although it may finish a
+previously committed interrupted operation before returning the stale error.
 
 Cancellation is terminal and refuses an active, unexpired claim. Scheduler
 status includes a heartbeat and reports a live identity with a stale heartbeat
@@ -297,9 +301,10 @@ coordination event log; retained bodies and endpoint paths are never included.
 `cxmsg doctor` validates the index/checkpoint and heartbeat without rebuilding,
 restarting, claiming, cancelling, or dispatching anything.
 
-This slice does not yet implement automatic retry, group wake, or
-task-completion inference. Store-only Group fan-out is recorded without model
-wake. Scheduled Delegation is implemented as a separate
+This slice does not implement automatic retry or task-completion inference.
+Store-only Group fan-out is recorded without model wake, while explicit Team
+Cast mention, wake-all, when-idle, after-turn, and after-job policies use their
+separately verified paths. Scheduled Delegation is implemented as a separate
 durable Job path and never creates ordinary Peer Message history. The index is
 bounded to 4,096 Logical Messages and is not a retention mechanism. An ambiguous
 dispatch remains `unknown`, and only positive App Server acceptance evidence

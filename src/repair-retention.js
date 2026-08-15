@@ -247,7 +247,7 @@ export function buildRepairRetentionPlan(
         automaticDeletion: false,
         mutationEnabled: true,
         mutationKind: "recoverable-archive",
-        minimumAgeDays: 90,
+        minimumAgeDays: REPAIR_RETENTION_MIN_AGE_MS / (24 * 60 * 60 * 1_000),
         terminalState: "completed",
       },
       category,
@@ -304,7 +304,7 @@ export function buildRepairRetentionPlan(
       automaticDeletion: false,
       mutationEnabled: true,
       mutationKind: "recoverable-archive",
-      minimumAgeDays: 90,
+      minimumAgeDays: REPAIR_RETENTION_MIN_AGE_MS / (24 * 60 * 60 * 1_000),
       terminalState: "completed",
     },
     category,
@@ -422,6 +422,31 @@ function requireArchiveReceipt(manifest) {
   return receipt;
 }
 
+function reusableArchiveReceipt(manifest) {
+  const filename = archiveReceiptPath(manifest.archiveId);
+  if (!existsSync(filename)) return null;
+  const receipt = readJson(filename, "Repair archive terminal receipt").value;
+  const estimatedBytes = manifest.items.reduce(
+    (total, item) => total + item.estimatedBytes,
+    0,
+  );
+  if (
+    receipt?.schemaVersion !== 1 ||
+    receipt.outcome !== "archived" ||
+    receipt.archiveId !== manifest.archiveId ||
+    receipt.planDigest !== manifest.planDigest ||
+    receipt.cutoff !== manifest.cutoff ||
+    receipt.itemCount !== manifest.items.length ||
+    receipt.estimatedBytes !== estimatedBytes ||
+    receipt.createdAt !== manifest.createdAt ||
+    !Number.isFinite(Date.parse(receipt.committedAt || "")) ||
+    receipt.automaticDeletion !== false
+  ) {
+    throw new Error("Repair archive terminal receipt failed recovery validation");
+  }
+  return receipt;
+}
+
 function requireTransaction(directory, expectedSha256) {
   const summary = privateTreeSummary(directory);
   if (summary.sha256 !== expectedSha256) {
@@ -525,22 +550,27 @@ async function finishArchive(manifest, fault = null) {
       throw new Error("Repair archive item is not in an archivable state");
     }
   }
-  const committedAt = new Date().toISOString();
-  const receipt = atomicWriteJson(archiveReceiptPath(manifest.archiveId), {
-    schemaVersion: 1,
-    outcome: "archived",
-    archiveId: manifest.archiveId,
-    planDigest: manifest.planDigest,
-    cutoff: manifest.cutoff,
-    itemCount: manifest.items.length,
-    estimatedBytes: manifest.items.reduce(
-      (total, item) => total + item.estimatedBytes,
-      0,
-    ),
-    createdAt: manifest.createdAt,
-    committedAt,
-    automaticDeletion: false,
-  });
+  const existingReceipt = reusableArchiveReceipt(manifest);
+  const committedAt = existingReceipt?.committedAt || new Date().toISOString();
+  const receipt = existingReceipt || atomicWriteJson(
+    archiveReceiptPath(manifest.archiveId),
+    {
+      schemaVersion: 1,
+      outcome: "archived",
+      archiveId: manifest.archiveId,
+      planDigest: manifest.planDigest,
+      cutoff: manifest.cutoff,
+      itemCount: manifest.items.length,
+      estimatedBytes: manifest.items.reduce(
+        (total, item) => total + item.estimatedBytes,
+        0,
+      ),
+      createdAt: manifest.createdAt,
+      committedAt,
+      automaticDeletion: false,
+    },
+  );
+  if (fault) await fault("after-archive-receipt", manifest);
   manifest.status = "committed";
   manifest.committedAt = committedAt;
   manifest.receiptSha256 = sha256(JSON.stringify(receipt));

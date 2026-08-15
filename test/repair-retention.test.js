@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
+  cpSync,
   existsSync,
   mkdtempSync,
   mkdirSync,
@@ -9,6 +11,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  truncateSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -207,6 +210,47 @@ test("Repair retention plan is deterministic, read-only, and completion-only", (
       1,
     );
 
+    cpSync(
+      path.join(archiveDirectory, "items", archivedId, "transaction"),
+      path.join(root, "repairs", "transactions", archivedId),
+      { recursive: true },
+    );
+    chmodSync(path.join(root, "repairs", "transactions", archivedId), 0o700);
+    chmodSync(
+      path.join(root, "repairs", "transactions", archivedId, "index"),
+      0o700,
+    );
+    chmodSync(
+      path.join(root, "repairs", "transactions", archivedId, "manifest.json"),
+      0o600,
+    );
+    cpSync(
+      path.join(archiveDirectory, "items", archivedId, "receipt.json"),
+      path.join(root, "repairs", "receipts", `${archivedId}.json`),
+    );
+    chmodSync(
+      path.join(root, "repairs", "receipts", `${archivedId}.json`),
+      0o600,
+    );
+    const duplicateRestore = runCxmsg(root, [
+      "repair",
+      "retention",
+      "restore",
+      archiveReceipt.archiveId,
+      "--confirm",
+      archiveReceipt.archiveId,
+      "--json",
+    ]);
+    assert.equal(duplicateRestore.status, 1);
+    assert.match(duplicateRestore.stderr, /cannot be recovered safely/);
+    rmSync(path.join(root, "repairs", "transactions", archivedId), {
+      recursive: true,
+      force: true,
+    });
+    rmSync(path.join(root, "repairs", "receipts", `${archivedId}.json`), {
+      force: true,
+    });
+
     const wrongRestore = runCxmsg(root, [
       "repair",
       "retention",
@@ -305,10 +349,130 @@ test("Repair archive and restore recover interrupted pair moves", async () => {
       "transactions",
       "52345678-1234-4234-8234-123456789abc",
     )));
+
+    const secondPlan = retention.buildRepairRetentionPlan({ before }, { now });
+    await assert.rejects(
+      retention.archiveRepairRetention(
+        { before, expectedPlanDigest: secondPlan.planDigest },
+        {
+          now,
+          fault(phase) {
+            if (phase === "after-archive-receipt") {
+              throw new Error("simulated receipt boundary crash");
+            }
+          },
+        },
+      ),
+      /simulated receipt boundary crash/,
+    );
+    const archiveRoot = path.join(root, "repair-retention", "transactions");
+    const interruptedId = readdirSync(archiveRoot).find((candidate) => {
+      const manifest = JSON.parse(readFileSync(
+        path.join(archiveRoot, candidate, "manifest.json"),
+        "utf8",
+      ));
+      return manifest.status === "archiving";
+    });
+    assert.ok(interruptedId);
+    const receiptPath = path.join(
+      root,
+      "repair-retention",
+      "receipts",
+      `${interruptedId}.json`,
+    );
+    const receiptBeforeRecovery = readFileSync(receiptPath, "utf8");
+    recovered = await retention.recoverRepairRetention();
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].outcome, "archived");
+    assert.equal(readFileSync(receiptPath, "utf8"), receiptBeforeRecovery);
   } finally {
     if (previousStateDir === undefined) delete process.env.CXMSG_STATE_DIR;
     else process.env.CXMSG_STATE_DIR = previousStateDir;
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Repair restore rejects archived tampering and active quota exhaustion", () => {
+  for (const scenario of ["tamper", "quota"]) {
+    const root = mkdtempSync(
+      path.join(os.tmpdir(), `cxmsg-repair-retention-${scenario}-`),
+    );
+    try {
+      const transactionId = scenario === "tamper"
+        ? "62345678-1234-4234-8234-123456789abc"
+        : "72345678-1234-4234-8234-123456789abc";
+      repairRecord(root, {
+        transactionId,
+        phase: "completed",
+        completedAt: "2025-01-02T00:00:00.000Z",
+      });
+      const args = [
+        "repair",
+        "retention",
+        "plan",
+        "--before",
+        "2026-01-01T00:00:00.000Z",
+        "--json",
+      ];
+      const planned = runCxmsg(root, args);
+      assert.equal(planned.status, 0, planned.stderr);
+      const plan = JSON.parse(planned.stdout);
+      const archived = runCxmsg(root, [
+        "repair",
+        "retention",
+        "archive",
+        "--before",
+        "2026-01-01T00:00:00.000Z",
+        "--confirm",
+        plan.planDigest,
+        "--json",
+      ]);
+      assert.equal(archived.status, 0, archived.stderr);
+      const archiveId = JSON.parse(archived.stdout).archiveId;
+      if (scenario === "tamper") {
+        const archivedManifest = path.join(
+          root,
+          "repair-retention",
+          "transactions",
+          archiveId,
+          "items",
+          transactionId,
+          "transaction",
+          "manifest.json",
+        );
+        const changed = JSON.parse(readFileSync(archivedManifest, "utf8"));
+        changed.updatedAt = "2025-01-05T00:00:00.000Z";
+        writeJson(archivedManifest, changed);
+      } else {
+        const quota = path.join(root, "repairs", "quota.bin");
+        writeFileSync(quota, "", { mode: 0o600 });
+        truncateSync(quota, 256 * 1024 * 1024);
+      }
+      const restored = runCxmsg(root, [
+        "repair",
+        "retention",
+        "restore",
+        archiveId,
+        "--confirm",
+        archiveId,
+        "--json",
+      ]);
+      assert.equal(restored.status, 1);
+      assert.match(
+        restored.stderr,
+        scenario === "tamper" ? /evidence changed/ : /bounded retention limit/,
+      );
+      assert.equal(
+        existsSync(path.join(root, "repairs", "transactions", transactionId)),
+        false,
+      );
+      assert.equal(
+        existsSync(path.join(root, "repairs", "receipts", `${transactionId}.json`)),
+        false,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   }
 });
 

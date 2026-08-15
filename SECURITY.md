@@ -89,6 +89,9 @@ separate owner-private bounded store. Interrupted archive or restore operations
 roll forward only through the explicit recovery command. Restore requires the
 exact archive ID, unchanged content digests, empty active identities, and
 sufficient active Repair quota. Doctor never invokes recovery automatically.
+Archive performs recovery before its under-lock plan comparison. That recovery
+may finish an older durable journal even when the new request then fails stale;
+it is not a side effect on the stale request's candidate set.
 
 The Retention Module remains read-only by default. Its plan uses explicit
 cutoffs, fixed minimum ages, bounded reason codes, and owner-private metadata;

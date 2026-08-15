@@ -222,7 +222,7 @@ and no quiet drop, implicit wake-all, or Project leakage.
 ### T9 — Graph Projection and extended Doctor
 
 - Priority: P3
-- Status: READY; T6 and T7 are complete
+- Status: COMPLETE
 - Canonical phase: Phase 7
 
 - [x] Derive separate `belongs-to-project`, `member-of-cluster`,
