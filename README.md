@@ -170,6 +170,10 @@ reusing it with different content fails as an idempotency conflict. Targets
 without an explicit binding retain legacy unscoped-send compatibility during
 migration.
 
+After a scan records no positive evidence, Doctor reports
+`EROUTERECONCILEDUNKNOWN` instead of requesting the same scan again. The
+Delivery remains retained and non-replayable.
+
 One narrow explicit retry is available only when the pinned App Server
 contract proves that `turn/steer` rejected the input before queue mutation.
 cxmsg 0.27 recognizes the audited `codex-app-server/0.147.0` no-active-turn,

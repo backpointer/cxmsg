@@ -307,6 +307,17 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Regress opposite-argument concurrent consolidation with one winner, one
       explicit loser, and no lock-order deadlock.
 
+### Post-roadmap maintenance — Reconciliation observability
+
+- Status: COMPLETE; unknown remains non-replayable
+
+- [x] Distinguish a never-reconciled Delivery from one carrying durable
+      `EACCEPTANCEUNVERIFIED` reconciliation evidence.
+- [x] Stop recommending repeated bounded scans after no positive acceptance
+      evidence was observed.
+- [x] Preserve `unknown`, retain the Delivery, and grant zero retry or wake
+      authority through the new diagnostic distinction.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.

@@ -557,6 +557,7 @@ function inspectDeliveryLedger(
         ...(delivery.targetThreadId ? { targetThreadId: delivery.targetThreadId } : {}),
         attemptStartedAt: activeAttempt?.startedAt || null,
         claimLeaseUntil: delivery.claim?.leaseUntil || null,
+        errorCode: delivery.errorCode || null,
         updatedAt: record.teamDeliveries
           ? record.teamDeliveries.reduce(
               (latest, candidate) =>
@@ -3113,6 +3114,10 @@ export function inspectRouteState({
     }
     if (["dispatching", "unknown"].includes(delivery.status)) {
       const legacyIdentity = !delivery.targetThreadId;
+      const reconciledUnknown =
+        !legacyIdentity &&
+        delivery.status === "unknown" &&
+        delivery.errorCode === "EACCEPTANCEUNVERIFIED";
       checks.push(
         diagnosticCheck({
           id: `${deliveryScope}.reconcile.${safeLabel(delivery.logicalMessageId)}`,
@@ -3120,14 +3125,20 @@ export function inspectRouteState({
           status: "warn",
           summary: legacyIdentity
             ? "Unconfirmed legacy Route Delivery lacks pinned target identity"
-            : "Route Delivery requires positive App Server acceptance reconciliation",
+            : reconciledUnknown
+              ? "Route Delivery was reconciled without positive acceptance evidence"
+              : "Route Delivery requires positive App Server acceptance reconciliation",
           verification: "records",
           errorCode: legacyIdentity
             ? "EROUTELEGACYIDENTITY"
-            : "EROUTEUNCONFIRMED",
+            : reconciledUnknown
+              ? "EROUTERECONCILEDUNKNOWN"
+              : "EROUTEUNCONFIRMED",
           remediation: legacyIdentity
             ? "Do not replay this legacy Delivery; create a new logical message only after operator review"
-            : `Run cxmsg route reconcile ${delivery.logicalMessageId}; absence is not replay permission`,
+            : reconciledUnknown
+              ? "Retain this unknown Delivery; do not replay or repeat reconciliation without new positive evidence"
+              : `Run cxmsg route reconcile ${delivery.logicalMessageId}; absence is not replay permission`,
           required: false,
         }),
       );

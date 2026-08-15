@@ -89,6 +89,10 @@ filename and registered-thread identity, delivery records, and Quarantine
 records. They never emit a quarantined body in the report. `EROUTEIDENTITY`
 requires an explicit re-bind of the intended session; `EQUARANTINED` is an
 operator-review warning and never authorizes automatic release.
+`EROUTEUNCONFIRMED` requests one bounded positive-evidence reconciliation.
+After a complete or incomplete scan records no positive acceptance evidence,
+`EROUTERECONCILEDUNKNOWN` preserves the Delivery as unknown and explicitly
+forbids replay or repeated reconciliation without new positive evidence.
 
 Node Directory findings validate bounded owner-only Project, Project transition,
 Node, Tombstone, and successor records; unique routing/discovery identity; Node-to-Project

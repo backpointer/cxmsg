@@ -752,6 +752,73 @@ test("Route Inspector rebuilds Delivery Ledger evidence without exposing bodies"
   }
 });
 
+test("Route Inspector does not recommend repeating a negative reconciliation", async () => {
+  const root = await fs.mkdtemp(
+    path.join(os.tmpdir(), "cxmsg-doctor-reconciled-unknown-"),
+  );
+  try {
+    await fs.chmod(root, 0o700);
+    const segments = path.join(root, "delivery-ledger", "segments");
+    const quarantine = path.join(root, "delivery-ledger", "quarantine");
+    await fs.mkdir(segments, { recursive: true, mode: 0o700 });
+    await fs.mkdir(quarantine, { mode: 0o700 });
+    const messageId = "cddaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const deliveryId = "dddaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const attemptId = "eddaa4e0-fa31-454e-a37e-a37f8807f0e7";
+    const records = [
+      ledgerBatch({
+        messageId,
+        deliveryId,
+        batchId: "fddaa4e0-fa31-454e-a37e-a37f8807f0e7",
+      }),
+      {
+        schemaVersion: 1,
+        recordType: "delivery-attempt",
+        messageId,
+        deliveryId,
+        attemptId,
+        transport: "codex-app-server",
+        startedAt: "2026-08-14T00:00:01.000Z",
+      },
+      {
+        schemaVersion: 1,
+        recordType: "delivery-evidence",
+        messageId,
+        deliveryId,
+        attemptId,
+        state: "unknown",
+        evidenceKind: "reconciliation",
+        turnId: null,
+        transportResult: null,
+        errorCode: "EACCEPTANCEUNVERIFIED",
+        observedAt: "2026-08-14T00:00:02.000Z",
+      },
+    ];
+    await fs.writeFile(
+      path.join(segments, "segment-00000001.jsonl"),
+      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      { mode: 0o600 },
+    );
+
+    const checks = inspectRouteState({
+      stateDir: root,
+      sessions: [{ name: "worker", threadId: THREAD_ID }],
+    });
+    const finding = checks.find(
+      (check) => check.errorCode === "EROUTERECONCILEDUNKNOWN",
+    );
+    assert.equal(finding.status, "warn");
+    assert.match(finding.summary, /reconciled without positive/);
+    assert.match(finding.remediation, /do not replay or repeat reconciliation/);
+    assert.equal(
+      checks.some((check) => check.errorCode === "EROUTEUNCONFIRMED"),
+      false,
+    );
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Route Inspector reports queued work with a missing scheduler and expired claim", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-scheduler-"));
   try {
