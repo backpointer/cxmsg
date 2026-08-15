@@ -1905,14 +1905,16 @@ async function commandClaudeDelivery(jobId, jsonOutput) {
     ackDeadlineAt: job.delivery?.ackDeadlineAt || null,
     nextAttemptAt: job.delivery?.nextAttemptAt || null,
     errorCode: job.delivery?.errorCode || null,
+    nativeReceipts: job.delivery?.nativeReceipts || [],
     ack: job.ack || null,
+    replyEvidence: job.replyEvidence || null,
     wake: job.wake || null,
     error: job.error || null,
   };
   if (jsonOutput) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
   else {
     process.stdout.write(
-      `${value.jobId}\t${value.status}\tattempt=${value.attempt}/${value.maxAttempts}\ttarget=${value.target}${value.errorCode ? `\terror=${value.errorCode}` : ""}\n`,
+      `${value.jobId}\t${value.status}\tattempt=${value.attempt}/${value.maxAttempts}\ttarget=${value.target}${value.nativeReceipts.length ? `\tnative=${value.nativeReceipts.at(-1).status}` : ""}${value.replyEvidence ? `\treply=${value.replyEvidence.status}` : ""}${value.errorCode ? `\terror=${value.errorCode}` : ""}\n`,
     );
   }
 }

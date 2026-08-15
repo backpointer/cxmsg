@@ -181,6 +181,14 @@ they carry different authority and delivery semantics.
   Reply Handle to a stable Node of another runtime, revalidates that Node's
   current Endpoint, and creates correlated Delivery evidence without exposing
   the Endpoint in model context. It never turns an ACK into task completion.
+- **Claude Native Receipt**: a bounded `peer_message_status` control receipt
+  correlated by the exact outbound transport message ID. `held`, `denied`,
+  `expired`, and `delivered` describe Claude's native message transport only;
+  they are not a model ACK, reply, completion, approval, or authority.
+- **Structured Reply Evidence**: an ordinary untrusted Claude Peer Message
+  whose exact envelope `in-reply-to` ID and source both match one Claude
+  Delivery Job. It proves correlation only and never changes the Job's ACK or
+  completion state. Correlation text copied into the Message Body is ignored.
 - **Node Directory Module**: the Module that owns Node, Endpoint, Project,
   Cluster, alias, successor, and Tombstone identity rules.
 - **Conversation Module**: the Module that owns Direct and Group Conversation

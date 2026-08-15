@@ -134,6 +134,10 @@ test("authorized Claude requests run in a fork and return one correlated reply",
       "summary",
     );
     const frame = JSON.parse(received.trim());
+    assert.match(
+      frame.message.content.split("\n")[0],
+      new RegExp(`in-reply-to="${REQUEST_ID}"`),
+    );
     assert.match(frame.message.content, new RegExp(`in-reply-to="${REQUEST_ID}"`));
     assert.match(frame.message.content, /report accepted/);
   } finally {

@@ -8,6 +8,7 @@ import {
 import {
   createJob,
   createJobOnce,
+  listJobs,
   mutateJob,
   readJob,
   updateJob,
@@ -61,7 +62,7 @@ function ackSourceEvidence(job, parsed) {
   };
 }
 
-function ackSourceMatches(job, parsed) {
+function deliverySourceMatches(job, parsed) {
   const expectedSession = job.claudeTarget?.sessionId;
   const expectedAddress = job.claudeTarget?.address;
   const addressMatches = Boolean(
@@ -73,6 +74,141 @@ function ackSourceMatches(job, parsed) {
       parsed.fromSession === expectedSession &&
       addressMatches,
   );
+}
+
+export async function recordClaudeDeliveryReply(
+  parsed,
+  jobId,
+  { log = writeCoordinationEvent } = {},
+) {
+  const job = readJob(jobId);
+  if (!job || job.kind !== "claude-delivery") return null;
+  let transitioned = false;
+  let conflict = null;
+  let rejection = null;
+  let late = false;
+  const now = new Date().toISOString();
+  const updated = await mutateJob(job.jobId, (current) => {
+    late = ["ack_timeout", "completion_timeout"].includes(current.status);
+    if (!deliverySourceMatches(current, parsed)) {
+      rejection = Object.assign(
+        new Error(`Claude delivery reply source mismatch: ${jobId}`),
+        { code: "EREPLYSOURCE" },
+      );
+      return current;
+    }
+    if (current.replyEvidence?.messageId === parsed.messageId) return current;
+    if (current.replyEvidence) {
+      conflict = Object.assign(
+        new Error(`Claude delivery already has correlated reply evidence: ${jobId}`),
+        { code: "EREPLYCONFLICT" },
+      );
+      return current;
+    }
+    transitioned = true;
+    return {
+      ...current,
+      replyEvidence: {
+        status: "correlated",
+        messageId: parsed.messageId,
+        receivedAt: now,
+        late,
+      },
+    };
+  });
+  if (rejection) {
+    await log({
+      kind: "claude-delivery",
+      phase: "reply-source-validation",
+      correlationId: job.jobId,
+      target: job.target,
+      attempt: job.delivery?.attempt,
+      outcome: "rejected",
+      errorCode: "source_mismatch",
+      late,
+    });
+    throw rejection;
+  }
+  if (conflict) throw conflict;
+  if (transitioned) {
+    await log({
+      kind: "claude-delivery",
+      phase: "reply-correlated",
+      correlationId: updated.jobId,
+      target: updated.target,
+      attempt: updated.delivery?.attempt,
+      outcome: updated.status,
+      late,
+    });
+  }
+  return { ...updated, replyTransitioned: transitioned };
+}
+
+export async function recordClaudeNativeDeliveryReceipt(
+  receipt,
+  { log = writeCoordinationEvent } = {},
+) {
+  const matches = listJobs().filter(
+    (job) =>
+      job.kind === "claude-delivery" &&
+      job.delivery?.messageIds?.includes(receipt.messageId),
+  );
+  if (matches.length === 0) return null;
+  if (matches.length > 1) {
+    throw Object.assign(
+      new Error("Claude native receipt matches multiple deliveries"),
+      { code: "ENATIVERECEIPTAMBIGUOUS" },
+    );
+  }
+  const job = matches[0];
+  const terminal = new Set(["denied", "expired", "delivered"]);
+  let transitioned = false;
+  let conflict = null;
+  const now = new Date().toISOString();
+  const updated = await mutateJob(job.jobId, (current) => {
+    const receipts = [...(current.delivery?.nativeReceipts || [])];
+    const index = receipts.findIndex(
+      (candidate) => candidate.messageId === receipt.messageId,
+    );
+    const existing = index === -1 ? null : receipts[index];
+    if (existing?.status === receipt.status) return current;
+    if (existing && terminal.has(existing.status)) {
+      conflict = Object.assign(
+        new Error("Claude native receipt terminal status conflict"),
+        { code: "ENATIVERECEIPTCONFLICT" },
+      );
+      return current;
+    }
+    const evidence = {
+      status: receipt.status,
+      messageId: receipt.messageId,
+      receivedAt: now,
+      late: ["ack_timeout", "completion_timeout"].includes(current.status),
+    };
+    if (index === -1) receipts.push(evidence);
+    else receipts[index] = evidence;
+    transitioned = true;
+    return {
+      ...current,
+      delivery: {
+        ...current.delivery,
+        nativeReceipts: receipts,
+      },
+    };
+  });
+  if (conflict) throw conflict;
+  if (transitioned) {
+    await log({
+      kind: "claude-delivery",
+      phase: "native-receipt",
+      correlationId: updated.jobId,
+      target: updated.target,
+      attempt: updated.delivery?.attempt,
+      outcome: receipt.status,
+      late: ["ack_timeout", "completion_timeout"].includes(updated.status),
+    });
+  }
+  return { ...updated, nativeReceiptTransitioned: transitioned };
 }
 
 export async function createClaudeDeliveryJob({
@@ -338,7 +474,7 @@ export async function recordClaudeDeliveryAck(
   let rejection = null;
   let late = false;
   const updated = await mutateJob(job.jobId, (current) => {
-    if (!ackSourceMatches(current, parsed)) {
+    if (!deliverySourceMatches(current, parsed)) {
       late = ["ack_timeout", "completion_timeout"].includes(current.status);
       const source = ackSourceEvidence(current, parsed);
       rejection = Object.assign(

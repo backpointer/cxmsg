@@ -90,11 +90,21 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
       jobReader: () => ({
         ...sent[0],
         status: "completed",
-        delivery: { attempt: 1, maxAttempts: 4, transportStatus: "delivered" },
+        delivery: {
+          attempt: 1,
+          maxAttempts: 4,
+          transportStatus: "delivered",
+          nativeReceipts: [
+            { messageId: DELIVERY_ID, status: "delivered" },
+          ],
+        },
+        replyEvidence: { status: "correlated", messageId: DELIVERY_ID },
       }),
     },
   );
   assert.equal(status.status, "completed");
+  assert.equal(status.nativeReceipts[0].status, "delivered");
+  assert.equal(status.replyEvidence.status, "correlated");
 });
 
 test("MCP rejects unreachable and ambiguous targets without sending", async () => {

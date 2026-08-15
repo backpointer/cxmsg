@@ -263,6 +263,22 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Add exact restore, Doctor consistency checks, and bounded archive policy
       before enabling Repair retention mutation.
 
+### Post-roadmap maintenance — Claude transport evidence
+
+- Status: COMPLETE; transport and completion remain separate
+
+- [x] Parse Claude native `peer_message_status` control receipts instead of
+      rejecting them as ordinary invalid Peer Message frames.
+      Compatibility is pinned and tested against Claude Code 2.1.232.
+- [x] Correlate each native receipt to an exact outbound transport message ID
+      without treating `delivered` as a model ACK or completion.
+- [x] Return best-effort native `delivered` or `denied` status for exact
+      Claude-originated message IDs after downstream routing resolves.
+- [x] Retain exact envelope-level reply correlation as separate evidence after
+      stable source validation; ignore correlation claims in Message Body text.
+- [x] Preserve formal ACK state, wake behavior, permission, and approval
+      invariants for native receipts and ordinary structured replies.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.

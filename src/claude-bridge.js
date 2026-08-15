@@ -18,17 +18,22 @@ import { withAppServer } from "./app-server-client.js";
 import {
   CLAUDE_PEER_PROTOCOL,
   CLAUDE_SESSIONS_DIR,
+  buildClaudePeerStatusFrame,
   claudeSocketsDir,
   MAX_CLAUDE_FRAME_BYTES,
   parseClaudePeerFrame,
+  parseClaudePeerStatusFrame,
   parseClaudeRequestBody,
   redactClaudeRequestCapabilities,
+  sendClaudePeerFrame,
   validateClaudeSocketPath,
 } from "./claude-messaging.js";
 import { findClaudeRequestGrant } from "./claude-grants.js";
 import {
   parseClaudeDeliveryAck,
   recordClaudeDeliveryAck,
+  recordClaudeDeliveryReply,
+  recordClaudeNativeDeliveryReceipt,
   refreshClaudeDelivery,
   sendClaudeDeliveryJob,
 } from "./claude-delivery.js";
@@ -62,7 +67,7 @@ import {
 } from "./socket-probe.js";
 
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
-export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 21;
+export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION = 22;
 
 function bridgeRecordPath(target) {
   return path.join(CLAUDE_BRIDGES_DIR, `${validateSessionName(target)}.json`);
@@ -457,6 +462,38 @@ export async function handleClaudeRequestOrMessage(
   return { kind: "message", delivery };
 }
 
+export async function returnClaudePeerStatus(
+  target,
+  parsed,
+  status,
+  { send = sendClaudePeerFrame, log = writeCoordinationEvent } = {},
+) {
+  try {
+    await send(
+      parsed.fromSocket,
+      buildClaudePeerStatusFrame({ messageId: parsed.messageId, status }),
+    );
+    await log({
+      kind: "claude-native-peer",
+      phase: "status-returned",
+      correlationId: parsed.messageId,
+      target,
+      outcome: status,
+    });
+    return true;
+  } catch (error) {
+    await log({
+      kind: "claude-native-peer",
+      phase: "status-return",
+      correlationId: parsed.messageId,
+      target,
+      outcome: "failed",
+      errorCode: error?.code || "status_return_error",
+    });
+    return false;
+  }
+}
+
 export async function runClaudeBridge(target) {
   validateSessionName(target);
   const targetRecord = readSessionRecord(target);
@@ -548,6 +585,7 @@ export async function runClaudeBridge(target) {
       process.stderr.write(`cxmsg Claude bridge socket error: ${error.message}\n`);
     });
     socket.on("end", async () => {
+      let parsed = null;
       try {
         const line = Buffer.concat(chunks).toString("utf8").trim();
         if (!line) return;
@@ -572,7 +610,12 @@ export async function runClaudeBridge(target) {
           return;
         }
         writeClaudeRegistry(record, targetRecord, "handling");
-        const parsed = parseClaudePeerFrame(frame);
+        const nativeReceipt = parseClaudePeerStatusFrame(frame);
+        if (nativeReceipt) {
+          await recordClaudeNativeDeliveryReceipt(nativeReceipt);
+          return;
+        }
+        parsed = parseClaudePeerFrame(frame);
         const deliveryAck = parseClaudeDeliveryAck(parsed.body);
         if (deliveryAck) {
           const delivery = await handleClaudeDeliveryAck(
@@ -582,12 +625,36 @@ export async function runClaudeBridge(target) {
           );
           if (!delivery) throw new Error(`unknown Claude delivery: ${deliveryAck.jobId}`);
           scheduleDelivery(delivery);
+          await returnClaudePeerStatus(target, parsed, "delivered");
           return;
         }
-        await handleClaudeRequestOrMessage(target, parsed, {
+        if (parsed.replyToMessageId) {
+          try {
+            await recordClaudeDeliveryReply(parsed, parsed.replyToMessageId);
+          } catch (error) {
+            await writeCoordinationEvent({
+              kind: "claude-delivery",
+              phase: "reply-correlation",
+              correlationId: parsed.replyToMessageId,
+              target,
+              outcome: "rejected",
+              errorCode: error?.code || "reply_correlation_error",
+            });
+          }
+        }
+        const handled = await handleClaudeRequestOrMessage(target, parsed, {
           scheduleRequest,
         });
+        const denied =
+          handled.kind === "message" &&
+          handled.delivery?.delivery === "quarantined";
+        await returnClaudePeerStatus(
+          target,
+          parsed,
+          denied ? "denied" : "delivered",
+        );
       } catch (error) {
+        if (parsed) await returnClaudePeerStatus(target, parsed, "denied");
         process.stderr.write(`cxmsg Claude bridge delivery failed: ${error.message}\n`);
       } finally {
         if (!socket.writableEnded) {

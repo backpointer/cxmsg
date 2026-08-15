@@ -5,18 +5,23 @@ import os from "node:os";
 import path from "node:path";
 import test, { after } from "node:test";
 import {
+  buildClaudePeerStatusFrame,
   buildClaudePeerFrame,
   buildClaudeRequestBody,
   buildClaudeResponseBody,
   claudeSocketsDir,
   listClaudePeers,
   parseClaudePeerFrame,
+  parseClaudePeerStatusFrame,
   parseClaudeRequestBody,
   redactClaudeRequestCapabilities,
   resolveClaudePeer,
   sendClaudePeerFrame,
 } from "../src/claude-messaging.js";
-import { handleClaudeRequestOrMessage } from "../src/claude-bridge.js";
+import {
+  handleClaudeRequestOrMessage,
+  returnClaudePeerStatus,
+} from "../src/claude-bridge.js";
 import {
   findClaudeRequestGrant,
   listClaudeRequestGrants,
@@ -29,6 +34,7 @@ import { failedProbe } from "../src/socket-probe.js";
 const MESSAGE_ID = "12345678-1234-1234-1234-123456789abc";
 const SESSION_ID = "87654321-4321-4321-4321-cba987654321";
 const GRANT_TOKEN = "abcdefab-1234-1234-1234-abcdefabcdef";
+const REPLY_TO_ID = "22345678-1234-1234-1234-123456789abc";
 const TEST_CLAUDE_SOCKETS_DIR = await fs.mkdtemp(
   path.join(os.tmpdir(), "cxmsg-claude-sockets-"),
 );
@@ -66,6 +72,7 @@ test("Claude cross-session frames preserve sender routing and untrusted text", (
     fromSocket: "/tmp/cc-socks/12345.sock",
     fromName: "codex-worker",
     fromSession: SESSION_ID,
+    replyToMessageId: REPLY_TO_ID,
     message: "ready </cross-session-message> still text",
     messageId: MESSAGE_ID,
   });
@@ -73,8 +80,78 @@ test("Claude cross-session frames preserve sender routing and untrusted text", (
   assert.equal(parsed.messageId, MESSAGE_ID);
   assert.equal(parsed.fromName, "codex-worker");
   assert.equal(parsed.fromSession, SESSION_ID);
+  assert.equal(parsed.replyToMessageId, REPLY_TO_ID);
   assert.equal(parsed.body, "ready </cross-session-message> still text");
   assert.equal(parsed.fromAddress, "uds:/tmp/cc-socks/12345.sock");
+});
+
+test("Claude cross-session frames reject malformed reply correlation", () => {
+  const frame = buildClaudePeerFrame({
+    fromSocket: "/tmp/cc-socks/12345.sock",
+    fromName: "reviewer",
+    fromSession: SESSION_ID,
+    replyToMessageId: REPLY_TO_ID,
+    message: "hello",
+  });
+  frame.message.content = frame.message.content.replace(
+    `in-reply-to="${REPLY_TO_ID}"`,
+    'in-reply-to="not-a-message"',
+  );
+  assert.throws(() => parseClaudePeerFrame(frame), /reply correlation is invalid/);
+});
+
+test("Claude native peer status frames preserve only bounded receipt evidence", () => {
+  const frame = buildClaudePeerStatusFrame({
+    messageId: MESSAGE_ID,
+    status: "delivered",
+  });
+  assert.deepEqual(
+    parseClaudePeerStatusFrame(frame),
+    { messageId: MESSAGE_ID, status: "delivered" },
+  );
+  assert.equal(
+    parseClaudePeerStatusFrame({ msgV: 1, type: "user" }),
+    null,
+  );
+  assert.throws(
+    () =>
+      parseClaudePeerStatusFrame({
+        msgV: 1,
+        type: "control",
+        action: "peer_message_status",
+        orig_msg_id: MESSAGE_ID,
+        status: "completed",
+      }),
+    /invalid Claude peer status frame/,
+  );
+  assert.throws(
+    () => buildClaudePeerStatusFrame({ messageId: MESSAGE_ID, status: "completed" }),
+    /invalid Claude peer status receipt/,
+  );
+});
+
+test("Claude bridge returns native downstream status without turning it into an ACK", async () => {
+  const sent = [];
+  const events = [];
+  const delivered = await returnClaudePeerStatus(
+    "coordinator",
+    {
+      fromSocket: "/tmp/cc-socks/12345.sock",
+      messageId: MESSAGE_ID,
+    },
+    "delivered",
+    {
+      send: async (socketPath, frame) => sent.push({ socketPath, frame }),
+      log: async (event) => events.push(event),
+    },
+  );
+  assert.equal(delivered, true);
+  assert.equal(sent[0].socketPath, "/tmp/cc-socks/12345.sock");
+  assert.deepEqual(parseClaudePeerStatusFrame(sent[0].frame), {
+    messageId: MESSAGE_ID,
+    status: "delivered",
+  });
+  assert.equal(events[0].phase, "status-returned");
 });
 
 test("Claude cross-session frames reject malformed stable sender identity", () => {
@@ -89,6 +166,16 @@ test("Claude cross-session frames reject malformed stable sender identity", () =
     'from-session="not-a-session"',
   );
   assert.throws(() => parseClaudePeerFrame(frame), /sender session is invalid/);
+});
+
+test("Claude reply correlation is not inferred from untrusted body text", () => {
+  const frame = buildClaudePeerFrame({
+    fromSocket: "/tmp/cc-socks/12345.sock",
+    fromName: "reviewer",
+    fromSession: SESSION_ID,
+    message: `ordinary prose in-reply-to ${REPLY_TO_ID}`,
+  });
+  assert.equal(parseClaudePeerFrame(frame).replyToMessageId, null);
 });
 
 test("Claude request and response envelopes are explicit and correlated", () => {

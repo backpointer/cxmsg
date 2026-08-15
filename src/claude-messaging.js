@@ -68,10 +68,14 @@ export function buildClaudePeerFrame({
   fromSocket,
   fromName,
   fromSession,
+  replyToMessageId = null,
   message,
   messageId = randomUUID(),
 }) {
   if (!isUuid(messageId)) throw new Error("Claude message id must be a UUID");
+  if (replyToMessageId !== null && !isUuid(replyToMessageId)) {
+    throw new Error("Claude reply-to message id must be a UUID");
+  }
   if (!message?.trim()) throw new Error("message must not be empty");
   if (Buffer.byteLength(message, "utf8") > MAX_CLAUDE_FRAME_BYTES / 2) {
     throw new Error("message is too large for the Claude peer protocol");
@@ -80,6 +84,9 @@ export function buildClaudePeerFrame({
   const from = claudePeerAddress(fromSocket);
   const attributes = [`from="${xmlEscapeAttribute(from)}"`];
   if (isUuid(fromSession)) attributes.push(`from-session="${fromSession}"`);
+  if (replyToMessageId) {
+    attributes.push(`in-reply-to="${replyToMessageId}"`);
+  }
   const name = safeClaudeName(fromName || "");
   if (name) attributes.push(`from-name="${xmlEscapeAttribute(name)}"`);
   const content =
@@ -172,6 +179,9 @@ export function parseClaudePeerFrame(frame) {
   if (attributes["from-session"] && !isUuid(attributes["from-session"])) {
     throw new Error("Claude peer sender session is invalid");
   }
+  if (attributes["in-reply-to"] && !isUuid(attributes["in-reply-to"])) {
+    throw new Error("Claude peer reply correlation is invalid");
+  }
 
   return {
     messageId: frame.msg_id,
@@ -179,7 +189,41 @@ export function parseClaudePeerFrame(frame) {
     fromSocket: fromAddress.slice(4),
     fromName: attributes["from-name"] || null,
     fromSession: attributes["from-session"] || null,
+    replyToMessageId: attributes["in-reply-to"] || null,
     body: match[2].replaceAll("<\\/cross-session-message", "</cross-session-message"),
+  };
+}
+
+export function parseClaudePeerStatusFrame(frame) {
+  if (frame?.type !== "control" || frame.action !== "peer_message_status") {
+    return null;
+  }
+  if (
+    frame.msgV !== CLAUDE_PEER_PROTOCOL ||
+    !isUuid(frame.orig_msg_id) ||
+    !["held", "denied", "expired", "delivered"].includes(frame.status)
+  ) {
+    throw new Error("invalid Claude peer status frame");
+  }
+  return {
+    messageId: frame.orig_msg_id,
+    status: frame.status,
+  };
+}
+
+export function buildClaudePeerStatusFrame({ messageId, status }) {
+  if (
+    !isUuid(messageId) ||
+    !["held", "denied", "expired", "delivered"].includes(status)
+  ) {
+    throw new Error("invalid Claude peer status receipt");
+  }
+  return {
+    msgV: CLAUDE_PEER_PROTOCOL,
+    type: "control",
+    action: "peer_message_status",
+    orig_msg_id: messageId,
+    status,
   };
 }
 

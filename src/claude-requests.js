@@ -179,6 +179,7 @@ export async function replyToClaudeRequest(bridgeRecord, targetRecord, job) {
     fromSocket: bridgeRecord.socketPath,
     fromName: `codex-${job.target}`,
     fromSession: targetRecord.threadId,
+    replyToMessageId: job.jobId,
     message: response,
     messageId: randomUUID(),
   });

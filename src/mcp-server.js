@@ -116,6 +116,8 @@ function publicDelivery(job) {
     ackDeadlineAt: job.delivery?.ackDeadlineAt || null,
     nextAttemptAt: job.delivery?.nextAttemptAt || null,
     errorCode: job.delivery?.errorCode || null,
+    nativeReceipts: job.delivery?.nativeReceipts || [],
+    replyEvidence: job.replyEvidence || null,
     ack: job.ack
       ? {
           status: job.ack.status,

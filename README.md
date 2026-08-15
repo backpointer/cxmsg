@@ -1030,6 +1030,28 @@ schedules exponential backoff with a maximum delay and attempt budget. Retries
 preserve the delivery correlation ID and record each transport message ID so
 the receiver can avoid duplicating work.
 
+Claude Code may also return a native `peer_message_status` control receipt for
+an individual transport message ID. cxmsg retains the bounded states `held`,
+`denied`, `expired`, and `delivered` under `nativeReceipts`. These states are
+additional transport evidence only: even native `delivered` does not satisfy
+the model ACK, mark the task complete, or wake Codex. Previously these control
+frames were rejected as invalid peer frames.
+The control-frame shape is compatibility-tested against Claude Code 2.1.232;
+an unknown or malformed status frame fails closed instead of being inferred.
+
+In the opposite direction, after a Claude-originated Peer Message is admitted
+and handed to the Codex delivery path, the bridge returns a native `delivered`
+receipt to the exact originating message ID. Route Admission quarantine or a
+downstream delivery failure returns `denied` on a best-effort basis. This gives
+Claude's sender transport feedback without claiming the Codex model read or
+completed the request.
+
+An ordinary Claude Peer Message may carry an exact envelope-level
+`in-reply-to` UUID. After exact source validation, cxmsg records this separately
+as `replyEvidence=correlated` while delivering the body as untrusted text. It
+does not alter `ack_timeout`, `completed`, permissions, or approval. A UUID
+mentioned only in Message Body prose is never parsed as correlation evidence.
+
 ACK source verification requires both the stable session ID and exact UDS
 address when Claude supplies `from-session`. Native replies that omit that
 optional field fall back to an exact UDS address match. A mismatch is recorded

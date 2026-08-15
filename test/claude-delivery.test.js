@@ -12,6 +12,8 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
       createClaudeDeliveryJob,
       parseClaudeDeliveryAck,
       recordClaudeDeliveryAck,
+      recordClaudeDeliveryReply,
+      recordClaudeNativeDeliveryReceipt,
       refreshClaudeDelivery,
       sendClaudeDeliveryJob,
     } = await import("../src/claude-delivery.js");
@@ -96,6 +98,66 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.equal(job.status, "transport_delivered");
     assert.equal(job.delivery.attempt, 1);
     assert.match(frames[0].message.content, new RegExp(job.jobId));
+
+    job = await recordClaudeNativeDeliveryReceipt({
+      messageId: frames[0].msg_id,
+      status: "held",
+    });
+    assert.equal(job.status, "transport_delivered");
+    assert.equal(job.delivery.nativeReceipts.length, 1);
+    assert.equal(job.delivery.nativeReceipts[0].status, "held");
+    job = await recordClaudeNativeDeliveryReceipt({
+      messageId: frames[0].msg_id,
+      status: "delivered",
+    });
+    assert.equal(job.status, "transport_delivered");
+    assert.equal(job.delivery.nativeReceipts.length, 1);
+    assert.equal(job.delivery.nativeReceipts[0].status, "delivered");
+    const duplicateNativeReceipt = await recordClaudeNativeDeliveryReceipt({
+      messageId: frames[0].msg_id,
+      status: "delivered",
+    });
+    assert.equal(duplicateNativeReceipt.nativeReceiptTransitioned, false);
+    await assert.rejects(
+      recordClaudeNativeDeliveryReceipt({
+        messageId: frames[0].msg_id,
+        status: "expired",
+      }),
+      (error) => error.code === "ENATIVERECEIPTCONFLICT",
+    );
+    assert.equal(
+      readJob(job.jobId).delivery.nativeReceipts[0].status,
+      "delivered",
+    );
+    assert.equal(
+      await recordClaudeNativeDeliveryReceipt({
+        messageId: "62345678-1234-1234-1234-123456789abc",
+        status: "delivered",
+      }),
+      null,
+    );
+
+    const correlatedReply = await recordClaudeDeliveryReply(
+      {
+        fromSession: peer.sessionId,
+        fromAddress: peer.address,
+        messageId: "72345678-1234-1234-1234-123456789abc",
+      },
+      job.jobId,
+    );
+    assert.equal(correlatedReply.status, "transport_delivered");
+    assert.equal(correlatedReply.ack, null);
+    assert.equal(correlatedReply.replyEvidence.status, "correlated");
+    assert.equal(correlatedReply.replyEvidence.late, false);
+    const duplicateReplyEvidence = await recordClaudeDeliveryReply(
+      {
+        fromSession: peer.sessionId,
+        fromAddress: peer.address,
+        messageId: correlatedReply.replyEvidence.messageId,
+      },
+      job.jobId,
+    );
+    assert.equal(duplicateReplyEvidence.replyTransitioned, false);
 
     const retryAck = parseClaudeDeliveryAck(
       `<cxmsg-ack in-reply-to="${job.jobId}" status="retryable_error" code="529" retry-after="1">\nOverloaded\n</cxmsg-ack>`,
@@ -315,6 +377,25 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
       /ACK source mismatch/,
     );
     assert.equal(readJob(addressMismatch.jobId).status, "ack_rejected");
+
+    const wrongReplySource = await createClaudeDeliveryJob({
+      from: "coordinator",
+      sourceRecord,
+      peer,
+      message: "reject a mismatched structured reply",
+    });
+    await assert.rejects(
+      recordClaudeDeliveryReply(
+        {
+          fromSession: "57654321-4321-4321-4321-cba987654321",
+          fromAddress: peer.address,
+          messageId: "82345678-1234-1234-1234-123456789abc",
+        },
+        wrongReplySource.jobId,
+      ),
+      (error) => error.code === "EREPLYSOURCE",
+    );
+    assert.equal(readJob(wrongReplySource.jobId).replyEvidence, undefined);
 
     const vanishedPeer = await createClaudeDeliveryJob({
       from: "coordinator",
