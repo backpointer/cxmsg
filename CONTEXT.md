@@ -211,6 +211,10 @@ they carry different authority and delivery semantics.
   backup and phase journal, calls one existing owner mutation, verifies the
   exact finding, and emits an audit receipt. It supports only Cluster head redo
   and rebuildable Delivery Ledger index repair.
+- **Repair Retention Plan**: a deterministic, read-only projection of
+  Doctor-consistent completed Repair transaction/receipt pairs older than a
+  fixed cutoff. It carries no mutation authority; failed and incomplete Repair
+  attempts remain blocked evidence.
 - **Repair**: an explicit, separately authorized mutation associated with one
   Doctor finding. Repair is not part of the default Doctor Interface.
 - **Reconciliation**: comparing durable records with current App Server,

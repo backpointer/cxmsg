@@ -79,6 +79,13 @@ Repair state is capped at 256 MiB and 1,024 transactions and has no automatic
 cleanup. Peer Messages, findings, ACKs, Triggers, and quota pressure cannot
 confirm Repair.
 
+Repair retention has a separate read-only plan with a fixed 90-day minimum
+age. It selects only Doctor-consistent completed transaction/receipt pairs;
+failed, incomplete, orphaned, malformed, linked, or non-owner state fails or is
+blocked. The plan contains bounded identifiers, digests, timestamps, kinds,
+and byte estimates only. It cannot archive, delete, restore, or weaken the
+Repair quota until a separately reviewed mutation transaction exists.
+
 The Retention Module remains read-only by default. Its plan uses explicit
 cutoffs, fixed minimum ages, bounded reason codes, and owner-private metadata;
 it never emits Message Body text or starts model work. An eligible candidate is

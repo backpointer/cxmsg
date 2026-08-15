@@ -252,6 +252,17 @@ cannot mutate routing, membership, lifecycle, or authority.
 
 Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
+### Post-roadmap maintenance — Repair retention
+
+- Status: IN PROGRESS; planning only
+
+- [x] Add a deterministic read-only plan for consistent completed Repair
+      transaction/receipt pairs with a fixed 90-day minimum age.
+- [ ] Add an explicit digest-confirmed archive transaction outside the active
+      Repair quota, with crash recovery and no automatic deletion.
+- [ ] Add exact restore, Doctor consistency checks, and bounded archive policy
+      before enabling Repair retention mutation.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.

@@ -259,6 +259,8 @@ cxmsg repair apply directory-cluster-memberships.history.<short-id> \
 cxmsg repair plan delivery-ledger.index.consistency --json
 cxmsg repair apply delivery-ledger.index.consistency \
   --confirm <plan-digest> --json
+
+cxmsg repair retention plan --before <ISO-timestamp> --json
 ```
 
 Only `ECLUSTERMEMBERSHIPREDO` and `ELEDGERINDEXSTALE` are allowlisted. A stale
@@ -268,6 +270,13 @@ bound fails closed. Repair never resends a message, follows a successor,
 changes identity or membership intent, signals or restarts a process, removes
 state, grants authority, changes permissions, or answers an approval. Doctor
 reports incomplete Repair journals but never resumes or rolls them back.
+
+Repair retention planning is a separate, read-only maintenance interface. It
+preserves at least 90 days, selects only consistent `completed` transaction and
+receipt pairs, reports failed or incomplete attempts as blocked, and emits no
+backup contents or storage paths. The current plan explicitly reports
+`mutationEnabled=false`; archive, restore, and crash recovery are required
+before a mutating Repair-retention command is exposed.
 
 Cancellation is terminal and refuses an active, unexpired claim. Scheduler
 status includes a heartbeat and reports a live identity with a stale heartbeat

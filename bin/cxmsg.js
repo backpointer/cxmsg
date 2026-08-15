@@ -68,6 +68,7 @@ import {
   graphNodeDetail,
 } from "../src/graph-projection.js";
 import { applyRepair, buildRepairPlan } from "../src/repair.js";
+import { buildRepairRetentionPlan } from "../src/repair-retention.js";
 import {
   cancelScheduledDelivery,
   findDeliveryByReplyHandle,
@@ -350,6 +351,7 @@ function usage(exitCode = 0) {
   cxmsg graph delivery <logical-message-id> [--json]
   cxmsg repair plan <finding-id> [--json]
   cxmsg repair apply <finding-id> --confirm <plan-digest> [--json]
+  cxmsg repair retention plan --before <ISO timestamp> [--json]
   cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|inline]
                  [--approval never|relay|auto] [--approval-timeout <seconds>]
                  [--mirror none|summary|full] [--when-idle --expiry <timestamp>]
@@ -4220,6 +4222,31 @@ async function commandGraph(args) {
 
 async function commandRepair(args) {
   const operation = args.shift();
+  if (operation === "retention") {
+    if (args.shift() !== "plan") usage(2);
+    let before = null;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--before") before = args.shift() || null;
+      else if (option === "--json") jsonOutput = true;
+      else throw new Error(`unknown repair retention plan option: ${option}`);
+    }
+    if (!before) {
+      throw new Error("repair retention plan requires --before <ISO timestamp>");
+    }
+    const plan = buildRepairRetentionPlan({ before });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(plan, null, 2)}\n`
+        : `repair retention plan; automatic deletion=false, mutation=false` +
+          `, cutoff=${plan.cutoff}, eligible=${plan.category.eligible.length}` +
+          `, blocked=${plan.category.blocked.length}` +
+          `, estimated-bytes=${plan.category.estimatedBytes}` +
+          `, plan-digest=${plan.planDigest}\n`,
+    );
+    return;
+  }
   if (!["plan", "apply"].includes(operation)) usage(2);
   const findingId = args.shift();
   if (!findingId) usage(2);
