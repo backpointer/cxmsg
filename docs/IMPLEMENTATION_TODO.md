@@ -241,13 +241,13 @@ cannot mutate routing, membership, lifecycle, or authority.
 ### T10 — Optional Repair Interface
 
 - Priority: P4
-- Status: DEFERRED
+- Status: COMPLETE; explicitly allowlisted Repairs only
 
-- [ ] Consider only after extended Doctor findings and identity evidence are
+- [x] Consider only after extended Doctor findings and identity evidence are
       stable.
-- [ ] Require exact finding revalidation, a mutation lease, recoverability,
+- [x] Require exact finding revalidation, a mutation lease, recoverability,
       and an audit receipt for each Repair.
-- [ ] Keep restart, signal, cleanup, grant, permission, and approval operations
+- [x] Keep restart, signal, cleanup, grant, permission, and approval operations
       outside broad automatic repair.
 
 Repair is not required for Direct Conversation, Team Cast, or Graph Projection.

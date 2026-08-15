@@ -9,6 +9,7 @@ import {
   inspectNodeDirectory,
   inspectPermissions,
   inspectRegisteredThreads,
+  inspectRepairState,
   inspectRelay,
   inspectRouteState,
   inspectRuntime,
@@ -67,6 +68,7 @@ export async function runDoctor({
       jobs: state.jobs,
     }),
   );
+  checks.push(...(adapters.inspectRepairState || inspectRepairState)({ stateDir }));
   checks.push(...(adapters.inspectJobs || inspectJobs)(state.jobs));
   checks.push(...(adapters.inspectAttachments || inspectAttachments)(state.attachments));
   checks.push(...await (adapters.inspectPermissions || inspectPermissions)(

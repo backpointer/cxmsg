@@ -759,6 +759,46 @@ function manifestDigest(manifest) {
   return createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
 }
 
+function indexGenerationDigest() {
+  if (!existsSync(DELIVERY_LEDGER_INDEX_DIR)) {
+    return createHash("sha256").update("[]").digest("hex");
+  }
+  const metadata = lstatSync(DELIVERY_LEDGER_INDEX_DIR);
+  if (
+    !metadata.isDirectory() ||
+    metadata.isSymbolicLink() ||
+    (typeof process.getuid === "function" && metadata.uid !== process.getuid()) ||
+    (metadata.mode & 0o077) !== 0
+  ) {
+    throw new Error("Delivery Ledger index directory is not owner-private");
+  }
+  const names = [
+    ...(existsSync(DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH)
+      ? [path.basename(DELIVERY_LEDGER_INDEX_CHECKPOINT_PATH)]
+      : []),
+    ...indexShardNames(),
+  ].sort();
+  const manifest = names.map((name) => {
+    const filename = path.join(DELIVERY_LEDGER_INDEX_DIR, name);
+    const file = assertPrivateIndexFile(filename);
+    return {
+      name,
+      size: file.size,
+      sha256: createHash("sha256").update(readFileSync(filename)).digest("hex"),
+    };
+  });
+  return createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
+}
+
+export function deliveryLedgerIndexRepairEvidence() {
+  assertRetentionReadableNoCreate();
+  const manifest = ledgerManifest();
+  return {
+    ledgerManifestSha256: manifestDigest(manifest),
+    indexGenerationSha256: indexGenerationDigest(),
+  };
+}
+
 function assertPrivateIndexFile(filename) {
   const metadata = lstatSync(filename);
   if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1) {
@@ -1835,8 +1875,22 @@ export async function readDeliveryLedgerIndexed(messageId) {
   });
 }
 
-export async function rebuildDeliveryLedgerIndex() {
+export async function rebuildDeliveryLedgerIndex({
+  expectedLedgerManifestSha256 = null,
+  expectedIndexGenerationSha256 = null,
+} = {}) {
   return withDeliveryLedgerMutation(async () => {
+    const currentEvidence = deliveryLedgerIndexRepairEvidence();
+    if (
+      (expectedLedgerManifestSha256 &&
+        currentEvidence.ledgerManifestSha256 !== expectedLedgerManifestSha256) ||
+      (expectedIndexGenerationSha256 &&
+        currentEvidence.indexGenerationSha256 !== expectedIndexGenerationSha256)
+    ) {
+      const error = new Error("Delivery Ledger index repair evidence changed");
+      error.code = "EREPAIRSTALE";
+      throw error;
+    }
     const messages = rebuildDeliveryIndexLocked();
     return { messageCount: messages.size, manifestSha256: manifestDigest(ledgerManifest()) };
   });

@@ -202,6 +202,15 @@ they carry different authority and delivery semantics.
   Direct and Group metadata with Directory, Job, Delivery Ledger, Team Cast
   plan, selection, and per-recipient evidence. It reports mismatches but never
   replays, refans out, migrates, or repairs them.
+- **Repair Plan**: a deterministic, read-only description of one currently
+  allowlisted Doctor finding, its exact evidence digest, mutation category,
+  and recoverability contract. It is not authority until the owner explicitly
+  supplies the same digest to Repair Apply.
+- **Repair Transaction Module**: the separately invoked mutation Module that
+  revalidates one Repair Plan under a private Repair lease, writes a bounded
+  backup and phase journal, calls one existing owner mutation, verifies the
+  exact finding, and emits an audit receipt. It supports only Cluster head redo
+  and rebuildable Delivery Ledger index repair.
 - **Repair**: an explicit, separately authorized mutation associated with one
   Doctor finding. Repair is not part of the default Doctor Interface.
 - **Reconciliation**: comparing durable records with current App Server,

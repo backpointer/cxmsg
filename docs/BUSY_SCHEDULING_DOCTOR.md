@@ -461,14 +461,15 @@ renderers consume the same redacted finding model.
 
 ### Repair separation
 
-The first Doctor release has no Repair command. A later release may add
-individually named operations such as:
+Doctor itself has no Repair command or mutation path. The separate Repair
+Interface supports only individually allowlisted findings through:
 
 ```bash
-cxmsg doctor repair <check-id>
+cxmsg repair plan <finding-id>
+cxmsg repair apply <finding-id> --confirm <plan-digest>
 ```
 
-There will be no broad `--fix` switch. Every Repair must:
+There is no broad `--fix` switch. Every Repair must:
 
 1. name one current finding and revalidate it immediately;
 2. print the exact mutation category before execution;

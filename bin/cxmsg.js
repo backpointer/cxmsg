@@ -67,6 +67,7 @@ import {
   graphDeliveryDetail,
   graphNodeDetail,
 } from "../src/graph-projection.js";
+import { applyRepair, buildRepairPlan } from "../src/repair.js";
 import {
   cancelScheduledDelivery,
   findDeliveryByReplyHandle,
@@ -347,6 +348,8 @@ function usage(exitCode = 0) {
   cxmsg graph node <node-key> [--range current|1h|24h|all] [--paths] [--json]
   cxmsg graph conversation <conversation-id> [--range current|1h|24h|all] [--limit <count>] [--json]
   cxmsg graph delivery <logical-message-id> [--json]
+  cxmsg repair plan <finding-id> [--json]
+  cxmsg repair apply <finding-id> --confirm <plan-digest> [--json]
   cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|inline]
                  [--approval never|relay|auto] [--approval-timeout <seconds>]
                  [--mirror none|summary|full] [--when-idle --expiry <timestamp>]
@@ -4215,6 +4218,43 @@ async function commandGraph(args) {
   }
 }
 
+async function commandRepair(args) {
+  const operation = args.shift();
+  if (!["plan", "apply"].includes(operation)) usage(2);
+  const findingId = args.shift();
+  if (!findingId) usage(2);
+  let confirm = null;
+  let jsonOutput = false;
+  while (args.length) {
+    const option = args.shift();
+    if (option === "--json") jsonOutput = true;
+    else if (option === "--confirm") confirm = args.shift() || null;
+    else throw new Error(`unknown repair ${operation} option: ${option}`);
+  }
+  if (operation === "plan") {
+    if (confirm) throw new Error("repair plan does not accept --confirm");
+    const plan = buildRepairPlan({ findingId });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(plan, null, 2)}\n`
+        : `repair plan\tfinding=${plan.findingId}\tkind=${plan.repairKind}` +
+          `\tmutation=${plan.mutationCategory}\tplan-digest=${plan.planDigest}\n`,
+    );
+    return;
+  }
+  if (!confirm) throw new Error("repair apply requires --confirm <plan-digest>");
+  const receipt = await applyRepair({
+    findingId,
+    expectedPlanDigest: confirm,
+  });
+  process.stdout.write(
+    jsonOutput
+      ? `${JSON.stringify(receipt, null, 2)}\n`
+      : `repair completed\ttransaction=${receipt.transactionId}` +
+        `\tkind=${receipt.repairKind}\tplan-digest=${receipt.planDigest}\n`,
+  );
+}
+
 async function commandRetention(args) {
   const operation = args.shift();
   if (!["plan", "purge", "restore", "recover"].includes(operation)) usage(2);
@@ -4365,6 +4405,9 @@ async function main() {
       break;
     case "graph":
       await commandGraph(args);
+      break;
+    case "repair":
+      await commandRepair(args);
       break;
     case "delegate":
       await commandDelegate(args);

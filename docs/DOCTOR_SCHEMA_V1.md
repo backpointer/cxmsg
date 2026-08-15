@@ -53,14 +53,17 @@ Every check contains:
   `directory-successors`, `directory-execution-threads`, `directory-clusters`,
   `directory-cluster-memberships`, `directory-cluster-tombstones`, or
   `schedules`, `direct-conversations`, `group-conversations`,
-  `team-cast-plans`, `team-cast-selections`, or `team-cast-deliveries`.
+  `team-cast-plans`, `team-cast-selections`, `team-cast-deliveries`, or
+  `repairs`.
 - `status` is `pass`, `warn`, `fail`, `unknown`, or `skipped`.
 - `summary` is bounded operator text with no private body data.
 - `verification` is bounded evidence such as `metadata`, `registry`,
   `identity`, `handshake`, `app-server`, `sandbox-denied`, or
   `not-requested`. It may be omitted when unavailable.
 - `errorCode` is a bounded system or cxmsg code and may be omitted.
-- `repairable` is always `false` in the initial read-only release.
+- `repairable` remains `false`: Doctor never mutates or grants Repair
+  authority. The separate allowlisted Repair command revalidates an exact
+  finding and explicitly confirmed plan digest.
 - `remediation` may be omitted. It never recommends full access as a generic
   fix.
 - `required` controls the `overall` policy. Optional failures still make a
@@ -198,6 +201,16 @@ recipient-set digest, and every per-recipient Delivery. Reports omit Message
 Body data and digests, Job content, Endpoint addresses, and capabilities.
 These checks never synthesize a missing source, replay or refan out a message,
 or modify membership.
+
+Repair findings validate owner-only transaction manifests, bounded backup
+files and content digests, and terminal receipt correlation. A journal in
+`initializing`, `prepared`, `mutation-started`, or `mutated` is an optional
+`EREPAIRINCOMPLETE` warning; Doctor neither infers whether the owner mutation
+committed nor resumes or rolls it back. A failed attempt with a retained
+receipt is a warning. Missing, malformed, orphaned, or digest-mismatched backup
+and receipt evidence is a required `EREPAIRCONSISTENCY` or
+`EREPAIRRECEIPTORPHAN` failure. Reports contain phase and bounded error codes,
+not backup contents or local paths.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.

@@ -66,6 +66,19 @@ change permission profiles, or answer approvals. An `unknown` or
 cleanup. Doctor output omits message, task, result, error-body, approval-body,
 capability-token, and full socket-path data.
 
+The Repair Transaction Module is separate from Doctor and has no broad
+`--fix` mode. Its read-only plan is deterministic and creates no files. Apply
+requires the exact plan digest, reacquires the finding and evidence under an
+owner-private Repair lease, then passes the same evidence digest into the
+existing owner lock before mutation. Only one recoverable Cluster head redo
+and rebuild of a stale Delivery Ledger cache index are allowlisted. Every
+attempt that reaches mutation preparation retains a bounded private backup and
+phase journal; every terminal attempt emits a private receipt. Doctor reports
+an incomplete phase without completing, retrying, or rolling it back.
+Repair state is capped at 256 MiB and 1,024 transactions and has no automatic
+cleanup. Peer Messages, findings, ACKs, Triggers, and quota pressure cannot
+confirm Repair.
+
 The Retention Module remains read-only by default. Its plan uses explicit
 cutoffs, fixed minimum ages, bounded reason codes, and owner-private metadata;
 it never emits Message Body text or starts model work. An eligible candidate is
@@ -134,7 +147,8 @@ and evidence records are separate, and an uncertain transport result is never
 permission to replay. Private segment metadata, bounded record validation,
 `O_NOFOLLOW`, fsync, a fail-closed quota, and reserved terminal-evidence space
 protect the initial file Adapter. Partial active tails are quarantined before
-another append. There is no automatic retention, purge, retry, or repair.
+another append. There is no automatic retention, purge, retry, or repair of
+Ledger truth.
 Explicit purge is a separate confirmed Retention transaction and never follows
 from quota pressure.
 Delivery Ledger files and their quarantine are runtime state and must never be

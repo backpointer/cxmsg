@@ -1,9 +1,13 @@
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   chmodSync,
+  closeSync,
+  constants,
   existsSync,
+  fsyncSync,
   mkdirSync,
+  openSync,
   readFileSync,
   readdirSync,
   realpathSync,
@@ -211,7 +215,22 @@ function atomicWrite(directory, filename, value) {
   const destination = path.join(directory, filename);
   const temporary = `${destination}.${randomUUID()}.tmp`;
   writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  const fileDescriptor = openSync(
+    temporary,
+    constants.O_RDONLY | (constants.O_NOFOLLOW || 0),
+  );
+  try {
+    fsyncSync(fileDescriptor);
+  } finally {
+    closeSync(fileDescriptor);
+  }
   renameSync(temporary, destination);
+  const directoryDescriptor = openSync(directory, constants.O_RDONLY);
+  try {
+    fsyncSync(directoryDescriptor);
+  } finally {
+    closeSync(directoryDescriptor);
+  }
   return value;
 }
 
@@ -1006,6 +1025,27 @@ function recoverClusterMembershipLocked(current) {
   return { record, recovered: true };
 }
 
+function clusterMembershipRecoveryEvidenceFor(current) {
+  const nextVersion = current.membershipVersion + 1;
+  const next = readClusterMembership(current.clusterId, nextVersion);
+  const followingExists = existsSync(
+    clusterMembershipPath(current.clusterId, nextVersion + 1),
+  );
+  const tombstoneExists = existsSync(clusterTombstonePath(current.clusterId));
+  const evidence = { current, next, followingExists, tombstoneExists };
+  return {
+    ...structuredClone(evidence),
+    evidenceSha256: createHash("sha256")
+      .update(JSON.stringify(evidence))
+      .digest("hex"),
+  };
+}
+
+export function clusterMembershipRecoveryEvidence(identity) {
+  const current = resolveCluster(identity);
+  return clusterMembershipRecoveryEvidenceFor(current);
+}
+
 function resolveCluster(identity) {
   const byId = UUID_PATTERN.test(identity || "") ? readCluster(identity) : null;
   const byRouting = findClusterByRoutingId(identity);
@@ -1155,13 +1195,25 @@ export async function removeClusterMember({ cluster, memberNodeKey }) {
   return changeClusterMember({ cluster, memberNodeKey, add: false });
 }
 
-export async function recoverClusterMembership(identity) {
+export async function recoverClusterMembership(
+  identity,
+  { expectedEvidenceSha256 = null } = {},
+) {
   ensureDirectory(CLUSTERS_DIR);
   ensureDirectory(CLUSTER_MEMBERSHIPS_DIR);
   return withFileLock(path.join(NODE_DIRECTORY_DIR, "clusters.lock"), async () => {
     const current = resolveCluster(identity);
     if (existsSync(clusterTombstonePath(current.clusterId))) {
       throw new Error("Cluster lifecycle conflicts with a Tombstone");
+    }
+    const evidence = clusterMembershipRecoveryEvidenceFor(current);
+    if (
+      expectedEvidenceSha256 &&
+      evidence.evidenceSha256 !== expectedEvidenceSha256
+    ) {
+      const error = new Error("Cluster membership repair evidence changed");
+      error.code = "EREPAIRSTALE";
+      throw error;
     }
     return recoverClusterMembershipLocked(current);
   });

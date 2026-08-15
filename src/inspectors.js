@@ -2255,6 +2255,358 @@ export function inspectConversationState({ stateDir, jobs = [] } = {}) {
   return checks;
 }
 
+export function inspectRepairState({ stateDir } = {}) {
+  const scope = "repairs";
+  const root = path.join(stateDir, "repairs");
+  const transactionsDirectory = path.join(root, "transactions");
+  const receiptsDirectory = path.join(root, "receipts");
+  const checks = [];
+  const rootEvidence = secureMetadata(root, "directory");
+  if (rootEvidence.status === "missing") {
+    return [
+      metadataFinding(
+        "repairs.directory",
+        scope,
+        "Repair state directory",
+        rootEvidence,
+        { required: false },
+      ),
+    ];
+  }
+  checks.push(
+    metadataFinding(
+      "repairs.directory",
+      scope,
+      "Repair state directory",
+      rootEvidence,
+    ),
+  );
+  if (rootEvidence.status !== "secure") return checks;
+  const unexpectedRootEntries = readdirSync(root).filter(
+    (name) => !["mutation.lock", "transactions", "receipts"].includes(name),
+  );
+  if (unexpectedRootEntries.length > 0) {
+    checks.push(
+      diagnosticCheck({
+        id: "repairs.entries",
+        scope,
+        status: "fail",
+        summary: "Repair state contains unexpected top-level entries",
+        verification: "records",
+        errorCode: "EREPAIRSTATE",
+      }),
+    );
+  }
+  const transactionsEvidence = secureMetadata(
+    transactionsDirectory,
+    "directory",
+  );
+  const receiptsEvidence = secureMetadata(receiptsDirectory, "directory");
+  checks.push(
+    metadataFinding(
+      "repairs.transactions.directory",
+      scope,
+      "Repair transaction directory",
+      transactionsEvidence,
+    ),
+    metadataFinding(
+      "repairs.receipts.directory",
+      scope,
+      "Repair receipt directory",
+      receiptsEvidence,
+    ),
+  );
+  if (
+    transactionsEvidence.status !== "secure" ||
+    receiptsEvidence.status !== "secure"
+  ) {
+    return checks;
+  }
+  const allReceiptNames = readdirSync(receiptsDirectory).sort();
+  const receiptNames = allReceiptNames
+    .filter((name) => /^[0-9a-f-]{36}\.json$/i.test(name))
+    .sort();
+  if (receiptNames.length !== allReceiptNames.length) {
+    checks.push(
+      diagnosticCheck({
+        id: "repairs.receipts.entries",
+        scope,
+        status: "fail",
+        summary: "Repair receipt storage contains unexpected entries",
+        verification: "records",
+        errorCode: "EREPAIRSTATE",
+      }),
+    );
+  }
+  const receiptByTransaction = new Map();
+  for (const name of receiptNames) {
+    const transactionId = name.slice(0, -5).toLowerCase();
+    const filename = path.join(receiptsDirectory, name);
+    const evidence = secureMetadata(filename, "file");
+    if (evidence.status !== "secure" || evidence.metadata.size > MAX_RECORD_BYTES) {
+      checks.push(
+        metadataFinding(
+          `repairs.receipt.${safeLabel(transactionId)}.metadata`,
+          scope,
+          "Repair receipt",
+          evidence.status === "secure" ? { status: "wrong-type" } : evidence,
+        ),
+      );
+      continue;
+    }
+    try {
+      const receipt = JSON.parse(readFileSync(filename, "utf8"));
+      const valid = Boolean(
+        receipt?.schemaVersion === 1 &&
+          receipt.transactionId === transactionId &&
+          receipt.findingId &&
+          ["cluster-membership-redo", "delivery-ledger-index-rebuild"].includes(
+            receipt.repairKind,
+          ) &&
+          /^[0-9a-f]{64}$/.test(receipt.planDigest || "") &&
+          ["completed", "failed"].includes(receipt.status) &&
+          Number.isFinite(Date.parse(receipt.startedAt || "")) &&
+          Number.isFinite(Date.parse(receipt.completedAt || ""))
+      );
+      if (valid) receiptByTransaction.set(transactionId, receipt);
+      else {
+        checks.push(
+          diagnosticCheck({
+            id: `repairs.receipt.${safeLabel(transactionId)}.schema`,
+            scope,
+            status: "fail",
+            summary: "Repair receipt failed its bounded audit schema",
+            verification: "schema",
+            errorCode: "EREPAIRRECEIPT",
+          }),
+        );
+      }
+    } catch {
+      checks.push(
+        diagnosticCheck({
+          id: `repairs.receipt.${safeLabel(transactionId)}.json`,
+          scope,
+          status: "fail",
+          summary: "Repair receipt is not valid bounded JSON",
+          verification: "parse",
+          errorCode: "EREPAIRRECEIPT",
+        }),
+      );
+    }
+  }
+  const allTransactionNames = readdirSync(transactionsDirectory).sort();
+  const transactionNames = allTransactionNames
+    .filter((name) => /^[0-9a-f-]{36}$/i.test(name))
+    .sort();
+  if (transactionNames.length !== allTransactionNames.length) {
+    checks.push(
+      diagnosticCheck({
+        id: "repairs.transactions.entries",
+        scope,
+        status: "fail",
+        summary: "Repair transaction storage contains unexpected entries",
+        verification: "records",
+        errorCode: "EREPAIRSTATE",
+      }),
+    );
+  }
+  const knownTransactions = new Set();
+  for (const transactionId of transactionNames) {
+    const normalizedId = transactionId.toLowerCase();
+    knownTransactions.add(normalizedId);
+    const transactionDirectory = path.join(
+      transactionsDirectory,
+      transactionId,
+    );
+    const directoryEvidence = secureMetadata(transactionDirectory, "directory");
+    if (directoryEvidence.status !== "secure") {
+      checks.push(
+        metadataFinding(
+          `repairs.transaction.${safeLabel(normalizedId)}.metadata`,
+          scope,
+          "Repair transaction",
+          directoryEvidence,
+        ),
+      );
+      continue;
+    }
+    const manifestPath = path.join(transactionDirectory, "manifest.json");
+    const manifestEvidence = secureMetadata(manifestPath, "file");
+    if (
+      manifestEvidence.status !== "secure" ||
+      manifestEvidence.metadata.size > MAX_RECORD_BYTES
+    ) {
+      checks.push(
+        metadataFinding(
+          `repairs.transaction.${safeLabel(normalizedId)}.manifest`,
+          scope,
+          "Repair transaction manifest",
+          manifestEvidence.status === "secure"
+            ? { status: "wrong-type" }
+            : manifestEvidence,
+        ),
+      );
+      continue;
+    }
+    let manifest;
+    try {
+      manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    } catch {
+      manifest = null;
+    }
+    const phase = manifest?.phase;
+    const receipt = receiptByTransaction.get(normalizedId) || null;
+    const plan = manifest?.plan;
+    const planBase = plan && typeof plan === "object"
+      ? Object.fromEntries(
+          Object.entries(plan).filter(([field]) => field !== "planDigest"),
+        )
+      : null;
+    const planValid = Boolean(
+      /^[0-9a-f]{64}$/.test(plan?.planDigest || "") &&
+        createHash("sha256").update(JSON.stringify(planBase)).digest("hex") ===
+          plan.planDigest
+    );
+    const baseValid = Boolean(
+      manifest?.schemaVersion === 1 &&
+        manifest.transactionId === normalizedId &&
+        [
+          "initializing",
+          "prepared",
+          "mutation-started",
+          "mutated",
+          "completed",
+          "failed",
+        ].includes(phase) &&
+        planValid &&
+        Number.isFinite(Date.parse(manifest.startedAt || "")) &&
+        Number.isFinite(Date.parse(manifest.updatedAt || ""))
+    );
+    const backupFiles = Array.isArray(manifest?.backup?.files)
+      ? manifest.backup.files
+      : [];
+    const backupRequired = [
+      "prepared",
+      "mutation-started",
+      "mutated",
+      "completed",
+    ].includes(phase);
+    let backupValid = Boolean(
+      (!manifest?.backup && !backupRequired) ||
+        (["cluster-head", "delivery-ledger-index"].includes(
+          manifest?.backup?.kind,
+        ) &&
+          Array.isArray(manifest.backup.files) &&
+          manifest.backup.files.length <= 4_097),
+    );
+    for (const backup of backupFiles) {
+      if (
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(backup?.name || "") ||
+        !Number.isSafeInteger(backup.bytes) ||
+        backup.bytes < 0
+      ) {
+        backupValid = false;
+        break;
+      }
+      const subdirectory = manifest.backup.kind === "delivery-ledger-index"
+        ? "index"
+        : "";
+      const filename = path.join(transactionDirectory, subdirectory, backup.name);
+      const evidence = secureMetadata(filename, "file");
+      if (
+        evidence.status !== "secure" ||
+        evidence.metadata.size !== backup.bytes ||
+        !/^[0-9a-f]{64}$/.test(backup.sha256 || "") ||
+        createHash("sha256").update(readFileSync(filename)).digest("hex") !==
+          backup.sha256
+      ) {
+        backupValid = false;
+        break;
+      }
+    }
+    const expectedRootEntries = new Set(["manifest.json"]);
+    if (manifest?.backup?.kind === "cluster-head") {
+      for (const backup of backupFiles) {
+        expectedRootEntries.add(backup.name);
+      }
+    } else if (manifest?.backup?.kind === "delivery-ledger-index") {
+      expectedRootEntries.add("index");
+    }
+    if (
+      readdirSync(transactionDirectory).some(
+        (name) => !expectedRootEntries.has(name),
+      )
+    ) {
+      backupValid = false;
+    }
+    if (
+      backupValid &&
+      manifest?.backup?.kind === "delivery-ledger-index"
+    ) {
+      const expectedIndexEntries = new Set(
+        backupFiles.map((backup) => backup.name),
+      );
+      const indexDirectory = path.join(transactionDirectory, "index");
+      if (
+        secureMetadata(indexDirectory, "directory").status !== "secure" ||
+        readdirSync(indexDirectory).some(
+          (name) => !expectedIndexEntries.has(name),
+        )
+      ) {
+        backupValid = false;
+      }
+    }
+    const terminal = ["completed", "failed"].includes(phase);
+    const receiptValid = Boolean(
+      receipt &&
+        receipt.planDigest === manifest.plan?.planDigest &&
+        receipt.status === phase &&
+        (phase !== "completed" ||
+          manifest.receiptSha256 ===
+            createHash("sha256").update(JSON.stringify(receipt)).digest("hex")),
+    );
+    const consistent = baseValid && backupValid && (!terminal || receiptValid);
+    const incomplete = baseValid && backupValid && !terminal;
+    checks.push(
+      diagnosticCheck({
+        id: `repairs.transaction.${safeLabel(normalizedId)}.consistency`,
+        scope,
+        status: consistent ? (incomplete || phase === "failed" ? "warn" : "pass") : "fail",
+        summary: !consistent
+          ? "Repair transaction, backup, and receipt evidence are inconsistent"
+          : incomplete
+            ? "Repair transaction stopped before a terminal audit receipt"
+            : phase === "failed"
+              ? "Repair attempt failed with a retained audit receipt and any prepared backup"
+              : "Repair transaction has a verified backup and terminal audit receipt",
+        verification: "records",
+        errorCode: !consistent
+          ? "EREPAIRCONSISTENCY"
+          : incomplete
+            ? "EREPAIRINCOMPLETE"
+            : phase === "failed"
+              ? receipt.errorCode || "EREPAIRFAILED"
+              : null,
+        required: !incomplete && phase !== "failed",
+      }),
+    );
+  }
+  for (const transactionId of receiptByTransaction.keys()) {
+    if (knownTransactions.has(transactionId)) continue;
+    checks.push(
+      diagnosticCheck({
+        id: `repairs.receipt.${safeLabel(transactionId)}.orphan`,
+        scope,
+        status: "fail",
+        summary: "Repair receipt has no retained transaction and backup",
+        verification: "records",
+        errorCode: "EREPAIRRECEIPTORPHAN",
+      }),
+    );
+  }
+  return checks;
+}
+
 export function inspectRouteState({
   stateDir,
   sessions = [],
