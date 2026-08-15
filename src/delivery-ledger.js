@@ -575,6 +575,40 @@ function validGroupEvidence(record) {
   );
 }
 
+function validTeamEvidence(record) {
+  if (
+    record?.schemaVersion !== 1 ||
+    record.recordType !== "team-delivery-evidence" ||
+    !UUID_PATTERN.test(record.messageId || "") ||
+    !UUID_PATTERN.test(record.deliveryId || "") ||
+    !UUID_PATTERN.test(record.attemptId || "") ||
+    !["turn_started", "failed", "unknown"].includes(record.state) ||
+    !validTimestamp(record.observedAt) ||
+    (record.turnId !== null && !UUID_PATTERN.test(record.turnId || "")) ||
+    (record.transportResult !== null &&
+      (typeof record.transportResult !== "string" ||
+        Buffer.byteLength(record.transportResult, "utf8") > 128)) ||
+    (record.errorCode !== null &&
+      !/^[A-Z0-9_]{1,32}$/.test(record.errorCode || ""))
+  ) {
+    return false;
+  }
+  if (record.state === "turn_started") {
+    return Boolean(
+      record.turnId &&
+        record.transportResult &&
+        record.errorCode === null,
+    );
+  }
+  return Boolean(
+    record.turnId === null &&
+      record.errorCode &&
+      (record.state === "failed"
+        ? record.transportResult === null
+        : record.transportResult !== null),
+  );
+}
+
 export function validDeliveryLedgerRecord(record) {
   if (record?.recordType === "ledger-batch") return validBatch(record);
   if (record?.recordType === "delivery-claim") return validClaim(record);
@@ -582,6 +616,9 @@ export function validDeliveryLedgerRecord(record) {
   if (record?.recordType === "delivery-evidence") return validEvidence(record);
   if (record?.recordType === "group-delivery-evidence") {
     return validGroupEvidence(record);
+  }
+  if (record?.recordType === "team-delivery-evidence") {
+    return validTeamEvidence(record);
   }
   return false;
 }
@@ -764,7 +801,18 @@ function validIndexProjection(projection, messageId) {
       committedAt: projection.committedAt,
       logicalMessage: structuredClone(projection.logicalMessage),
       deliveries: projection.teamDeliveries.map((candidate) => {
-        const { attempts, evidence, claim, claimCount, ...initial } = candidate;
+        const {
+          attempts,
+          evidence,
+          claim,
+          claimCount,
+          turnId,
+          transportResult,
+          errorCode,
+          ...initial
+        } = candidate;
+        initial.state = "prepared";
+        initial.updatedAt = initial.createdAt;
         return initial;
       }),
     };
@@ -772,14 +820,45 @@ function validIndexProjection(projection, messageId) {
       validBatch(baseBatch) &&
         projection.teamDeliveries.every(
           (candidate) =>
-            candidate.state === "prepared" &&
+            ["prepared", "turn_started", "failed", "unknown"].includes(
+              candidate.state,
+            ) &&
             candidate.wakePolicy === "mention-wake" &&
             Array.isArray(candidate.attempts) &&
-            candidate.attempts.length === 0 &&
+            candidate.attempts.length <= 1 &&
+            candidate.attempts.every(
+              (attempt) =>
+                validAttempt(attempt) &&
+                attempt.messageId === messageId &&
+                attempt.deliveryId === candidate.deliveryId &&
+                attempt.retryOfAttemptId === undefined &&
+                (attempt.claimId === undefined || attempt.claimId === null),
+            ) &&
             Array.isArray(candidate.evidence) &&
-            candidate.evidence.length === 0 &&
+            candidate.evidence.length <= 1 &&
+            candidate.evidence.every(
+              (evidence) =>
+                validTeamEvidence(evidence) &&
+                evidence.messageId === messageId &&
+                evidence.deliveryId === candidate.deliveryId &&
+                candidate.attempts.some(
+                  (attempt) => attempt.attemptId === evidence.attemptId,
+                ),
+            ) &&
             candidate.claim === null &&
-            candidate.claimCount === 0,
+            candidate.claimCount === 0 &&
+            (candidate.evidence.length === 0
+              ? candidate.state === "prepared" &&
+                candidate.updatedAt ===
+                  (candidate.attempts[0]?.startedAt || candidate.createdAt)
+              : candidate.attempts.length === 1 &&
+                candidate.evidence.length === 1 &&
+                candidate.state === candidate.evidence[0].state &&
+                candidate.turnId === candidate.evidence[0].turnId &&
+                candidate.transportResult ===
+                  candidate.evidence[0].transportResult &&
+                candidate.errorCode === candidate.evidence[0].errorCode &&
+                candidate.updatedAt === candidate.evidence[0].observedAt),
         ),
     );
   }
@@ -1120,9 +1199,16 @@ function reservedEvidenceBytes(messages) {
   let records = 0;
   for (const message of messages.values()) {
     if (Array.isArray(message.teamDeliveries)) {
-      records += message.teamDeliveries.filter(
-        (delivery) => delivery.state === "prepared",
-      ).length * 4;
+      records += message.teamDeliveries.reduce(
+        (count, delivery) =>
+          count +
+          (delivery.state !== "prepared"
+            ? 0
+            : delivery.attempts.length === 0
+              ? 2
+              : 1),
+        0,
+      );
       continue;
     }
     if (Array.isArray(message.groupDeliveries)) {
@@ -1173,9 +1259,56 @@ function cloneBatch(record) {
 
 function applyDeliveryEvent(projected, record) {
   if (Array.isArray(projected?.teamDeliveries)) {
-    throw new Error(
-      `prepared Team Cast Delivery cannot accept transport evidence: ${record.messageId}`,
+    const delivery = projected.teamDeliveries.find(
+      (candidate) => candidate.deliveryId === record.deliveryId,
     );
+    if (!delivery || delivery.wakePolicy !== "mention-wake") {
+      throw new Error(`invalid Team Cast Delivery event: ${record.messageId}`);
+    }
+    if (record.recordType === "delivery-attempt") {
+      if (
+        !validAttempt(record) ||
+        delivery.state !== "prepared" ||
+        delivery.attempts.length !== 0 ||
+        delivery.evidence.length !== 0 ||
+        (record.claimId !== undefined && record.claimId !== null) ||
+        record.retryOfAttemptId !== undefined
+      ) {
+        throw new Error(
+          `duplicate Team Cast Delivery attempt: ${record.messageId}`,
+        );
+      }
+      delivery.attempts.push(structuredClone(record));
+      delivery.updatedAt = record.startedAt;
+    } else if (record.recordType === "team-delivery-evidence") {
+      if (
+        !validTeamEvidence(record) ||
+        delivery.state !== "prepared" ||
+        delivery.attempts.length !== 1 ||
+        delivery.attempts[0].attemptId !== record.attemptId ||
+        delivery.evidence.length !== 0 ||
+        Date.parse(record.observedAt) <
+          Date.parse(delivery.attempts[0].startedAt)
+      ) {
+        throw new Error(
+          `invalid Team Cast Delivery evidence: ${record.messageId}`,
+        );
+      }
+      delivery.state = record.state;
+      delivery.turnId = record.turnId;
+      delivery.transportResult = record.transportResult;
+      delivery.errorCode = record.errorCode;
+      delivery.updatedAt = record.observedAt;
+      delivery.evidence.push(structuredClone(record));
+    } else {
+      throw new Error(
+        `unsupported Team Cast Delivery event: ${record.messageId}`,
+      );
+    }
+    if (projected.delivery.deliveryId === delivery.deliveryId) {
+      projected.delivery = delivery;
+    }
+    return projected;
   }
   if (Array.isArray(projected?.groupDeliveries)) {
     const delivery = projected.groupDeliveries.find(
@@ -1948,6 +2081,131 @@ export async function appendStoreOnlyGroupDeliveryEvidence(
       observedAt: now,
     };
     if (!validGroupEvidence(event)) throw new Error("invalid Group Delivery evidence");
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
+    appendLedgerRecord(event, {
+      quotaBytes,
+      segmentBytes,
+      reserveBytes: reservedEvidenceBytes(after),
+    });
+    updateDeliveryIndexLocked(after, messageId);
+    return { record: structuredClone(projected), created: true };
+  });
+}
+
+export async function beginTeamCastRecipientDelivery(
+  messageId,
+  targetNodeKey,
+  {
+    now = new Date().toISOString(),
+    quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+    segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
+  } = {},
+) {
+  messageId = validateUuid("logical message id", messageId);
+  if (!NODE_KEY_PATTERN.test(targetNodeKey || "")) {
+    throw new Error("Team Cast attempt target must be a stable Node key");
+  }
+  targetNodeKey = targetNodeKey.toLowerCase();
+  if (!validTimestamp(now)) {
+    throw new Error("Team Cast attempt timestamp is invalid");
+  }
+  validateStorageOptions(quotaBytes, segmentBytes);
+  return withDeliveryLedgerMutation(async () => {
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
+    const delivery = record?.teamDeliveries?.find(
+      (candidate) => candidate.targetNodeKey === targetNodeKey,
+    );
+    if (!delivery) throw new Error("unknown Team Cast recipient Delivery");
+    if (delivery.state !== "prepared") {
+      throw new Error("Team Cast recipient Delivery is already terminal");
+    }
+    if (delivery.attempts.length === 1) {
+      return { attempt: structuredClone(delivery.attempts[0]), created: false };
+    }
+    if (delivery.attempts.length !== 0 || delivery.evidence.length !== 0) {
+      throw new Error("Team Cast recipient Delivery state is inconsistent");
+    }
+    if (Date.parse(record.logicalMessage.teamCast.expiresAt) <= Date.parse(now)) {
+      throw new Error("Team Cast recipient Delivery expired before dispatch");
+    }
+    const event = {
+      schemaVersion: 1,
+      recordType: "delivery-attempt",
+      messageId,
+      deliveryId: delivery.deliveryId,
+      attemptId: randomUUID(),
+      claimId: null,
+      transport: "codex-app-server",
+      startedAt: now,
+    };
+    if (!validAttempt(event)) throw new Error("invalid Team Cast Delivery attempt");
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
+    appendLedgerRecord(event, {
+      quotaBytes,
+      segmentBytes,
+      reserveBytes: reservedEvidenceBytes(after),
+    });
+    updateDeliveryIndexLocked(after, messageId);
+    return { attempt: structuredClone(event), created: true };
+  });
+}
+
+export async function appendTeamCastRecipientEvidence(
+  messageId,
+  targetNodeKey,
+  {
+    attemptId,
+    state,
+    turnId = null,
+    transportResult = null,
+    errorCode = null,
+    observedAt = new Date().toISOString(),
+    quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+    segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
+  },
+) {
+  messageId = validateUuid("logical message id", messageId);
+  if (!NODE_KEY_PATTERN.test(targetNodeKey || "")) {
+    throw new Error("Team Cast evidence target must be a stable Node key");
+  }
+  targetNodeKey = targetNodeKey.toLowerCase();
+  validateStorageOptions(quotaBytes, segmentBytes);
+  return withDeliveryLedgerMutation(async () => {
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
+    const delivery = record?.teamDeliveries?.find(
+      (candidate) => candidate.targetNodeKey === targetNodeKey,
+    );
+    if (!delivery) throw new Error("unknown Team Cast recipient Delivery");
+    const event = {
+      schemaVersion: 1,
+      recordType: "team-delivery-evidence",
+      messageId,
+      deliveryId: delivery.deliveryId,
+      attemptId,
+      state,
+      turnId,
+      transportResult,
+      errorCode,
+      observedAt,
+    };
+    if (!validTeamEvidence(event)) {
+      throw new Error("invalid Team Cast Delivery evidence");
+    }
+    const existing = delivery.evidence[0];
+    if (existing) {
+      if (JSON.stringify(existing) === JSON.stringify(event)) {
+        return { record: structuredClone(record), created: false };
+      }
+      throw new Error("Team Cast recipient Delivery already has evidence");
+    }
     const after = new Map(messages);
     const projected = structuredClone(record);
     after.set(messageId, projected);

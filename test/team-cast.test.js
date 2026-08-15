@@ -42,6 +42,11 @@ const ids = {
   teamMessage: "41345678-6234-4234-8234-123456789abc",
   preparedMessage: "51345678-6234-4234-8234-123456789abc",
   cliPreparedMessage: "61345678-6234-4234-8234-123456789abc",
+  teamTurn: "71345678-6234-4234-8234-123456789abc",
+  fanoutSelection: "81345678-6234-4234-8234-123456789abc",
+  fanoutMessage: "91345678-6234-4234-8234-123456789abc",
+  fanoutTurn: "a1345678-6234-4234-8234-123456789abc",
+  preflightMessage: "b1345678-6234-4234-8234-123456789abc",
 };
 const keys = Object.fromEntries(
   ["sender", "first", "second", "cross"].map((name) => [
@@ -343,8 +348,38 @@ test("one Ledger batch prepares every selected Team Cast recipient", async () =>
     ledger.beginImmediateDelivery(ids.teamMessage),
     /already has a dispatch attempt/,
   );
-  const rebuilt = await ledger.readDeliveryLedgerIndexed(ids.teamMessage);
+  let rebuilt = await ledger.readDeliveryLedgerIndexed(ids.teamMessage);
   assert.equal(rebuilt.teamDeliveries[0].state, "prepared");
+  const attempt = await ledger.beginTeamCastRecipientDelivery(
+    ids.teamMessage,
+    keys.second,
+  );
+  assert.equal(attempt.created, true);
+  const repeatedAttempt = await ledger.beginTeamCastRecipientDelivery(
+    ids.teamMessage,
+    keys.second,
+  );
+  assert.equal(repeatedAttempt.created, false);
+  assert.equal(repeatedAttempt.attempt.attemptId, attempt.attempt.attemptId);
+  const evidence = await ledger.appendTeamCastRecipientEvidence(
+    ids.teamMessage,
+    keys.second,
+    {
+      attemptId: attempt.attempt.attemptId,
+      state: "turn_started",
+      turnId: ids.teamTurn,
+      transportResult: "started",
+      errorCode: null,
+    },
+  );
+  assert.equal(evidence.created, true);
+  rebuilt = await ledger.readDeliveryLedgerIndexed(ids.teamMessage);
+  assert.equal(rebuilt.teamDeliveries[0].state, "turn_started");
+  assert.equal(rebuilt.teamDeliveries[0].turnId, ids.teamTurn);
+  await assert.rejects(
+    ledger.beginTeamCastRecipientDelivery(ids.teamMessage, keys.second),
+    /already terminal/,
+  );
 });
 
 test("Team Cast preparation persists body and batch without dispatch", async () => {
@@ -399,6 +434,91 @@ test("CLI prepares Team Cast evidence and reports zero delivery", () => {
   assert.equal(output.deliveryStarted, false);
   assert.equal(output.recipientCount, 1);
   assert.equal("message" in output, false);
+});
+
+test("recipient dispatch preserves partial outcomes and never redrives", async () => {
+  const selection = await teams.resolveTeamCastMentionSelection({
+    planId: ids.groupPlan,
+    senderNodeKey: keys.sender,
+    mentionedNodeKeys: [keys.first, keys.second],
+    selectionId: ids.fanoutSelection,
+  });
+  await teams.prepareTeamCastMentionMessage({
+    selectionId: selection.selection.selectionId,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.fanoutMessage,
+    message: "fan out one bounded review pointer",
+  });
+  const preflighted = [];
+  const dispatched = [];
+  const result = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.fanoutMessage },
+    {
+      preflightRecipient: async ({ targetNodeKey }) => {
+        preflighted.push(targetNodeKey);
+        return { targetNodeKey };
+      },
+      dispatchRecipient: async ({ targetNodeKey }) => {
+        dispatched.push(targetNodeKey);
+        return targetNodeKey === keys.first
+          ? {
+              state: "turn_started",
+              turnId: ids.fanoutTurn,
+              transportResult: "started",
+              errorCode: null,
+            }
+          : {
+              state: "failed",
+              turnId: null,
+              transportResult: null,
+              errorCode: "ETARGETBUSY",
+            };
+      },
+    },
+  );
+  assert.deepEqual(preflighted, [keys.first, keys.second].sort());
+  assert.deepEqual(dispatched, [keys.first, keys.second].sort());
+  assert.deepEqual(
+    result.record.teamDeliveries.map((delivery) => delivery.state).sort(),
+    ["failed", "turn_started"],
+  );
+  const repeated = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.fanoutMessage },
+    {
+      preflightRecipient: async () => assert.fail("terminal recipients do not preflight"),
+      dispatchRecipient: async () => assert.fail("terminal recipients do not dispatch"),
+    },
+  );
+  assert.ok(repeated.outcomes.every((outcome) => outcome.attempted === false));
+});
+
+test("a failed recipient preflight starts zero Team Cast attempts", async () => {
+  await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.fanoutSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.preflightMessage,
+    message: "preflight must be all recipients first",
+  });
+  await assert.rejects(
+    teams.dispatchPreparedTeamCastMessage(
+      { logicalMessageId: ids.preflightMessage },
+      {
+        preflightRecipient: async ({ targetNodeKey }) => {
+          if (targetNodeKey === keys.second) throw new Error("injected preflight failure");
+          return {};
+        },
+        dispatchRecipient: async () => assert.fail("dispatch must not start"),
+      },
+    ),
+    /injected preflight failure/,
+  );
+  const record = await ledger.readDeliveryLedgerIndexed(ids.preflightMessage);
+  assert.ok(
+    record.teamDeliveries.every(
+      (delivery) =>
+        delivery.state === "prepared" && delivery.attempts.length === 0,
+    ),
+  );
 });
 
 test("Project-role selector requires exact stable bindings", async () => {

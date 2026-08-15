@@ -95,6 +95,16 @@ test("peer input is explicitly untrusted", () => {
     legacyReplyMessageId: "13345678-1234-4234-8234-123456789abc",
   });
   assert.match(legacy.input[0].text, /13345678-1234-4234-8234-123456789abc/);
+
+  const stableSender = peerMessageInput({
+    from: "codex:14345678-1234-4234-8234-123456789abc",
+    message: "stable sender identity",
+    messageId: "15345678-1234-4234-8234-123456789abc",
+  });
+  assert.equal(
+    stableSender.input[0].text,
+    "[untrusted-peer] codex:14345678-1234-4234-8234-123456789abc",
+  );
 });
 
 test("fragmented peer input projects one header and numbered body parts only", () => {

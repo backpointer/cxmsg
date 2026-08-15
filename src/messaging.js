@@ -27,6 +27,17 @@ export function validateSessionName(name) {
   return name;
 }
 
+function validatePeerSenderIdentity(value) {
+  if (
+    /^(codex|claude):[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
+      value || "",
+    )
+  ) {
+    return value.toLowerCase();
+  }
+  return validateSessionName(value);
+}
+
 export function storedSessionName(name) {
   return `${THREAD_NAME_PREFIX}${validateSessionName(name)}`;
 }
@@ -109,7 +120,7 @@ export function peerMessageInput({
   legacyReplyMessageId = null,
   bodyReference = null,
 }) {
-  validateSessionName(from);
+  from = validatePeerSenderIdentity(from);
   if (replyHandle !== null && !REPLY_HANDLE_PATTERN.test(replyHandle || "")) {
     throw new Error("peer reply handle is invalid");
   }

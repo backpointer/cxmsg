@@ -103,9 +103,30 @@ This crash-safe preparation seam reserves Ledger quota for later per-recipient
 evidence but still reports `deliveryStarted: false`. It is not transport
 delivery, model receipt, or task completion.
 
+Dispatch prepared Codex recipients explicitly:
+
+```bash
+cxmsg team dispatch <logical-message-id> --json
+```
+
+Dispatch v1 is Codex-only. Before the first attempt it verifies that every
+pending recipient is still a live Node, maps to exactly one current cxmsg
+session, can accept direct input, is idle, and belongs to the frozen Project.
+A Claude recipient, missing or ambiguous session, or recipient already Busy at
+preflight rejects the whole invocation with zero new attempts. This avoids
+silently steering an unrelated Busy turn.
+
+After preflight, recipients dispatch sequentially. Each recipient gets one
+durable attempt and exactly one terminal evidence record: `turn_started`,
+`failed`, or `unknown`. A busy race is a known per-recipient failure; an
+unexpected transport exception is `unknown`. Existing or unresolved attempts
+are never redriven, and successful or failed siblings do not overwrite each
+other. Every actual Codex turn starts with approval policy `never` and receives
+ordinary untrusted Peer Message context, never authority.
+
 The JSON result includes `deliveryStarted: false` when resolving. Membership,
 role, and plan possession are coordination metadata only; none authorizes work,
 grants a permission, approves a prompt, or expands a peer's authority.
 
-Per-recipient mention dispatch, explicit wake-all, scheduled policies, and
+Claude mention dispatch, explicit wake-all, scheduled fallback policies, and
 digest composition remain separately gated future work.

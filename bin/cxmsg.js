@@ -96,6 +96,7 @@ import {
   storeOnlyGroupMessage,
 } from "../src/group-conversations.js";
 import {
+  dispatchPreparedTeamCastMessage,
   publicTeamCastMentionSelection,
   publicTeamCastPlan,
   prepareTeamCastMentionMessage,
@@ -129,8 +130,11 @@ import {
   serviceEvidence,
 } from "../src/process-state.js";
 import {
+  activeTurnId,
   deliverPeerMessage,
+  deliverPeerMessageWhenIdle,
   storedSessionName,
+  TargetBusyError,
   validateMessage,
   validateStoredMessage,
   validateSessionName,
@@ -314,6 +318,7 @@ function usage(exitCode = 0) {
   cxmsg team selection <selection-id> [--recipients] [--json]
   cxmsg team prepare --selection <selection-id> --from <node-key>
              [--logical-message-id <uuid>] [--json] -- <message...>
+  cxmsg team dispatch <logical-message-id> [--json]
   cxmsg message info <message-id|reply-handle|content-ref> [--json]
   cxmsg message show <message-id|reply-handle|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -634,7 +639,11 @@ function deliveryProjection(record) {
   if (Array.isArray(record.teamDeliveries)) {
     const states = {};
     for (const delivery of record.teamDeliveries) {
-      states[delivery.state] = (states[delivery.state] || 0) + 1;
+      const state =
+        delivery.state === "prepared" && delivery.attempts.length > 0
+          ? "dispatching"
+          : delivery.state;
+      states[state] = (states[state] || 0) + 1;
     }
     return {
       logicalMessageId: record.logicalMessage.messageId,
@@ -654,7 +663,10 @@ function deliveryProjection(record) {
       recipients: record.teamDeliveries.map((delivery) => ({
         deliveryId: delivery.deliveryId,
         targetNodeKey: delivery.targetNodeKey,
-        status: delivery.state,
+        status:
+          delivery.state === "prepared" && delivery.attempts.length > 0
+            ? "dispatching"
+            : delivery.state,
         errorCode: delivery.errorCode || null,
       })),
       createdAt: record.logicalMessage.createdAt,
@@ -3437,6 +3449,102 @@ async function commandInbox(args) {
 
 async function commandTeam(args) {
   const operation = args.shift();
+  if (operation === "dispatch") {
+    const logicalMessageId = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (!logicalMessageId || args.some((value) => value !== "--json")) {
+      usage(2);
+    }
+    await ensureServer();
+    const result = await withAppServer(async (client) =>
+      dispatchPreparedTeamCastMessage(
+        { logicalMessageId },
+        {
+          preflightRecipient: async ({ targetNodeKey, targetThreadId }) => {
+            if (!targetNodeKey.startsWith("codex:") || !targetThreadId) {
+              throw new Error(
+                "Team Cast dispatch currently requires Codex recipients",
+              );
+            }
+            const matches = listSessionRecords().filter(
+              (record) => record.threadId === targetThreadId,
+            );
+            if (matches.length !== 1) {
+              throw new Error(
+                `Team Cast recipient session is ${matches.length ? "ambiguous" : "missing"}: ${targetNodeKey}`,
+              );
+            }
+            const thread = await readThreadMetadata(client, targetThreadId);
+            if (activeTurnId(thread)) {
+              throw new Error(`Team Cast recipient is busy: ${targetNodeKey}`);
+            }
+            if (thread.canAcceptDirectInput === false) {
+              throw new Error(
+                `Team Cast recipient cannot accept input: ${targetNodeKey}`,
+              );
+            }
+            return { session: matches[0], thread };
+          },
+          dispatchRecipient: async ({
+            context,
+            logicalMessageId: messageId,
+            senderNodeKey,
+            message,
+            route,
+          }) => {
+            try {
+              const delivery = await deliverPeerMessageWhenIdle(
+                client,
+                context.thread,
+                {
+                  from: senderNodeKey,
+                  to: context.session.name,
+                  message,
+                  messageId,
+                  route,
+                },
+                {
+                  allowResume: sessionAllowsAppServerResume(context.session),
+                },
+              );
+              return {
+                state: "turn_started",
+                turnId: delivery.turnId,
+                transportResult: delivery.delivery,
+                errorCode: null,
+              };
+            } catch (error) {
+              if (error instanceof TargetBusyError) {
+                return {
+                  state: "failed",
+                  turnId: null,
+                  transportResult: null,
+                  errorCode: "ETARGETBUSY",
+                };
+              }
+              throw error;
+            }
+          },
+        },
+      ),
+    );
+    const statuses = new Set(result.outcomes.map((outcome) => outcome.status));
+    const output = {
+      logicalMessageId: result.logicalMessageId,
+      status:
+        statuses.size === 1
+          ? result.outcomes[0]?.status || "unchanged"
+          : "partial",
+      recipientCount: result.outcomes.length,
+      outcomes: result.outcomes,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${output.status}\t${output.logicalMessageId}\trecipients=${output.recipientCount}\n`,
+    );
+    return;
+  }
   if (operation === "prepare") {
     let selectionId = null;
     let senderNodeKey = null;

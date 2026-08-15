@@ -544,6 +544,7 @@ cxmsg team select-mentions --plan <plan-uuid> \
 cxmsg team prepare --selection <selection-uuid> \
   --from codex:<uuid> --logical-message-id <uuid> -- \
   "Review handoff pointer abc123"
+cxmsg team dispatch <logical-message-id> --json
 ```
 
 Default output exposes only the recipient count and set digest. Use
@@ -551,9 +552,11 @@ Default output exposes only the recipient count and set digest. Use
 15 minutes and cannot be rebound to a changed selector. Explicit mentions use
 stable Node keys only and produce another zero-delivery fixed subset; they do
 not parse names from prose. Mention dispatch, wake-all, and scheduled fan-out
-Preparation stores the body and one exact per-recipient Ledger batch, but every
-recipient remains `prepared` with zero transport attempts. Mention dispatch,
-wake-all, and scheduled fan-out are not enabled by this release. See
+Preparation stores the body and one exact per-recipient Ledger batch. Explicit
+dispatch currently supports Codex recipients only, performs an all-recipient
+idle/session preflight, and then records independent per-recipient outcomes. It
+never steers a Busy turn or redrives an existing attempt. Claude dispatch,
+wake-all, and scheduled fallback are not enabled by this release. See
 [Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md).
 
 When a Directory Project exists, `cxmsg route bind` also pins the binding to

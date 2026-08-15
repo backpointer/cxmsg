@@ -506,10 +506,25 @@ function inspectDeliveryLedger(
       const message = record.logicalMessage;
       const delivery = record.delivery;
       const activeAttempt = delivery.attempts.at(-1) || null;
+      const teamStates = record.teamDeliveries?.map((candidate) =>
+        candidate.state === "prepared" && candidate.attempts.length > 0
+          ? "dispatching"
+          : candidate.state,
+      );
+      const teamStatus = teamStates
+        ? new Set(teamStates).size === 1
+          ? teamStates[0]
+          : "partial"
+        : null;
       return {
         version: 2,
         logicalMessageId: message.messageId,
-        target: delivery.target,
+        target: record.teamDeliveries
+          ? `team:${message.teamCast.selectionId}`
+          : delivery.target,
+        ...(record.teamDeliveries
+          ? { recipientCount: record.teamDeliveries.length }
+          : {}),
         admissionState: delivery.admissionState,
         wakePolicy: delivery.wakePolicy,
         triggerKind:
@@ -527,14 +542,21 @@ function inspectDeliveryLedger(
         ...(delivery.targetThreadId ? { targetThreadId: delivery.targetThreadId } : {}),
         attemptStartedAt: activeAttempt?.startedAt || null,
         claimLeaseUntil: delivery.claim?.leaseUntil || null,
-        updatedAt: delivery.updatedAt,
+        updatedAt: record.teamDeliveries
+          ? record.teamDeliveries.reduce(
+              (latest, candidate) =>
+                candidate.updatedAt > latest ? candidate.updatedAt : latest,
+              message.createdAt,
+            )
+          : delivery.updatedAt,
         status:
-          delivery.admissionState === "quarantined"
+          teamStatus ||
+          (delivery.admissionState === "quarantined"
             ? "quarantined"
             : (delivery.state === "created" && activeAttempt) ||
                 (delivery.state === "retryable" && delivery.attempts.length === 2)
               ? "dispatching"
-              : delivery.state,
+              : delivery.state),
       };
     });
   } catch {

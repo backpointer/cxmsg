@@ -777,6 +777,13 @@ Idempotent preparation and reserved evidence quota make the subsequent
 per-recipient dispatch implementation possible without an implicit wake-all or
 partial batch creation.
 
+Version 0.36.0 adds explicit Codex-only mention dispatch. All pending
+recipients pass stable identity, exact session, Project, input-capability, and
+idle preflight before the first attempt. Dispatch never steers a Busy turn,
+never redrives an existing attempt, and records each recipient independently as
+`turn_started`, `failed`, or `unknown`. Partial outcomes remain visible. Claude
+transport, scheduled busy fallback, and wake-all remain separate gates.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

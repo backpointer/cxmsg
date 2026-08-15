@@ -201,6 +201,8 @@ model wake-ups and exact per-recipient evidence.
       unexpired plan without parsing display-name aliases or starting Delivery.
 - [x] Persist the bounded Message Body and one atomic `prepared` Team Cast
       Ledger batch before any per-recipient transport attempt.
+- [x] Dispatch prepared Codex recipients once with all-recipient preflight and
+      independent `turn_started`, `failed`, or `unknown` evidence.
 - [ ] Add `mention-wake` with bounded mention syntax.
 - [ ] Add explicit `wake-all` with per-recipient fallback and token-cost
       visibility.

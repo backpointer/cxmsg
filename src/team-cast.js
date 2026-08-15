@@ -15,10 +15,19 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { readDirectConversation } from "./conversations.js";
-import { commitPreparedTeamCastDelivery } from "./delivery-ledger.js";
+import {
+  appendTeamCastRecipientEvidence,
+  beginTeamCastRecipientDelivery,
+  commitPreparedTeamCastDelivery,
+  readDeliveryLedgerIndexed,
+} from "./delivery-ledger.js";
 import { withFileLock } from "./file-lock.js";
 import { readGroupConversation } from "./group-conversations.js";
-import { MAX_STORED_MESSAGE_BYTES, storeMessageBody } from "./message-bodies.js";
+import {
+  MAX_STORED_MESSAGE_BYTES,
+  readWholeMessageBody,
+  storeMessageBody,
+} from "./message-bodies.js";
 import {
   findClusterByRoutingId,
   readCluster,
@@ -826,4 +835,129 @@ export async function prepareTeamCastMentionMessage(
       deliveryStarted: false,
     };
   });
+}
+
+export async function dispatchPreparedTeamCastMessage(
+  { logicalMessageId, now = new Date().toISOString() },
+  {
+    preflightRecipient,
+    dispatchRecipient,
+    bodyRead = readWholeMessageBody,
+  },
+) {
+  logicalMessageId = validateUuid("logical message id", logicalMessageId);
+  if (!Number.isFinite(Date.parse(now))) {
+    throw new Error("Team Cast dispatch timestamp is invalid");
+  }
+  if (
+    typeof preflightRecipient !== "function" ||
+    typeof dispatchRecipient !== "function"
+  ) {
+    throw new Error("Team Cast dispatch requires explicit transport adapters");
+  }
+  let record = await readDeliveryLedgerIndexed(logicalMessageId);
+  if (!record?.logicalMessage?.teamCast || !Array.isArray(record.teamDeliveries)) {
+    throw new Error(`unknown prepared Team Cast message: ${logicalMessageId}`);
+  }
+  if (Date.parse(record.logicalMessage.teamCast.expiresAt) <= Date.parse(now)) {
+    throw new Error("Team Cast message expired before dispatch");
+  }
+  const pending = record.teamDeliveries.filter(
+    (delivery) => delivery.state === "prepared" && delivery.attempts.length === 0,
+  );
+  const contexts = new Map();
+  for (const delivery of pending) {
+    exactLiveNode(delivery.targetNodeKey, record.logicalMessage.teamCast.projectId);
+    contexts.set(
+      delivery.targetNodeKey,
+      await preflightRecipient({
+        targetNodeKey: delivery.targetNodeKey,
+        targetThreadId: delivery.targetThreadId,
+        projectId: record.logicalMessage.teamCast.projectId,
+      }),
+    );
+  }
+  const message = bodyRead(record.logicalMessage.body.contentRef);
+  if (
+    Buffer.byteLength(message, "utf8") !== record.logicalMessage.body.bytes ||
+    createHash("sha256").update(message).digest("hex") !==
+      record.logicalMessage.body.sha256
+  ) {
+    throw new Error("Team Cast Message Body conflicts with Ledger evidence");
+  }
+
+  const outcomes = [];
+  for (const delivery of record.teamDeliveries) {
+    if (delivery.state !== "prepared") {
+      outcomes.push({
+        targetNodeKey: delivery.targetNodeKey,
+        status: delivery.state,
+        attempted: false,
+      });
+      continue;
+    }
+    if (delivery.attempts.length > 0) {
+      outcomes.push({
+        targetNodeKey: delivery.targetNodeKey,
+        status: "unresolved_attempt",
+        attempted: false,
+      });
+      continue;
+    }
+    const begun = await beginTeamCastRecipientDelivery(
+      logicalMessageId,
+      delivery.targetNodeKey,
+      { now },
+    );
+    if (!begun.created) {
+      outcomes.push({
+        targetNodeKey: delivery.targetNodeKey,
+        status: "unresolved_attempt",
+        attempted: false,
+      });
+      continue;
+    }
+    let evidence;
+    try {
+      evidence = await dispatchRecipient({
+        context: contexts.get(delivery.targetNodeKey),
+        targetNodeKey: delivery.targetNodeKey,
+        targetThreadId: delivery.targetThreadId,
+        logicalMessageId,
+        senderNodeKey: record.logicalMessage.senderNodeKey,
+        message,
+        route: structuredClone(record.logicalMessage.route),
+      });
+    } catch {
+      evidence = {
+        state: "unknown",
+        turnId: null,
+        transportResult: "dispatch-threw-before-evidence",
+        errorCode: "EDISPATCHUNKNOWN",
+      };
+    }
+    const stored = await appendTeamCastRecipientEvidence(
+      logicalMessageId,
+      delivery.targetNodeKey,
+      {
+        attemptId: begun.attempt.attemptId,
+        state: evidence?.state,
+        turnId: evidence?.turnId ?? null,
+        transportResult: evidence?.transportResult ?? null,
+        errorCode: evidence?.errorCode ?? null,
+      },
+    );
+    const updated = stored.record.teamDeliveries.find(
+      (candidate) => candidate.targetNodeKey === delivery.targetNodeKey,
+    );
+    outcomes.push({
+      targetNodeKey: delivery.targetNodeKey,
+      status: updated.state,
+      attempted: true,
+      turnId: updated.turnId || null,
+      errorCode: updated.errorCode || null,
+    });
+  }
+  record = await readDeliveryLedgerIndexed(logicalMessageId);
+  return { logicalMessageId, outcomes, record };
 }

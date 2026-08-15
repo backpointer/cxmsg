@@ -343,6 +343,14 @@ cannot accidentally become wake-all. Retention treats every prepared recipient
 as nonterminal and protects both Ledger and body evidence. Preparation still
 conveys no grant, approval, Delegation, permission, read, or completion claim.
 
+Codex Team Cast dispatch requires an explicit command and uses exact stable
+Node/session identity. Every pending recipient must pass preflight before the
+first attempt; Busy preflight never steers another turn. Each dispatched turn
+uses approval policy `never` and an untrusted peer envelope. A durable attempt
+prevents retry after a caller crash, while per-recipient evidence prevents one
+success from hiding a sibling failure or unknown outcome. Claude recipients are
+rejected before attempts until their transport receives an equivalent gate.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.
