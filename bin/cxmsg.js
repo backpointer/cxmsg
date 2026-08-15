@@ -254,6 +254,7 @@ import {
   recoverRetentionTransactions,
   restoreRetention,
 } from "../src/retention-transaction.js";
+import { finalizeSessionRemovalLocked } from "../src/session-removal.js";
 
 const codexBin = process.env.CODEX_BIN || "codex";
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
@@ -1373,23 +1374,13 @@ async function commandRemove(name) {
         );
       }
       await ensureServer();
-      await withAppServer(async (client) => {
-        try {
-          await client.request("thread/delete", { threadId: record.threadId });
-        } catch (error) {
-          if (
-            !/not found|does not exist|not persisted|thread not loaded|no rollout/i.test(
-              error.message,
-            )
-          ) {
-            throw error;
-          }
-        }
-      });
-      removeSessionRecord(name);
-      await tombstoneNode("codex", record.threadId, {
-        reason: "session-removed",
-        missingOk: true,
+      await finalizeSessionRemovalLocked({
+        name,
+        threadId: record.threadId,
+        deleteThread: (threadId) =>
+          withAppServer((client) =>
+            client.request("thread/delete", { threadId }),
+          ),
       });
       process.stdout.write(`removed ${name} ${record.threadId}\n`);
     }),

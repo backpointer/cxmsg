@@ -51,6 +51,14 @@ infer or transfer route bindings, bridges, grants, pending Jobs, or authority.
 Ordinary `remove` also refuses a shared thread, preventing one alias from
 deleting the conversation behind another alias.
 
+Session removal is restart-safe when App Server deletion succeeded but the
+registry record still exists: a repeated remove accepts exact missing-thread
+evidence and finishes registry and Node Tombstone cleanup. If a crash occurs
+after registry removal but before the Tombstone, Doctor reports the retained
+live Node as `ENODEUNREGISTERED`; it never repairs or deletes that Node
+automatically. Confirm retirement before using the explicit Directory Node
+tombstone command.
+
 Open two terminals in the desired workspace:
 
 ```bash

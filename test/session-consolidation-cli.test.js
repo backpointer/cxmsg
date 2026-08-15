@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +23,38 @@ function cxmsg(...args) {
     cwd: path.resolve("."),
     env: { ...process.env, CXMSG_STATE_DIR: stateDir },
     encoding: "utf8",
+  });
+}
+
+function cxmsgAsync(...args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["bin/cxmsg.js", ...args], {
+      cwd: path.resolve("."),
+      env: { ...process.env, CXMSG_STATE_DIR: stateDir },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk;
+    });
+    const timeout = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("concurrent consolidation timed out"));
+    }, 12_000);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("close", (code, signal) => {
+      clearTimeout(timeout);
+      resolve({ code, signal, stdout, stderr });
+    });
   });
 }
 
@@ -135,3 +167,26 @@ test("consolidate rejects different threads and conflicting attachment metadata"
   assert.match(conflict.stderr, /conflicting attachment metadata/);
   assert.ok(registry.readSessionRecord("attached-duplicate"));
 });
+
+test(
+  "opposite concurrent consolidations have one winner without deadlock",
+  { timeout: 15_000 },
+  async () => {
+    const threadId = "81345678-1234-4234-8234-123456789abc";
+    register("race-left", threadId);
+    register("race-right", threadId);
+
+    const results = await Promise.all([
+      cxmsgAsync("consolidate", "race-left", "race-right"),
+      cxmsgAsync("consolidate", "race-right", "race-left"),
+    ]);
+    assert.equal(results.filter((result) => result.code === 0).length, 1);
+    assert.equal(results.filter((result) => result.code === 1).length, 1);
+    assert.equal(results.every((result) => result.signal === null), true);
+    assert.match(
+      results.find((result) => result.code === 1).stderr,
+      /unknown Codex session|registration changed while consolidation was waiting/,
+    );
+    assert.equal(registry.sessionRecordsForThread(threadId).length, 1);
+  },
+);

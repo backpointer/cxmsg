@@ -310,6 +310,13 @@ Job, mismatched working directory, or conflicting attachment. Operators must
 revoke or migrate those relationships through their owning commands instead
 of relying on alias consolidation to transfer authority.
 
+Removal treats exact App Server missing-thread responses as idempotent only
+while the registry record still pins the intended thread. This permits a crash
+after `thread/delete` to resume without selecting another identity. A later
+crash after registry removal may leave a live Directory Node without its
+addressable session; the read-only `ENODEUNREGISTERED` Doctor finding exposes
+that state, and only an explicit operator lifecycle command may Tombstone it.
+
 Successor links are explicit, same-Project, single-predecessor, and acyclic.
 They preserve lifecycle provenance only. They never migrate grants,
 permissions, approvals, route roles, Conversation membership, queued work, or

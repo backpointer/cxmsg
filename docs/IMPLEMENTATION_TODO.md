@@ -300,6 +300,12 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
       the canonical record and moves only matching TUI attachment metadata.
 - [x] Fail closed instead of transferring route bindings, bridges, grants,
       pending Jobs, working-directory identity, or authority implicitly.
+- [x] Make the post-`thread/delete` removal seam explicitly rerunnable on exact
+      missing-thread evidence while the registry still pins identity.
+- [x] Regress the post-registry-removal crash window through the existing
+      read-only `ENODEUNREGISTERED` Doctor finding.
+- [x] Regress opposite-argument concurrent consolidation with one winner, one
+      explicit loser, and no lock-order deadlock.
 
 ## Explicit non-goals for this sequence
 
