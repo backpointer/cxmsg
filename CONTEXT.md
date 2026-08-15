@@ -112,6 +112,11 @@ they carry different authority and delivery semantics.
   reached or presented, such as a UDS address, process, bridge, or TUI
   attachment. Bounded Endpoint history records selection and rejection
   evidence but does not become Node identity.
+- **Session Alias Consolidation**: an explicit registry operation that removes
+  one duplicate display alias for the same Codex thread while preserving the
+  canonical registration and, when unambiguous, moving only its TUI attachment
+  metadata. It never deletes or Tombstones the stable Node and never transfers
+  a grant, route role, bridge, pending Job, Conversation, or authority.
 - **Project**: a stable private identity grouping one or more working roots.
   A path helps discover Project membership but is not Project identity.
 - **Project Transition**: an explicit owner-private append-only move record

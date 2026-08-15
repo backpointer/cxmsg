@@ -288,6 +288,19 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Surface overdue or malformed completion deadlines through Doctor and
       expose bounded lifecycle timestamps through CLI and MCP status.
 
+### Post-roadmap maintenance — Session alias safety
+
+- Status: COMPLETE; explicit same-thread consolidation only
+
+- [x] Serialize registration, removal, and consolidation by stable Codex
+      thread ID so concurrent aliases cannot bypass the uniqueness check.
+- [x] Refuse ordinary removal while any other registered alias points to the
+      same App Server thread.
+- [x] Add explicit `cxmsg consolidate <canonical> <duplicate>` that preserves
+      the canonical record and moves only matching TUI attachment metadata.
+- [x] Fail closed instead of transferring route bindings, bridges, grants,
+      pending Jobs, working-directory identity, or authority implicitly.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.

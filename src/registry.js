@@ -15,6 +15,7 @@ import { validateSessionName } from "./messaging.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 const SESSIONS_DIR = path.join(CXMSG_STATE_DIR, "sessions");
+const THREAD_ID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 function ensureRegistry() {
   mkdirSync(SESSIONS_DIR, { recursive: true, mode: 0o700 });
@@ -27,6 +28,13 @@ function recordPath(name) {
 
 function lockPath(name) {
   return path.join(SESSIONS_DIR, `${validateSessionName(name)}.lock`);
+}
+
+function threadLockPath(threadId) {
+  if (!THREAD_ID_PATTERN.test(threadId || "")) {
+    throw new Error("thread-id must be a UUID");
+  }
+  return path.join(SESSIONS_DIR, `thread-${threadId.toLowerCase()}.lock`);
 }
 
 function validRecord(record) {
@@ -64,6 +72,16 @@ export function listSessionRecords() {
     .filter(Boolean);
 }
 
+export function sessionRecordsForThread(threadId) {
+  if (!THREAD_ID_PATTERN.test(threadId || "")) {
+    throw new Error("thread-id must be a UUID");
+  }
+  const normalized = threadId.toLowerCase();
+  return listSessionRecords()
+    .filter((record) => record.threadId.toLowerCase() === normalized)
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
 export function sessionAllowsAppServerResume(record) {
   return Boolean(
     record &&
@@ -91,4 +109,24 @@ export function removeSessionRecord(name) {
 export async function withSessionLock(name, callback, timeoutMs = 10_000) {
   ensureRegistry();
   return withFileLock(lockPath(name), callback, { timeoutMs });
+}
+
+export async function withSessionLocks(names, callback, timeoutMs = 10_000) {
+  const ordered = [
+    ...new Set(names.map((name) => validateSessionName(name))),
+  ].sort();
+  const acquire = (index) =>
+    index === ordered.length
+      ? callback()
+      : withSessionLock(ordered[index], () => acquire(index + 1), timeoutMs);
+  return acquire(0);
+}
+
+export async function withThreadRegistrationLock(
+  threadId,
+  callback,
+  timeoutMs = 10_000,
+) {
+  ensureRegistry();
+  return withFileLock(threadLockPath(threadId), callback, { timeoutMs });
 }

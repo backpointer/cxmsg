@@ -299,6 +299,17 @@ body, permission profile, or process claim. Their presence blocks automatic
 Node resurrection. If a crash leaves live and Tombstone records together,
 Doctor reports the conflict but never deletes or selects either record.
 
+The session registry permits only one display alias for a Codex thread. New
+registration and removal serialize on a thread-scoped lock; removal refuses to
+call App Server `thread/delete` while another alias references the same thread.
+Legacy duplicate aliases require explicit `cxmsg consolidate`. Consolidation
+removes only the duplicate registry record and may rename matching attachment
+metadata; it never deletes the thread or Tombstones the Node. It fails closed
+when the duplicate owns a route binding, Claude bridge record, grant, pending
+Job, mismatched working directory, or conflicting attachment. Operators must
+revoke or migrate those relationships through their owning commands instead
+of relying on alias consolidation to transfer authority.
+
 Successor links are explicit, same-Project, single-predecessor, and acyclic.
 They preserve lifecycle provenance only. They never migrate grants,
 permissions, approvals, route roles, Conversation membership, queued work, or

@@ -36,6 +36,21 @@ Start the local App Server:
 cxmsg server start
 ```
 
+Adopt an existing thread under one unique display alias. If an older cxmsg
+version left the same thread registered twice, keep the intended canonical
+name and explicitly consolidate the duplicate:
+
+```bash
+cxmsg register worker <thread-id>
+cxmsg consolidate worker old-worker --json
+```
+
+`consolidate` does not delete the App Server thread or Tombstone its stable
+Node. It moves only unambiguous foreground attachment metadata and refuses to
+infer or transfer route bindings, bridges, grants, pending Jobs, or authority.
+Ordinary `remove` also refuses a shared thread, preventing one alias from
+deleting the conversation behind another alias.
+
 Open two terminals in the desired workspace:
 
 ```bash

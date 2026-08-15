@@ -224,7 +224,10 @@ import {
   readSessionRecord,
   removeSessionRecord,
   sessionAllowsAppServerResume,
+  sessionRecordsForThread,
   withSessionLock,
+  withSessionLocks,
+  withThreadRegistrationLock,
   writeSessionRecord,
 } from "../src/registry.js";
 import { startWebServer } from "../src/web-server.js";
@@ -278,6 +281,7 @@ function usage(exitCode = 0) {
   cxmsg session <name> [-- <codex resume options>]  Legacy alias for 'open'
   cxmsg create <name>
   cxmsg register <name> <thread-id>
+  cxmsg consolidate <canonical-name> <duplicate-name> [--json]
   cxmsg remove <name>
   cxmsg peers [--json]
   cxmsg send [--from <name>] [--project <id>] [--target-role <role>]
@@ -1193,52 +1197,203 @@ async function commandRegister(name, threadId) {
     }
   });
 
-  await withSessionLock(name, async () => {
-    const existing = readSessionRecord(name);
-    if (existing && existing.threadId !== threadId) {
-      throw new Error(
-        `session name ${name} is already registered to ${existing.threadId}`,
+  await withThreadRegistrationLock(threadId, () =>
+    withSessionLock(name, async () => {
+      const existing = readSessionRecord(name);
+      if (existing && existing.threadId !== threadId) {
+        throw new Error(
+          `session name ${name} is already registered to ${existing.threadId}`,
+        );
+      }
+      const aliases = sessionRecordsForThread(threadId).filter(
+        (record) => record.name !== name,
       );
-    }
-    writeSessionRecord({
-      name,
-      threadId,
-      cwd: thread.cwd,
-      createdAt: existing?.createdAt || new Date().toISOString(),
-      adopted: true,
-    });
-  });
+      if (aliases.length > 0) {
+        throw new Error(
+          `thread ${threadId} is already registered as ${aliases.map((record) => record.name).join(", ")}; use cxmsg consolidate with an existing duplicate instead of adding another alias`,
+        );
+      }
+      writeSessionRecord({
+        name,
+        threadId,
+        cwd: thread.cwd,
+        createdAt: existing?.createdAt || new Date().toISOString(),
+        adopted: true,
+      });
+    }),
+  );
   process.stdout.write(`registered ${name} ${threadId}\n`);
+}
+
+async function commandConsolidate(canonicalName, duplicateName, jsonOutput) {
+  validateSessionName(canonicalName);
+  validateSessionName(duplicateName);
+  if (canonicalName === duplicateName) {
+    throw new Error("canonical and duplicate session names must differ");
+  }
+  const previewCanonical = readSessionRecord(canonicalName);
+  const previewDuplicate = readSessionRecord(duplicateName);
+  if (!previewCanonical) throw new Error(`unknown Codex session: ${canonicalName}`);
+  if (!previewDuplicate) throw new Error(`unknown Codex session: ${duplicateName}`);
+  if (previewCanonical.threadId !== previewDuplicate.threadId) {
+    throw new Error("session consolidation requires two names for the same thread");
+  }
+
+  const result = await withThreadRegistrationLock(previewCanonical.threadId, () =>
+    withSessionLocks([canonicalName, duplicateName], async () => {
+      const canonical = readSessionRecord(canonicalName);
+      const duplicate = readSessionRecord(duplicateName);
+      if (!canonical || !duplicate) {
+        throw new Error("session registration changed while consolidation was waiting");
+      }
+      if (
+        canonical.threadId !== previewCanonical.threadId ||
+        duplicate.threadId !== canonical.threadId
+      ) {
+        throw new Error("session registration changed while consolidation was waiting");
+      }
+      if (canonical.cwd !== duplicate.cwd) {
+        throw new Error("session consolidation requires matching registered working directories");
+      }
+
+      const duplicateBridge = await claudeBridgeState(duplicateName);
+      if (duplicateBridge.record) {
+        throw new Error(
+          `Claude bridge metadata exists for ${duplicateName}; stop and remove that bridge before consolidation`,
+        );
+      }
+      const binding = routeBindingState(duplicateName);
+      if (binding.state !== "missing") {
+        throw new Error(
+          `route binding exists for ${duplicateName}; remove or migrate it explicitly before consolidation`,
+        );
+      }
+      if ((duplicate.allowedDelegators || []).length > 0) {
+        throw new Error(
+          `Delegation grants target ${duplicateName}; revoke them explicitly before consolidation`,
+        );
+      }
+      if (listClaudeRequestGrants(duplicate).length > 0) {
+        throw new Error(
+          `Claude request grants target ${duplicateName}; revoke them explicitly before consolidation`,
+        );
+      }
+      const inboundDelegationTargets = listSessionRecords()
+        .filter((record) => (record.allowedDelegators || []).includes(duplicateName))
+        .map((record) => record.name)
+        .sort();
+      if (inboundDelegationTargets.length > 0) {
+        throw new Error(
+          `${duplicateName} is an allowed delegator for ${inboundDelegationTargets.join(", ")}; revoke those grants explicitly before consolidation`,
+        );
+      }
+      const pendingJobs = listJobs().filter(
+        (job) =>
+          isPendingJob(job) &&
+          (job.from === duplicateName || job.target === duplicateName),
+      );
+      if (pendingJobs.length > 0) {
+        throw new Error(
+          `pending jobs reference ${duplicateName}; wait for them to become terminal before consolidation`,
+        );
+      }
+
+      const canonicalAttachment = readAttachmentRecord(canonicalName);
+      const duplicateAttachment = readAttachmentRecord(duplicateName);
+      if (
+        canonicalAttachment &&
+        (canonicalAttachment.threadId !== canonical.threadId ||
+          (duplicateAttachment &&
+            canonicalAttachment.childPid !== duplicateAttachment.childPid))
+      ) {
+        throw new Error(`conflicting attachment metadata exists for ${canonicalName}`);
+      }
+      if (duplicateAttachment && duplicateAttachment.threadId !== duplicate.threadId) {
+        throw new Error(`attachment metadata for ${duplicateName} targets another thread`);
+      }
+      if (duplicateAttachment && !canonicalAttachment) {
+        writeAttachmentRecord({
+          ...duplicateAttachment,
+          name: canonicalName,
+        });
+      }
+      if (duplicateAttachment) {
+        removeAttachmentRecord(duplicateName, duplicateAttachment.childPid);
+      }
+      removeSessionRecord(duplicateName);
+      return {
+        canonicalName,
+        removedAlias: duplicateName,
+        threadId: canonical.threadId,
+        attachmentMoved: Boolean(duplicateAttachment && !canonicalAttachment),
+      };
+    }),
+  );
+
+  await writeCoordinationEvent({
+    kind: "session-consolidation",
+    source: canonicalName,
+    target: duplicateName,
+    outcome: "consolidated",
+  });
+  process.stdout.write(
+    jsonOutput
+      ? `${JSON.stringify(result, null, 2)}\n`
+      : `consolidated ${duplicateName} into ${canonicalName} (${result.threadId})${result.attachmentMoved ? "; attachment moved" : ""}\n`,
+  );
 }
 
 async function commandRemove(name) {
   validateSessionName(name);
-  const attachment = liveAttachment(name);
-  if (attachment) {
-    throw new Error(`session ${name} is attached by pid ${attachment.childPid}; detach it first`);
-  }
-  if ((await claudeBridgeState(name)).running) {
-    throw new Error(`Claude bridge for ${name} is running; stop it before removing the session`);
-  }
-  await ensureServer();
-  const record = readSessionRecord(name);
-  if (!record) throw new Error(`unknown Codex session: ${name}`);
-
-  await withAppServer(async (client) => {
-    try {
-      await client.request("thread/delete", { threadId: record.threadId });
-    } catch (error) {
-      if (!/not found|does not exist|not persisted|thread not loaded|no rollout/i.test(error.message)) {
-        throw error;
+  const preview = readSessionRecord(name);
+  if (!preview) throw new Error(`unknown Codex session: ${name}`);
+  await withThreadRegistrationLock(preview.threadId, () =>
+    withSessionLock(name, async () => {
+      const record = readSessionRecord(name);
+      if (!record || record.threadId !== preview.threadId) {
+        throw new Error("session registration changed while removal was waiting");
       }
-    }
-  });
-  removeSessionRecord(name);
-  await tombstoneNode("codex", record.threadId, {
-    reason: "session-removed",
-    missingOk: true,
-  });
-  process.stdout.write(`removed ${name} ${record.threadId}\n`);
+      const aliases = sessionRecordsForThread(record.threadId).filter(
+        (candidate) => candidate.name !== name,
+      );
+      if (aliases.length > 0) {
+        throw new Error(
+          `thread ${record.threadId} is also registered as ${aliases.map((candidate) => candidate.name).join(", ")}; use cxmsg consolidate instead of remove`,
+        );
+      }
+      const attachment = liveAttachment(name);
+      if (attachment) {
+        throw new Error(
+          `session ${name} is attached by pid ${attachment.childPid}; detach it first`,
+        );
+      }
+      if ((await claudeBridgeState(name)).record) {
+        throw new Error(
+          `Claude bridge metadata exists for ${name}; stop or clean it before removing the session`,
+        );
+      }
+      await ensureServer();
+      await withAppServer(async (client) => {
+        try {
+          await client.request("thread/delete", { threadId: record.threadId });
+        } catch (error) {
+          if (
+            !/not found|does not exist|not persisted|thread not loaded|no rollout/i.test(
+              error.message,
+            )
+          ) {
+            throw error;
+          }
+        }
+      });
+      removeSessionRecord(name);
+      await tombstoneNode("codex", record.threadId, {
+        reason: "session-removed",
+        missingOk: true,
+      });
+      process.stdout.write(`removed ${name} ${record.threadId}\n`);
+    }),
+  );
 }
 
 async function markSessionManaged(name) {
@@ -4440,6 +4595,15 @@ async function main() {
     case "register":
       await commandRegister(args[0], args[1]);
       break;
+    case "consolidate": {
+      const jsonOutput = args.includes("--json");
+      const positional = args.filter((value) => value !== "--json");
+      if (positional.length !== 2 || args.length !== positional.length + (jsonOutput ? 1 : 0)) {
+        usage(2);
+      }
+      await commandConsolidate(positional[0], positional[1], jsonOutput);
+      break;
+    }
     case "remove":
       await commandRemove(args[0]);
       break;
