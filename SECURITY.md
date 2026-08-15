@@ -31,6 +31,16 @@ text. Project, role, stable Node identity, schedule, trigger, expiry, claim,
 attempt, digest, and Delivery evidence remain in Route Admission, the Delivery
 Ledger, and other owner-private Modules rather than model context.
 
+An explicitly armed Group inbox digest is the narrow exception for stored
+Group presentation. It is prefixed `[untrusted-group-inbox-digest]`, contains
+at most 16 oldest unread entries and 8 KiB of bounded previews, and carries no
+route, Endpoint, grant, capability, approval, or completion evidence. cxmsg
+composes it only for a new Peer Message `turn/start`; Busy `turn/steer`,
+Delegation, and external turns never receive it. A failed App Server start does
+not advance the cursor or consume the one-shot intent. Post-accept cursor
+failure leaves the intent visible for diagnosis rather than reporting the
+already-started Peer Delivery as failed.
+
 Reply Handles use 10 Crockford Base32 characters and are unique within a pinned
 recipient thread. They are not capability tokens. Resolution requires the
 current registered session name and exact recipient thread identity, then uses

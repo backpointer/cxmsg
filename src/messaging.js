@@ -220,6 +220,57 @@ export function finalTurnResult(turn) {
   return finalMessage?.text || null;
 }
 
+async function composeDigestForCodexThread(thread) {
+  if (
+    !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(thread?.id || "")
+  ) {
+    return { nodeKey: null, digest: null, errorCode: null };
+  }
+  try {
+    const groupInbox = await import("./group-conversations.js");
+    return {
+      nodeKey: `codex:${thread.id.toLowerCase()}`,
+      digest: groupInbox.composeGroupInboxDigest(`codex:${thread.id}`),
+      consume: groupInbox.consumeGroupInboxDigest,
+      errorCode: null,
+    };
+  } catch {
+    return { nodeKey: null, digest: null, errorCode: "EINBOXDIGEST" };
+  }
+}
+
+async function consumeAcceptedDigest(composed) {
+  if (!composed?.nodeKey || !composed.digest) {
+    return {
+      included: false,
+      cursorAdvanced: false,
+      intentConsumed: false,
+      errorCode: composed?.errorCode || null,
+    };
+  }
+  try {
+    const result = await composed.consume({
+      nodeKey: composed.nodeKey,
+      requestedAt: composed.digest.intent.requestedAt,
+      acknowledgements: composed.digest.acknowledgements,
+    });
+    return {
+      included: Boolean(composed.digest.text),
+      cursorAdvanced:
+        result.changed && composed.digest.acknowledgements.length > 0,
+      intentConsumed: result.changed,
+      errorCode: result.stale ? "EINBOXDIGESTSTALE" : null,
+    };
+  } catch {
+    return {
+      included: Boolean(composed.digest.text),
+      cursorAdvanced: false,
+      intentConsumed: false,
+      errorCode: "EINBOXDIGESTACK",
+    };
+  }
+}
+
 export async function deliverDelegatedTask(client, thread, payload) {
   const current = await readThreadForInput(client, thread);
 
@@ -291,6 +342,11 @@ export async function deliverPeerMessage(
     };
   }
 
+  const composedDigest = await composeDigestForCodexThread(current);
+  if (composedDigest.digest?.text) {
+    peerInput.input.push({ type: "text", text: composedDigest.digest.text });
+  }
+
   const result = await client.request("turn/start", {
     threadId: current.id,
     input: peerInput.input,
@@ -299,11 +355,13 @@ export async function deliverPeerMessage(
     // A peer message must never open an approval path or grant escalation.
     approvalPolicy: "never",
   });
+  const inboxDigest = await consumeAcceptedDigest(composedDigest);
   return {
     delivery: "started",
     messageId: peerInput.messageId,
     threadId: current.id,
     turnId: result.turn.id,
+    inboxDigest,
   };
 }
 
@@ -333,6 +391,10 @@ export async function deliverPeerMessageWhenIdle(
     messageId,
     bodyReference,
   });
+  const composedDigest = await composeDigestForCodexThread(current);
+  if (composedDigest.digest?.text) {
+    peerInput.input.push({ type: "text", text: composedDigest.digest.text });
+  }
   if (beforeStart) await beforeStart();
   const result = await client.request("turn/start", {
     threadId: current.id,
@@ -341,10 +403,12 @@ export async function deliverPeerMessageWhenIdle(
     clientUserMessageId: peerInput.messageId,
     approvalPolicy: "never",
   });
+  const inboxDigest = await consumeAcceptedDigest(composedDigest);
   return {
     delivery: "started",
     messageId: peerInput.messageId,
     threadId: current.id,
     turnId: result.turn.id,
+    inboxDigest,
   };
 }

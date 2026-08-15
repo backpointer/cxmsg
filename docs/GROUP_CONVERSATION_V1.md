@@ -57,7 +57,18 @@ cxmsg conversation group send <conversation-id> \
   --from codex:<uuid> --expiry <ISO-within-7-days> -- "Review pointer abc123"
 cxmsg inbox list claude:<uuid> --json
 cxmsg inbox ack claude:<uuid> <conversation-id> <sequence>
+cxmsg inbox digest-next codex:<uuid> --limit 8 --max-bytes 4096
 ```
+
+`digest-next` persists one explicit Codex-only presentation intent; it does not
+wake a model. When cxmsg next starts a new Peer Message turn for that exact
+Node, it may append the oldest unread entries as a clearly labelled untrusted
+digest. The digest is bounded to 16 messages and 8 KiB, uses bounded body
+previews, and reports that excess unread content remains stored. It is never
+attached to a Busy `turn/steer`, Delegation, or external turn. Selected cursor
+positions advance and the intent is consumed only after App Server accepts the
+new turn. A failed start changes neither; acknowledgement remains presentation
+state rather than proof of model read, processing, reply, or task completion.
 
 Group message bodies use the existing 256 KiB maximum. Every message requires
 an explicit future expiry no more than seven days away. Replies must reference
@@ -74,7 +85,7 @@ Group message or emits an automatic group reply.
 - 4 MiB maximum Group record
 - 16,384 messages scanned and 200 entries returned per inbox query
 - 512 Conversation cursors per Node
+- one digest intent per Codex Node, 16 messages, and 8 KiB per composition
 
 Mention wake, wake-all, scheduled per-recipient wake, Team Cast selectors,
-digest composition, and automatic inbox presentation remain later, separately
-gated features.
+and automatic recurring inbox presentation remain separately gated features.

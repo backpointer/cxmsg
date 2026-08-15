@@ -190,7 +190,7 @@ model wake-ups and exact per-recipient evidence.
 ### T8 — Team Cast selection and wake policies
 
 - Priority: P2
-- Status: IN PROGRESS
+- Status: COMPLETE
 - Canonical phase: Phase 6
 
 - [x] Add explicit selectors for Project+role, Cluster, and Conversation; a
@@ -213,7 +213,7 @@ model wake-ups and exact per-recipient evidence.
       the shared Delivery Ledger and Scheduler claim protocol.
 - [x] Add `after-turn` and `after-job` per-recipient policies without creating
       a second scheduling truth.
-- [ ] Add bounded digest-on-next-cxmsg-turn composition; never steer an
+- [x] Add bounded digest-on-next-cxmsg-turn composition; never steer an
       external or unrelated Busy turn with a digest.
 
 Done when a Team Cast has deterministic membership, bounded token behavior,
@@ -222,7 +222,7 @@ and no quiet drop, implicit wake-all, or Project leakage.
 ### T9 — Graph Projection and extended Doctor
 
 - Priority: P3
-- Status: BLOCKED on T6; Group edges also require T7
+- Status: READY; T6 and T7 are complete
 - Canonical phase: Phase 7
 
 - [ ] Derive separate `belongs-to-project`, `member-of-cluster`,

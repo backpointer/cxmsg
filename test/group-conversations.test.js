@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -13,6 +14,7 @@ const directory = await import(`../src/node-directory.js?groups=${Date.now()}`);
 const groups = await import(`../src/group-conversations.js?groups=${Date.now()}`);
 const ledger = await import(`../src/delivery-ledger.js?groups=${Date.now()}`);
 const scheduler = await import(`../src/scheduler.js?groups=${Date.now()}`);
+const messaging = await import(`../src/messaging.js?groups=${Date.now()}`);
 const cxmsgPath = path.resolve("bin/cxmsg.js");
 
 function cxmsg(...args) {
@@ -297,6 +299,115 @@ test("Group Conversation and inbox CLI stay bounded and body-free", () => {
     ),
   );
   assert.doesNotMatch(inbox.stdout, /CLI private body/);
+
+  const armed = cxmsg(
+    "inbox",
+    "digest-next",
+    nodeKeys.second,
+    "--limit",
+    "2",
+    "--max-bytes",
+    "2048",
+    "--json",
+  );
+  assert.equal(armed.status, 0, armed.stderr);
+  assert.equal(JSON.parse(armed.stdout).messageLimit, 2);
+  const status = cxmsg("inbox", "digest-status", nodeKeys.second, "--json");
+  assert.equal(status.status, 0, status.stderr);
+  assert.equal(JSON.parse(status.stdout).maxBytes, 2048);
+  const cancelled = cxmsg("inbox", "digest-cancel", nodeKeys.second, "--json");
+  assert.equal(cancelled.status, 0, cancelled.stderr);
+  assert.equal(JSON.parse(cancelled.stdout).changed, true);
+});
+
+test("digest-next is bounded, never steers Busy work, and advances only after start", async () => {
+  const before = groups.listGroupInbox(nodeKeys.second).length;
+  const armed = await groups.requestGroupInboxDigest({
+    nodeKey: nodeKeys.second,
+    messageLimit: 2,
+    maxBytes: 2_048,
+  });
+  assert.equal(armed.changed, true);
+  const composed = groups.composeGroupInboxDigest(nodeKeys.second);
+  assert.equal(composed.messageCount, 2);
+  assert.ok(Buffer.byteLength(composed.text, "utf8") <= 2_048);
+  assert.match(composed.text, /untrusted-group-inbox-digest/);
+  assert.match(composed.text, /Presentation only/);
+
+  const busyCalls = [];
+  const busy = await messaging.deliverPeerMessage(
+    {
+      async request(method, params) {
+        busyCalls.push({ method, params });
+        return { turnId: "busy-turn" };
+      },
+    },
+    {
+      id: ids.second,
+      name: "cxmsg:second",
+      status: { type: "active" },
+      turns: [{ id: "busy-turn", status: "inProgress" }],
+    },
+    { from: "first", message: "do not attach the digest", messageId: randomUUID() },
+  );
+  assert.equal(busy.delivery, "steered");
+  assert.equal(busyCalls[0].method, "turn/steer");
+  assert.doesNotMatch(
+    JSON.stringify(busyCalls[0].params.input),
+    /untrusted-group-inbox-digest/,
+  );
+  assert.ok(groups.readGroupInboxDigestIntent(nodeKeys.second));
+
+  await assert.rejects(
+    messaging.deliverPeerMessage(
+      {
+        async request() {
+          throw new Error("injected App Server rejection");
+        },
+      },
+      {
+        id: ids.second,
+        name: "cxmsg:second",
+        status: { type: "idle" },
+        turns: [],
+      },
+      { from: "first", message: "failed start", messageId: randomUUID() },
+    ),
+    /injected App Server rejection/,
+  );
+  assert.ok(groups.readGroupInboxDigestIntent(nodeKeys.second));
+  assert.equal(groups.listGroupInbox(nodeKeys.second).length, before);
+
+  const idleCalls = [];
+  const started = await messaging.deliverPeerMessage(
+    {
+      async request(method, params) {
+        idleCalls.push({ method, params });
+        return { turn: { id: "digest-turn" } };
+      },
+    },
+    {
+      id: ids.second,
+      name: "cxmsg:second",
+      status: { type: "idle" },
+      turns: [],
+    },
+    { from: "first", message: "start with the stored digest", messageId: randomUUID() },
+  );
+  assert.equal(started.delivery, "started");
+  assert.equal(idleCalls[0].method, "turn/start");
+  assert.match(
+    JSON.stringify(idleCalls[0].params.input),
+    /untrusted-group-inbox-digest/,
+  );
+  assert.deepEqual(started.inboxDigest, {
+    included: true,
+    cursorAdvanced: true,
+    intentConsumed: true,
+    errorCode: null,
+  });
+  assert.equal(groups.readGroupInboxDigestIntent(nodeKeys.second), null);
+  assert.equal(groups.listGroupInbox(nodeKeys.second).length, before - 2);
 });
 
 test("store-only Group Deliveries are invisible to Scheduler wake discovery", async () => {
@@ -319,9 +430,11 @@ test("store-only Group Deliveries are invisible to Scheduler wake discovery", as
 test("Group Conversation state is owner-private", () => {
   assert.equal(lstatSync(groups.GROUP_CONVERSATIONS_DIR).mode & 0o077, 0);
   assert.equal(lstatSync(groups.GROUP_INBOX_CURSORS_DIR).mode & 0o077, 0);
+  assert.equal(lstatSync(groups.GROUP_INBOX_DIGEST_INTENTS_DIR).mode & 0o077, 0);
   for (const directory of [
     groups.GROUP_CONVERSATIONS_DIR,
     groups.GROUP_INBOX_CURSORS_DIR,
+    groups.GROUP_INBOX_DIGEST_INTENTS_DIR,
   ]) {
     for (const name of readdirSync(directory)) {
       assert.equal(lstatSync(path.join(directory, name)).mode & 0o077, 0);

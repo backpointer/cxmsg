@@ -822,6 +822,13 @@ claim leases across restart, and treats trigger completion only as timing
 eligibility. Policy or trigger changes are idempotency conflicts; Claude
 recipients never enter this Codex-only scheduled path.
 
+Version 0.41.0 adds explicit one-shot `digest-next` presentation. A Codex Node
+may arm bounded limits without starting work; only the next cxmsg-created Peer
+Message `turn/start` composes oldest unread Group entries. Busy steering,
+Delegation, and external turns never receive a digest. App Server acceptance
+precedes cursor advancement and intent consumption, while previews remain
+bounded to 16 messages and 8 KiB and are labelled untrusted coordination.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

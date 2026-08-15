@@ -87,12 +87,15 @@ import {
 } from "../src/conversations.js";
 import {
   acknowledgeGroupInbox,
+  cancelGroupInboxDigest,
   changeGroupMember,
   ensureGroupConversation,
   listGroupConversations,
   listGroupInbox,
   publicGroupConversation,
+  readGroupInboxDigestIntent,
   readGroupConversation,
+  requestGroupInboxDigest,
   storeOnlyGroupMessage,
 } from "../src/group-conversations.js";
 import {
@@ -310,6 +313,9 @@ function usage(exitCode = 0) {
              [--logical-message-id <uuid>] [--reply-to <uuid>] [--json] -- <message...>
   cxmsg inbox list <node-key> [--limit <count>] [--all] [--json]
   cxmsg inbox ack <node-key> <conversation-id> <sequence> [--json]
+  cxmsg inbox digest-next <node-key> [--limit <count>] [--max-bytes <bytes>] [--json]
+  cxmsg inbox digest-status <node-key> [--json]
+  cxmsg inbox digest-cancel <node-key> [--json]
   cxmsg team resolve --from <node-key> (--conversation <id> | --cluster <id> | --project <uuid> --role <role>)
              [--plan-id <uuid>] [--recipients] [--json]
   cxmsg team plan <plan-id> [--recipients] [--json]
@@ -3445,6 +3451,57 @@ async function commandInbox(args) {
       jsonOutput
         ? `${JSON.stringify(output, null, 2)}\n`
         : `${result.changed ? "acknowledged" : "unchanged"} ${conversationId}:${sequence}\n`,
+    );
+    return;
+  }
+  if (operation === "digest-next") {
+    const nodeKey = stableNodeKey(args.shift());
+    let messageLimit = 8;
+    let maxBytes = 4 * 1024;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--limit") messageLimit = Number(args.shift());
+      else if (option === "--max-bytes") maxBytes = Number(args.shift());
+      else throw new Error(`unknown inbox digest-next option: ${option}`);
+    }
+    const result = await requestGroupInboxDigest({
+      nodeKey,
+      messageLimit,
+      maxBytes,
+    });
+    const output = { ...result.intent, changed: result.changed };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.changed ? "armed" : "unchanged"} digest-next ${nodeKey} messages=${messageLimit} bytes=${maxBytes}\n`,
+    );
+    return;
+  }
+  if (operation === "digest-status") {
+    const nodeKey = stableNodeKey(args.shift());
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const intent = readGroupInboxDigestIntent(nodeKey);
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(intent, null, 2)}\n`
+        : intent
+          ? `armed digest-next ${nodeKey} messages=${intent.messageLimit} bytes=${intent.maxBytes}\n`
+          : `not-armed digest-next ${nodeKey}\n`,
+    );
+    return;
+  }
+  if (operation === "digest-cancel") {
+    const nodeKey = stableNodeKey(args.shift());
+    const jsonOutput = args.includes("--json");
+    if (args.some((value) => value !== "--json")) usage(2);
+    const result = await cancelGroupInboxDigest(nodeKey);
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : `${result.changed ? "cancelled" : "unchanged"} digest-next ${nodeKey}\n`,
     );
     return;
   }

@@ -519,6 +519,9 @@ separately:
 ```bash
 cxmsg inbox list claude:<uuid> --json
 cxmsg inbox ack claude:<uuid> <conversation-id> <sequence>
+cxmsg inbox digest-next codex:<uuid> --limit 8 --max-bytes 4096
+cxmsg inbox digest-status codex:<uuid> --json
+cxmsg inbox digest-cancel codex:<uuid>
 ```
 
 Inbox output contains a Content Reference and per-recipient Delivery status,
@@ -526,6 +529,13 @@ not body text. Acknowledgement is only a local presentation cursor; it is not
 proof of model read, processing, reply, or task completion. Partial recipient
 failure remains visible per Delivery and never silently re-fans out. See
 [Group Conversation v1](docs/GROUP_CONVERSATION_V1.md).
+
+`digest-next` is an explicit one-shot Codex presentation intent. The next
+cxmsg Peer Message that starts a new turn may append at most 16 oldest unread
+messages and 8 KiB of clearly marked untrusted previews. It is never attached
+to `turn/steer`, Delegation, or an externally started turn. The selected inbox
+cursor advances only after App Server accepts that new turn; a failed start
+keeps both the intent and unread state for later inspection.
 
 ## Team Cast recipient plans
 

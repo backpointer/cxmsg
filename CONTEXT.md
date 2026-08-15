@@ -69,6 +69,12 @@ they carry different authority and delivery semantics.
 - **Inbox Cursor**: owner-private presentation state recording acknowledged
   Group sequences. It is not Delivery, read, processing, or completion
   evidence.
+- **Inbox Digest Intent**: an owner-private, one-shot request to compose a
+  bounded set of oldest unread Group messages only when cxmsg next starts a
+  Codex Peer Message turn. It creates no turn and conveys no authority.
+- **Inbox Digest**: the bounded, clearly untrusted model-context projection
+  produced from an Inbox Digest Intent. It is never steered into Busy work, and
+  its cursor advances only after App Server accepts the new turn.
 - **Team Cast Plan**: an owner-private, short-lived resolution of one explicit
   Conversation, Cluster, or Project+role selector to a frozen same-Project
   recipient Node set. A Plan records selector evidence and a token-cost ceiling
