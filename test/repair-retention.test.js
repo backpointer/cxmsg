@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -133,7 +134,8 @@ test("Repair retention plan is deterministic, read-only, and completion-only", (
     const secondPlan = JSON.parse(second.stdout);
     assert.equal(firstPlan.planDigest, secondPlan.planDigest);
     assert.equal(firstPlan.policy.automaticDeletion, false);
-    assert.equal(firstPlan.policy.mutationEnabled, false);
+    assert.equal(firstPlan.policy.mutationEnabled, true);
+    assert.equal(firstPlan.policy.mutationKind, "recoverable-archive");
     assert.deepEqual(
       firstPlan.category.eligible.map((candidate) => candidate.transactionId),
       ["12345678-1234-4234-8234-123456789abc"],
@@ -147,7 +149,165 @@ test("Repair retention plan is deterministic, read-only, and completion-only", (
     assert.ok(firstPlan.category.estimatedBytes > 0);
     assert.equal(stateDigest(repairs), before);
     assert.doesNotMatch(first.stdout, new RegExp(root));
+
+    const archived = runCxmsg(root, [
+      "repair",
+      "retention",
+      "archive",
+      "--before",
+      "2026-01-01T00:00:00.000Z",
+      "--confirm",
+      firstPlan.planDigest,
+      "--json",
+    ]);
+    assert.equal(archived.status, 0, archived.stderr);
+    const archiveReceipt = JSON.parse(archived.stdout);
+    assert.equal(archiveReceipt.outcome, "archived");
+    assert.equal(archiveReceipt.itemCount, 1);
+    const archivedId = "12345678-1234-4234-8234-123456789abc";
+    assert.equal(
+      existsSync(path.join(root, "repairs", "transactions", archivedId)),
+      false,
+    );
+    assert.equal(
+      existsSync(path.join(root, "repairs", "receipts", `${archivedId}.json`)),
+      false,
+    );
+    const archiveDirectory = path.join(
+      root,
+      "repair-retention",
+      "transactions",
+      archiveReceipt.archiveId,
+    );
+    assert.ok(existsSync(path.join(archiveDirectory, "items", archivedId, "transaction")));
+    assert.ok(existsSync(path.join(archiveDirectory, "items", archivedId, "receipt.json")));
+    assert.equal(statSync(archiveDirectory).mode & 0o077, 0);
+    assert.doesNotMatch(archived.stdout, new RegExp(root));
+    const doctor = runCxmsg(root, ["doctor", "--json"]);
+    const doctorReport = JSON.parse(doctor.stdout);
+    assert.ok(doctorReport.checks.some((check) =>
+      check.scope === "repair-retention" && check.status === "pass" &&
+      check.id.includes(archiveReceipt.archiveId.slice(0, 8))
+    ));
+
+    const replay = runCxmsg(root, [
+      "repair",
+      "retention",
+      "archive",
+      "--before",
+      "2026-01-01T00:00:00.000Z",
+      "--confirm",
+      firstPlan.planDigest,
+      "--json",
+    ]);
+    assert.equal(replay.status, 1);
+    assert.match(replay.stderr, /plan changed/);
+    assert.equal(
+      readdirSync(path.join(root, "repair-retention", "transactions")).length,
+      1,
+    );
+
+    const wrongRestore = runCxmsg(root, [
+      "repair",
+      "retention",
+      "restore",
+      archiveReceipt.archiveId,
+      "--confirm",
+      "00000000-0000-4000-8000-000000000000",
+      "--json",
+    ]);
+    assert.equal(wrongRestore.status, 1);
+    assert.match(wrongRestore.stderr, /exact archive id/);
+
+    const restored = runCxmsg(root, [
+      "repair",
+      "retention",
+      "restore",
+      archiveReceipt.archiveId,
+      "--confirm",
+      archiveReceipt.archiveId,
+      "--json",
+    ]);
+    assert.equal(restored.status, 0, restored.stderr);
+    assert.equal(JSON.parse(restored.stdout).outcome, "restored");
+    assert.ok(existsSync(path.join(root, "repairs", "transactions", archivedId)));
+    assert.ok(existsSync(path.join(root, "repairs", "receipts", `${archivedId}.json`)));
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Repair archive and restore recover interrupted pair moves", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "cxmsg-repair-retention-crash-"));
+  const previousStateDir = process.env.CXMSG_STATE_DIR;
+  try {
+    repairRecord(root, {
+      transactionId: "52345678-1234-4234-8234-123456789abc",
+      phase: "completed",
+      completedAt: "2025-01-02T00:00:00.000Z",
+    });
+    process.env.CXMSG_STATE_DIR = root;
+    const moduleUrl = new URL("../src/repair-retention.js", import.meta.url);
+    moduleUrl.searchParams.set("crash-test", String(Date.now()));
+    const retention = await import(moduleUrl.href);
+    const before = "2026-01-01T00:00:00.000Z";
+    const now = Date.parse("2026-08-16T00:00:00.000Z");
+    const plan = retention.buildRepairRetentionPlan({ before }, { now });
+    await assert.rejects(
+      retention.archiveRepairRetention(
+        { before, expectedPlanDigest: plan.planDigest },
+        {
+          now,
+          fault(phase) {
+            if (phase === "after-transaction-move") {
+              throw new Error("simulated archive crash");
+            }
+          },
+        },
+      ),
+      /simulated archive crash/,
+    );
+    const archiveState = path.join(root, "repair-retention");
+    const beforeDoctor = stateDigest(archiveState);
+    const doctor = runCxmsg(root, ["doctor", "--json"]);
+    const doctorReport = JSON.parse(doctor.stdout);
+    assert.ok(doctorReport.checks.some((check) =>
+      check.scope === "repair-retention" &&
+      check.errorCode === "EREPAIRARCHIVEINCOMPLETE" &&
+      check.status === "warn"
+    ));
+    assert.equal(stateDigest(archiveState), beforeDoctor);
+    let recovered = await retention.recoverRepairRetention();
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].outcome, "archived");
+    const [archiveId] = readdirSync(
+      path.join(root, "repair-retention", "transactions"),
+    );
+    await assert.rejects(
+      retention.restoreRepairRetention(
+        { archiveId },
+        {
+          fault(phase) {
+            if (phase === "after-transaction-restore") {
+              throw new Error("simulated restore crash");
+            }
+          },
+        },
+      ),
+      /simulated restore crash/,
+    );
+    recovered = await retention.recoverRepairRetention();
+    assert.equal(recovered.length, 1);
+    assert.equal(recovered[0].outcome, "restored");
+    assert.ok(existsSync(path.join(
+      root,
+      "repairs",
+      "transactions",
+      "52345678-1234-4234-8234-123456789abc",
+    )));
+  } finally {
+    if (previousStateDir === undefined) delete process.env.CXMSG_STATE_DIR;
+    else process.env.CXMSG_STATE_DIR = previousStateDir;
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -170,6 +330,51 @@ test("Repair retention plan rejects a recent cutoff and inconsistent state", () 
     ]);
     assert.equal(recent.status, 1);
     assert.match(recent.stderr, /preserve at least 90 days/);
+
+    const planResult = runCxmsg(root, [
+      "repair",
+      "retention",
+      "plan",
+      "--before",
+      "2026-01-01T00:00:00.000Z",
+      "--json",
+    ]);
+    assert.equal(planResult.status, 0, planResult.stderr);
+    const plan = JSON.parse(planResult.stdout);
+    const transactionId = "42345678-1234-4234-8234-123456789abc";
+    const receiptPath = path.join(
+      root,
+      "repairs",
+      "receipts",
+      `${transactionId}.json`,
+    );
+    const manifestPath = path.join(
+      root,
+      "repairs",
+      "transactions",
+      transactionId,
+      "manifest.json",
+    );
+    const receipt = JSON.parse(readFileSync(receiptPath, "utf8"));
+    receipt.completedAt = "2025-01-04T00:00:00.000Z";
+    writeJson(receiptPath, receipt);
+    const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+    manifest.updatedAt = receipt.completedAt;
+    manifest.receiptSha256 = sha256(JSON.stringify(receipt));
+    writeJson(manifestPath, manifest);
+    const stale = runCxmsg(root, [
+      "repair",
+      "retention",
+      "archive",
+      "--before",
+      "2026-01-01T00:00:00.000Z",
+      "--confirm",
+      plan.planDigest,
+      "--json",
+    ]);
+    assert.equal(stale.status, 1);
+    assert.match(stale.stderr, /plan changed/);
+    assert.equal(existsSync(path.join(root, "repair-retention")), false);
 
     writeFileSync(
       path.join(root, "repairs", "receipts", "unexpected.tmp"),

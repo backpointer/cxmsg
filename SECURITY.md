@@ -83,8 +83,12 @@ Repair retention has a separate read-only plan with a fixed 90-day minimum
 age. It selects only Doctor-consistent completed transaction/receipt pairs;
 failed, incomplete, orphaned, malformed, linked, or non-owner state fails or is
 blocked. The plan contains bounded identifiers, digests, timestamps, kinds,
-and byte estimates only. It cannot archive, delete, restore, or weaken the
-Repair quota until a separately reviewed mutation transaction exists.
+and byte estimates only. Explicit archive requires its exact digest under the
+same Repair mutation lease and moves, rather than deletes, each pair into a
+separate owner-private bounded store. Interrupted archive or restore operations
+roll forward only through the explicit recovery command. Restore requires the
+exact archive ID, unchanged content digests, empty active identities, and
+sufficient active Repair quota. Doctor never invokes recovery automatically.
 
 The Retention Module remains read-only by default. Its plan uses explicit
 cutoffs, fixed minimum ages, bounded reason codes, and owner-private metadata;

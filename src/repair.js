@@ -162,6 +162,18 @@ function assertRepairCapacity(additionalBytes = 0, additionalTransactions = 0) {
   return usage;
 }
 
+export function assertRepairRestoreCapacity(
+  additionalBytes,
+  additionalTransactions,
+) {
+  return assertRepairCapacity(additionalBytes, additionalTransactions);
+}
+
+export function withRepairMutation(callback) {
+  ensurePrivateDirectory(REPAIR_STATE_DIR);
+  return withFileLock(REPAIR_LOCK_PATH, callback);
+}
+
 function findingById(checks, findingId) {
   const matches = checks.filter((check) => check.id === findingId);
   if (matches.length !== 1) {
@@ -376,8 +388,7 @@ export async function applyRepair({
     error.code = "EREPAIRSTALE";
     throw error;
   }
-  ensurePrivateDirectory(REPAIR_STATE_DIR);
-  return withFileLock(REPAIR_LOCK_PATH, async () => {
+  return withRepairMutation(async () => {
     const plan = buildRepairPlan({ findingId });
     if (plan.planDigest !== expectedPlanDigest) {
       const error = new Error("Repair plan changed; generate and confirm a new plan");

@@ -68,7 +68,12 @@ import {
   graphNodeDetail,
 } from "../src/graph-projection.js";
 import { applyRepair, buildRepairPlan } from "../src/repair.js";
-import { buildRepairRetentionPlan } from "../src/repair-retention.js";
+import {
+  archiveRepairRetention,
+  buildRepairRetentionPlan,
+  recoverRepairRetention,
+  restoreRepairRetention,
+} from "../src/repair-retention.js";
 import {
   cancelScheduledDelivery,
   findDeliveryByReplyHandle,
@@ -352,6 +357,9 @@ function usage(exitCode = 0) {
   cxmsg repair plan <finding-id> [--json]
   cxmsg repair apply <finding-id> --confirm <plan-digest> [--json]
   cxmsg repair retention plan --before <ISO timestamp> [--json]
+  cxmsg repair retention archive --before <ISO timestamp> --confirm <plan-digest> [--json]
+  cxmsg repair retention restore <archive-id> --confirm <archive-id> [--json]
+  cxmsg repair retention recover [--json]
   cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|inline]
                  [--approval never|relay|auto] [--approval-timeout <seconds>]
                  [--mirror none|summary|full] [--when-idle --expiry <timestamp>]
@@ -4223,23 +4231,71 @@ async function commandGraph(args) {
 async function commandRepair(args) {
   const operation = args.shift();
   if (operation === "retention") {
-    if (args.shift() !== "plan") usage(2);
+    const retentionOperation = args.shift();
+    if (!["plan", "archive", "restore", "recover"].includes(retentionOperation)) {
+      usage(2);
+    }
+    const archiveId = retentionOperation === "restore" ? args.shift() || null : null;
     let before = null;
     let jsonOutput = false;
+    let confirm = null;
     while (args.length) {
       const option = args.shift();
       if (option === "--before") before = args.shift() || null;
+      else if (option === "--confirm") confirm = args.shift() || null;
       else if (option === "--json") jsonOutput = true;
-      else throw new Error(`unknown repair retention plan option: ${option}`);
+      else throw new Error(`unknown repair retention ${retentionOperation} option: ${option}`);
+    }
+    if (retentionOperation === "recover") {
+      if (before || confirm || archiveId) {
+        throw new Error("repair retention recover accepts only --json");
+      }
+      const recovered = await recoverRepairRetention();
+      process.stdout.write(
+        jsonOutput
+          ? `${JSON.stringify({ recovered }, null, 2)}\n`
+          : `repair retention recovery complete\trecovered=${recovered.length}\n`,
+      );
+      return;
+    }
+    if (retentionOperation === "restore") {
+      if (!archiveId || confirm !== archiveId || before) {
+        throw new Error("repair retention restore requires the exact archive id confirmation");
+      }
+      const receipt = await restoreRepairRetention({ archiveId });
+      process.stdout.write(
+        jsonOutput
+          ? `${JSON.stringify(receipt, null, 2)}\n`
+          : `repair retention restored\tarchive=${receipt.archiveId}` +
+            `\trestore=${receipt.restoreId}\n`,
+      );
+      return;
     }
     if (!before) {
-      throw new Error("repair retention plan requires --before <ISO timestamp>");
+      throw new Error(`repair retention ${retentionOperation} requires --before <ISO timestamp>`);
     }
+    if (retentionOperation === "archive") {
+      if (!confirm) {
+        throw new Error("repair retention archive requires --confirm <plan-digest>");
+      }
+      const receipt = await archiveRepairRetention({
+        before,
+        expectedPlanDigest: confirm,
+      });
+      process.stdout.write(
+        jsonOutput
+          ? `${JSON.stringify(receipt, null, 2)}\n`
+          : `repair retention archived\tarchive=${receipt.archiveId}` +
+            `\titems=${receipt.itemCount}\tplan-digest=${receipt.planDigest}\n`,
+      );
+      return;
+    }
+    if (confirm) throw new Error("repair retention plan does not accept --confirm");
     const plan = buildRepairRetentionPlan({ before });
     process.stdout.write(
       jsonOutput
         ? `${JSON.stringify(plan, null, 2)}\n`
-        : `repair retention plan; automatic deletion=false, mutation=false` +
+        : `repair retention plan; automatic deletion=false, mutation=archive` +
           `, cutoff=${plan.cutoff}, eligible=${plan.category.eligible.length}` +
           `, blocked=${plan.category.blocked.length}` +
           `, estimated-bytes=${plan.category.estimatedBytes}` +

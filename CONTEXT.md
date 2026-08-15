@@ -215,6 +215,11 @@ they carry different authority and delivery semantics.
   Doctor-consistent completed Repair transaction/receipt pairs older than a
   fixed cutoff. It carries no mutation authority; failed and incomplete Repair
   attempts remain blocked evidence.
+- **Repair Archive Transaction**: an explicitly digest-confirmed, journaled
+  move of completed Repair pairs out of the active Repair quota and into a
+  bounded owner-private recoverable store. Recovery rolls interrupted moves
+  forward; exact-ID restore returns the same evidence only when identities are
+  empty and the active quota permits it.
 - **Repair**: an explicit, separately authorized mutation associated with one
   Doctor finding. Repair is not part of the default Doctor Interface.
 - **Reconciliation**: comparing durable records with current App Server,

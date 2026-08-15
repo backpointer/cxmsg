@@ -54,7 +54,7 @@ Every check contains:
   `directory-cluster-memberships`, `directory-cluster-tombstones`, or
   `schedules`, `direct-conversations`, `group-conversations`,
   `team-cast-plans`, `team-cast-selections`, `team-cast-deliveries`, or
-  `repairs`.
+  `repairs`, or `repair-retention`.
 - `status` is `pass`, `warn`, `fail`, `unknown`, or `skipped`.
 - `summary` is bounded operator text with no private body data.
 - `verification` is bounded evidence such as `metadata`, `registry`,
@@ -211,6 +211,15 @@ receipt is a warning. Missing, malformed, orphaned, or digest-mismatched backup
 and receipt evidence is a required `EREPAIRCONSISTENCY` or
 `EREPAIRRECEIPTORPHAN` failure. Reports contain phase and bounded error codes,
 not backup contents or local paths.
+
+Repair archive findings validate the separate transaction journal, exact item
+digests, owner-private archived trees, and terminal archive/restore receipts.
+An `archiving` or `restoring` journal is an optional
+`EREPAIRARCHIVEINCOMPLETE` warning and is never resumed by Doctor. Missing,
+malformed, orphaned, unexpected, or digest-mismatched archive evidence is a
+required `EREPAIRARCHIVECONSISTENCY`, `EREPAIRARCHIVERECEIPTORPHAN`, or
+`EREPAIRARCHIVESTATE` failure. Output contains no archived backup content or
+path.
 
 Consumers must ignore unknown fields. A future incompatible change increments
 `schemaVersion`.

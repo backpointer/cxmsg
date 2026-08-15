@@ -261,22 +261,31 @@ cxmsg repair apply delivery-ledger.index.consistency \
   --confirm <plan-digest> --json
 
 cxmsg repair retention plan --before <ISO-timestamp> --json
+cxmsg repair retention archive --before <same-ISO-timestamp> \
+  --confirm <plan-digest> --json
+cxmsg repair retention recover --json
+cxmsg repair retention restore <archive-id> \
+  --confirm <archive-id> --json
 ```
 
 Only `ECLUSTERMEMBERSHIPREDO` and `ELEDGERINDEXSTALE` are allowlisted. A stale
 digest, changed owner evidence, ambiguous Cluster prefix, unsafe backup,
 unverified result, or exhausted 256 MiB/1,024-transaction Repair retention
-bound fails closed. Repair never resends a message, follows a successor,
-changes identity or membership intent, signals or restarts a process, removes
-state, grants authority, changes permissions, or answers an approval. Doctor
+bound fails closed. Repair Apply never resends a message, follows a successor,
+changes identity or membership intent, signals or restarts a process, grants
+authority, changes permissions, or answers an approval. Doctor
 reports incomplete Repair journals but never resumes or rolls them back.
 
 Repair retention planning is a separate, read-only maintenance interface. It
 preserves at least 90 days, selects only consistent `completed` transaction and
 receipt pairs, reports failed or incomplete attempts as blocked, and emits no
-backup contents or storage paths. The current plan explicitly reports
-`mutationEnabled=false`; archive, restore, and crash recovery are required
-before a mutating Repair-retention command is exposed.
+backup contents or storage paths. Archive requires the exact plan digest under
+the same Repair mutation lease, then atomically moves each selected pair into a
+separate owner-private 1 GiB/1,024-archive bounded store. It does not erase the
+backup. Interrupted pair moves remain journaled and `recover` rolls them
+forward; Doctor reports them without mutation. Restore requires the exact
+archive ID, rechecks the active Repair quota and every content digest, and can
+run only once. Archive and restore never start a model turn or create authority.
 
 Cancellation is terminal and refuses an active, unexpired claim. Scheduler
 status includes a heartbeat and reports a live identity with a stale heartbeat

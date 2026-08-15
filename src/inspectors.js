@@ -2607,6 +2607,276 @@ export function inspectRepairState({ stateDir } = {}) {
   return checks;
 }
 
+export function inspectRepairRetentionState({ stateDir } = {}) {
+  const scope = "repair-retention";
+  const root = path.join(stateDir, "repair-retention");
+  const transactionsDirectory = path.join(root, "transactions");
+  const receiptsDirectory = path.join(root, "receipts");
+  const checks = [];
+  const rootEvidence = secureMetadata(root, "directory");
+  if (rootEvidence.status === "missing") {
+    return [
+      metadataFinding(
+        "repair-retention.directory",
+        scope,
+        "Repair archive directory",
+        rootEvidence,
+        { required: false },
+      ),
+    ];
+  }
+  checks.push(metadataFinding(
+    "repair-retention.directory",
+    scope,
+    "Repair archive directory",
+    rootEvidence,
+  ));
+  if (rootEvidence.status !== "secure") return checks;
+  if (readdirSync(root).some((name) => !["transactions", "receipts"].includes(name))) {
+    checks.push(diagnosticCheck({
+      id: "repair-retention.entries",
+      scope,
+      status: "fail",
+      summary: "Repair archive contains unexpected top-level entries",
+      verification: "records",
+      errorCode: "EREPAIRARCHIVESTATE",
+    }));
+  }
+  const transactionsEvidence = secureMetadata(transactionsDirectory, "directory");
+  const receiptsEvidence = secureMetadata(receiptsDirectory, "directory");
+  checks.push(
+    metadataFinding(
+      "repair-retention.transactions.directory",
+      scope,
+      "Repair archive transaction directory",
+      transactionsEvidence,
+    ),
+    metadataFinding(
+      "repair-retention.receipts.directory",
+      scope,
+      "Repair archive receipt directory",
+      receiptsEvidence,
+    ),
+  );
+  if (
+    transactionsEvidence.status !== "secure" ||
+    receiptsEvidence.status !== "secure"
+  ) return checks;
+
+  const receiptNames = readdirSync(receiptsDirectory).sort();
+  const validReceiptName = (name) =>
+    /^[0-9a-f-]{36}\.json$/i.test(name) ||
+    /^[0-9a-f-]{36}\.restore-[0-9a-f-]{36}\.json$/i.test(name);
+  if (receiptNames.some((name) => !validReceiptName(name))) {
+    checks.push(diagnosticCheck({
+      id: "repair-retention.receipts.entries",
+      scope,
+      status: "fail",
+      summary: "Repair archive receipt storage contains unexpected entries",
+      verification: "records",
+      errorCode: "EREPAIRARCHIVESTATE",
+    }));
+  }
+  const receiptByName = new Map();
+  for (const name of receiptNames.filter(validReceiptName)) {
+    const filename = path.join(receiptsDirectory, name);
+    const evidence = secureMetadata(filename, "file");
+    if (evidence.status !== "secure" || evidence.metadata.size > MAX_RECORD_BYTES) {
+      checks.push(metadataFinding(
+        `repair-retention.receipt.${safeLabel(name)}.metadata`,
+        scope,
+        "Repair archive receipt",
+        evidence.status === "secure" ? { status: "wrong-type" } : evidence,
+      ));
+      continue;
+    }
+    try {
+      receiptByName.set(name, JSON.parse(readFileSync(filename, "utf8")));
+    } catch {
+      checks.push(diagnosticCheck({
+        id: `repair-retention.receipt.${safeLabel(name)}.json`,
+        scope,
+        status: "fail",
+        summary: "Repair archive receipt is malformed",
+        verification: "parse",
+        errorCode: "EREPAIRARCHIVERECEIPT",
+      }));
+    }
+  }
+
+  const treeDigest = (directory, prefix = "", depth = 0) => {
+    if (depth > 6 || secureMetadata(directory, "directory").status !== "secure") {
+      return null;
+    }
+    const files = [];
+    for (const name of readdirSync(directory).sort()) {
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(name)) return null;
+      const filename = path.join(directory, name);
+      const relative = prefix ? `${prefix}/${name}` : name;
+      const metadata = lstatSync(filename);
+      if (metadata.isDirectory()) {
+        const nested = treeDigest(filename, relative, depth + 1);
+        if (!nested) return null;
+        files.push(...nested.files);
+      } else {
+        const evidence = secureMetadata(filename, "file");
+        if (evidence.status !== "secure") return null;
+        const contents = readFileSync(filename);
+        files.push({
+          name: relative,
+          bytes: metadata.size,
+          sha256: createHash("sha256").update(contents).digest("hex"),
+        });
+      }
+    }
+    return {
+      files,
+      sha256: createHash("sha256").update(JSON.stringify(files)).digest("hex"),
+    };
+  };
+
+  const archiveIds = readdirSync(transactionsDirectory).sort();
+  const knownReceiptNames = new Set();
+  for (const archiveId of archiveIds) {
+    const archiveDirectory = path.join(transactionsDirectory, archiveId);
+    let consistent = /^[0-9a-f-]{36}$/i.test(archiveId) &&
+      secureMetadata(archiveDirectory, "directory").status === "secure";
+    let manifest = null;
+    if (consistent) {
+      const manifestPath = path.join(archiveDirectory, "manifest.json");
+      const evidence = secureMetadata(manifestPath, "file");
+      consistent = evidence.status === "secure" &&
+        evidence.metadata.size <= MAX_RECORD_BYTES;
+      if (consistent) {
+        try {
+          manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+        } catch {
+          consistent = false;
+        }
+      }
+    }
+    const items = manifest?.items;
+    consistent = Boolean(
+      consistent &&
+        manifest?.schemaVersion === 1 &&
+        manifest.archiveId === archiveId &&
+        ["archiving", "committed", "restoring", "restored"].includes(manifest.status) &&
+        /^[0-9a-f]{64}$/.test(manifest.planDigest || "") &&
+        Number.isFinite(Date.parse(manifest.createdAt || "")) &&
+        Array.isArray(items) &&
+        items.length > 0 &&
+        new Set(items.map((item) => item.transactionId)).size === items.length
+    );
+    const itemsDirectory = path.join(archiveDirectory, "items");
+    if (
+      consistent &&
+      readdirSync(archiveDirectory).some(
+        (name) => !["manifest.json", "items"].includes(name),
+      )
+    ) {
+      consistent = false;
+    }
+    if (consistent && secureMetadata(itemsDirectory, "directory").status !== "secure") {
+      consistent = false;
+    }
+    for (const item of consistent ? items : []) {
+      if (
+        !/^[0-9a-f-]{36}$/i.test(item?.transactionId || "") ||
+        !/^[0-9a-f]{64}$/.test(item.transactionSha256 || "") ||
+        !/^[0-9a-f]{64}$/.test(item.receiptSha256 || "")
+      ) {
+        consistent = false;
+        break;
+      }
+      const itemDirectory = path.join(itemsDirectory, item.transactionId);
+      if (secureMetadata(itemDirectory, "directory").status !== "secure") {
+        consistent = false;
+        break;
+      }
+      if (manifest.status === "committed") {
+        const transaction = treeDigest(path.join(itemDirectory, "transaction"));
+        const receiptPath = path.join(itemDirectory, "receipt.json");
+        if (
+          item.state !== "archived" ||
+          readdirSync(itemDirectory).some(
+            (name) => !["transaction", "receipt.json"].includes(name),
+          ) ||
+          transaction?.sha256 !== item.transactionSha256 ||
+          secureMetadata(receiptPath, "file").status !== "secure" ||
+          createHash("sha256").update(readFileSync(receiptPath)).digest("hex") !==
+            item.receiptSha256
+        ) {
+          consistent = false;
+          break;
+        }
+      } else if (manifest.status === "restored") {
+        if (item.state !== "restored" || readdirSync(itemDirectory).length !== 0) {
+          consistent = false;
+          break;
+        }
+      }
+    }
+    const terminal = ["committed", "restored"].includes(manifest?.status);
+    if (consistent && terminal) {
+      const archiveReceiptName = `${archiveId}.json`;
+      const archiveReceipt = receiptByName.get(archiveReceiptName);
+      knownReceiptNames.add(archiveReceiptName);
+      consistent = Boolean(
+        archiveReceipt?.schemaVersion === 1 &&
+          archiveReceipt.outcome === "archived" &&
+          archiveReceipt.archiveId === archiveId &&
+          manifest.receiptSha256 ===
+            createHash("sha256").update(JSON.stringify(archiveReceipt)).digest("hex")
+      );
+      if (consistent && manifest.status === "restored") {
+        const restoreName = `${archiveId}.restore-${manifest.restore?.restoreId}.json`;
+        const restoreReceipt = receiptByName.get(restoreName);
+        knownReceiptNames.add(restoreName);
+        consistent = Boolean(
+          restoreReceipt?.schemaVersion === 1 &&
+            restoreReceipt.outcome === "restored" &&
+            restoreReceipt.archiveId === archiveId &&
+            restoreReceipt.restoreId === manifest.restore?.restoreId &&
+            manifest.restore?.receiptSha256 ===
+              createHash("sha256").update(JSON.stringify(restoreReceipt)).digest("hex")
+        );
+      }
+    }
+    const incomplete = consistent && !terminal;
+    checks.push(diagnosticCheck({
+      id: `repair-retention.transaction.${safeLabel(archiveId)}.consistency`,
+      scope,
+      status: consistent ? (incomplete ? "warn" : "pass") : "fail",
+      summary: !consistent
+        ? "Repair archive transaction, item, or receipt evidence is inconsistent"
+        : incomplete
+          ? "Repair archive transaction requires explicit recovery"
+          : manifest.status === "restored"
+            ? "Repair archive was restored with consistent terminal evidence"
+            : "Repair archive retains consistent recoverable evidence",
+      verification: "records",
+      errorCode: !consistent
+        ? "EREPAIRARCHIVECONSISTENCY"
+        : incomplete
+          ? "EREPAIRARCHIVEINCOMPLETE"
+          : null,
+      required: !incomplete,
+    }));
+  }
+  for (const name of receiptByName.keys()) {
+    if (knownReceiptNames.has(name)) continue;
+    checks.push(diagnosticCheck({
+      id: `repair-retention.receipt.${safeLabel(name)}.orphan`,
+      scope,
+      status: "fail",
+      summary: "Repair archive receipt has no matching terminal transaction",
+      verification: "records",
+      errorCode: "EREPAIRARCHIVERECEIPTORPHAN",
+    }));
+  }
+  return checks;
+}
+
 export function inspectRouteState({
   stateDir,
   sessions = [],
