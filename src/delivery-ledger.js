@@ -472,9 +472,21 @@ function validAttempt(record) {
       (record.claimId === undefined ||
         record.claimId === null ||
         UUID_PATTERN.test(record.claimId || "")) &&
-      record.transport === "codex-app-server" &&
+      ["codex-app-server", "claude-uds"].includes(record.transport) &&
       validTimestamp(record.startedAt),
   );
+}
+
+function expectedTeamDeliveryTransport(delivery) {
+  const targetIdentity = NODE_KEY_PATTERN.exec(delivery?.targetNodeKey || "");
+  if (!targetIdentity) return null;
+  if (targetIdentity[1].toLowerCase() === "codex") {
+    return "codex-app-server";
+  }
+  if (targetIdentity[1].toLowerCase() === "claude") {
+    return "claude-uds";
+  }
+  return null;
 }
 
 function validClaim(record) {
@@ -582,7 +594,9 @@ function validTeamEvidence(record) {
     !UUID_PATTERN.test(record.messageId || "") ||
     !UUID_PATTERN.test(record.deliveryId || "") ||
     !UUID_PATTERN.test(record.attemptId || "") ||
-    !["turn_started", "failed", "unknown"].includes(record.state) ||
+    !["turn_started", "transport_delivered", "failed", "unknown"].includes(
+      record.state,
+    ) ||
     !validTimestamp(record.observedAt) ||
     (record.turnId !== null && !UUID_PATTERN.test(record.turnId || "")) ||
     (record.transportResult !== null &&
@@ -597,6 +611,13 @@ function validTeamEvidence(record) {
     return Boolean(
       record.turnId &&
         record.transportResult &&
+        record.errorCode === null,
+    );
+  }
+  if (record.state === "transport_delivered") {
+    return Boolean(
+      record.turnId === null &&
+        /^claude-job:[0-9a-f-]{36}$/i.test(record.transportResult || "") &&
         record.errorCode === null,
     );
   }
@@ -820,15 +841,21 @@ function validIndexProjection(projection, messageId) {
       validBatch(baseBatch) &&
         projection.teamDeliveries.every(
           (candidate) =>
-            ["prepared", "turn_started", "failed", "unknown"].includes(
-              candidate.state,
-            ) &&
+            [
+              "prepared",
+              "turn_started",
+              "transport_delivered",
+              "failed",
+              "unknown",
+            ].includes(candidate.state) &&
             candidate.wakePolicy === "mention-wake" &&
             Array.isArray(candidate.attempts) &&
             candidate.attempts.length <= 1 &&
             candidate.attempts.every(
               (attempt) =>
                 validAttempt(attempt) &&
+                attempt.transport ===
+                  expectedTeamDeliveryTransport(candidate) &&
                 attempt.messageId === messageId &&
                 attempt.deliveryId === candidate.deliveryId &&
                 attempt.retryOfAttemptId === undefined &&
@@ -1268,6 +1295,7 @@ function applyDeliveryEvent(projected, record) {
     if (record.recordType === "delivery-attempt") {
       if (
         !validAttempt(record) ||
+        record.transport !== expectedTeamDeliveryTransport(delivery) ||
         delivery.state !== "prepared" ||
         delivery.attempts.length !== 0 ||
         delivery.evidence.length !== 0 ||
@@ -1281,11 +1309,16 @@ function applyDeliveryEvent(projected, record) {
       delivery.attempts.push(structuredClone(record));
       delivery.updatedAt = record.startedAt;
     } else if (record.recordType === "team-delivery-evidence") {
+      const attempt = delivery.attempts[0];
       if (
         !validTeamEvidence(record) ||
         delivery.state !== "prepared" ||
         delivery.attempts.length !== 1 ||
-        delivery.attempts[0].attemptId !== record.attemptId ||
+        attempt.attemptId !== record.attemptId ||
+        (record.state === "turn_started" &&
+          attempt.transport !== "codex-app-server") ||
+        (record.state === "transport_delivered" &&
+          attempt.transport !== "claude-uds") ||
         delivery.evidence.length !== 0 ||
         Date.parse(record.observedAt) <
           Date.parse(delivery.attempts[0].startedAt)
@@ -1418,6 +1451,7 @@ function applyDeliveryEvent(projected, record) {
       record.retryOfAttemptId === projected.delivery.attempts[0].attemptId &&
       (record.claimId === undefined || record.claimId === null);
     if (
+      record.transport !== "codex-app-server" ||
       (!immediate && !scheduled && !retry) ||
       projected.delivery.attempts.length >= MAX_ORDINARY_DELIVERY_ATTEMPTS
     ) {
@@ -2100,6 +2134,7 @@ export async function beginTeamCastRecipientDelivery(
   targetNodeKey,
   {
     now = new Date().toISOString(),
+    transport = "codex-app-server",
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
     segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
   } = {},
@@ -2111,6 +2146,9 @@ export async function beginTeamCastRecipientDelivery(
   targetNodeKey = targetNodeKey.toLowerCase();
   if (!validTimestamp(now)) {
     throw new Error("Team Cast attempt timestamp is invalid");
+  }
+  if (!["codex-app-server", "claude-uds"].includes(transport)) {
+    throw new Error("Team Cast attempt transport is invalid");
   }
   validateStorageOptions(quotaBytes, segmentBytes);
   return withDeliveryLedgerMutation(async () => {
@@ -2129,6 +2167,9 @@ export async function beginTeamCastRecipientDelivery(
     if (delivery.attempts.length !== 0 || delivery.evidence.length !== 0) {
       throw new Error("Team Cast recipient Delivery state is inconsistent");
     }
+    if (transport !== expectedTeamDeliveryTransport(delivery)) {
+      throw new Error("Team Cast attempt transport does not match recipient runtime");
+    }
     if (Date.parse(record.logicalMessage.teamCast.expiresAt) <= Date.parse(now)) {
       throw new Error("Team Cast recipient Delivery expired before dispatch");
     }
@@ -2139,7 +2180,7 @@ export async function beginTeamCastRecipientDelivery(
       deliveryId: delivery.deliveryId,
       attemptId: randomUUID(),
       claimId: null,
-      transport: "codex-app-server",
+      transport,
       startedAt: now,
     };
     if (!validAttempt(event)) throw new Error("invalid Team Cast Delivery attempt");

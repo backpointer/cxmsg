@@ -203,7 +203,9 @@ model wake-ups and exact per-recipient evidence.
       Ledger batch before any per-recipient transport attempt.
 - [x] Dispatch prepared Codex recipients once with all-recipient preflight and
       independent `turn_started`, `failed`, or `unknown` evidence.
-- [ ] Add `mention-wake` with bounded mention syntax.
+- [x] Add cross-runtime `mention-wake` with 1–16 exact stable-Node mentions,
+      Codex `turn_started`, and Claude `transport_delivered` evidence linked to
+      a separate Claude Delivery Job.
 - [ ] Add explicit `wake-all` with per-recipient fallback and token-cost
       visibility.
 - [ ] Add `when-idle`, `after-turn`, and `after-job` per-recipient policies

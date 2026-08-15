@@ -551,12 +551,15 @@ Default output exposes only the recipient count and set digest. Use
 `--recipients` for an explicit owner-local identity listing. Plans expire after
 15 minutes and cannot be rebound to a changed selector. Explicit mentions use
 stable Node keys only and produce another zero-delivery fixed subset; they do
-not parse names from prose. Mention dispatch, wake-all, and scheduled fan-out
-Preparation stores the body and one exact per-recipient Ledger batch. Explicit
-dispatch currently supports Codex recipients only, performs an all-recipient
-idle/session preflight, and then records independent per-recipient outcomes. It
-never steers a Busy turn or redrives an existing attempt. Claude dispatch,
-wake-all, and scheduled fallback are not enabled by this release. See
+not parse names from prose. Preparation stores the body and one exact
+per-recipient Ledger batch. Explicit dispatch supports Codex and Claude
+recipients, performs an all-recipient
+identity/transport preflight, and then records independent per-recipient
+outcomes. It never steers a Busy Codex turn or redrives an existing attempt.
+Codex acceptance records `turn_started`; Claude frame acceptance records
+`transport_delivered` plus a correlated Claude Delivery Job ID. That job, not
+the Team Cast state, tracks ACK, overload retry, and later completion. Wake-all
+and scheduled fallback are not enabled by this release. See
 [Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md).
 
 When a Directory Project exists, `cxmsg route bind` also pins the binding to

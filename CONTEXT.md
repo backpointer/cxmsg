@@ -77,8 +77,10 @@ they carry different authority and delivery semantics.
   every sibling recipient in one Ledger batch after body persistence but before
   transport. Prepared state has no attempt, claim, receipt, or authority.
 - **Team Cast Recipient Evidence**: one recipient's durable post-attempt state,
-  independently `turn_started`, `failed`, or `unknown`. It is transport
-  evidence, not proof of model processing, reply, or task completion.
+  independently `turn_started`, `transport_delivered`, `failed`, or `unknown`.
+  `turn_started` is Codex App Server acceptance; `transport_delivered` is
+  Claude frame acceptance with a correlated Delivery Job. Neither is proof of
+  model processing, reply, or task completion.
 
 ## Identity and topology
 

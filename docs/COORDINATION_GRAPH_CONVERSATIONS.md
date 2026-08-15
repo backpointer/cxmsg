@@ -784,6 +784,16 @@ never redrives an existing attempt, and records each recipient independently as
 `turn_started`, `failed`, or `unknown`. Partial outcomes remain visible. Claude
 transport, scheduled busy fallback, and wake-all remain separate gates.
 
+Version 0.37.0 extends explicit mention dispatch to exact Claude session Nodes.
+Each Claude recipient uses `claude-uds`, while each Codex recipient remains on
+`codex-app-server`; replay and index validation reject any runtime/transport
+mismatch. Claude frame acceptance records `transport_delivered` and a distinct
+Claude Delivery Job correlation rather than claiming a model turn completed.
+That Job retains ACK and overload-retry truth. Multiple aliases for one Codex
+thread are not identity ambiguity, but the sender must still resolve to exactly
+one usable Claude bridge. Scheduled busy fallback and wake-all remain separate
+gates.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

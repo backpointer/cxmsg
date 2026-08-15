@@ -907,7 +907,12 @@ export async function dispatchPreparedTeamCastMessage(
     const begun = await beginTeamCastRecipientDelivery(
       logicalMessageId,
       delivery.targetNodeKey,
-      { now },
+      {
+        now,
+        transport:
+          contexts.get(delivery.targetNodeKey)?.transport ||
+          "codex-app-server",
+      },
     );
     if (!begun.created) {
       outcomes.push({
@@ -921,6 +926,7 @@ export async function dispatchPreparedTeamCastMessage(
     try {
       evidence = await dispatchRecipient({
         context: contexts.get(delivery.targetNodeKey),
+        attemptId: begun.attempt.attemptId,
         targetNodeKey: delivery.targetNodeKey,
         targetThreadId: delivery.targetThreadId,
         logicalMessageId,

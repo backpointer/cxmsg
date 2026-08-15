@@ -343,13 +343,21 @@ cannot accidentally become wake-all. Retention treats every prepared recipient
 as nonterminal and protects both Ledger and body evidence. Preparation still
 conveys no grant, approval, Delegation, permission, read, or completion claim.
 
-Codex Team Cast dispatch requires an explicit command and uses exact stable
+Team Cast dispatch requires an explicit command and uses exact stable
 Node/session identity. Every pending recipient must pass preflight before the
-first attempt; Busy preflight never steers another turn. Each dispatched turn
-uses approval policy `never` and an untrusted peer envelope. A durable attempt
-prevents retry after a caller crash, while per-recipient evidence prevents one
-success from hiding a sibling failure or unknown outcome. Claude recipients are
-rejected before attempts until their transport receives an equivalent gate.
+first attempt; Busy Codex preflight never steers another turn. Each Codex turn
+uses approval policy `never` and an untrusted peer envelope. Claude targets are
+resolved by exact native session ID, and the sender must map to exactly one
+usable bridge even when the Codex thread has multiple display aliases. Direct
+UDS denial may use the existing authenticated host relay; it never changes
+Route Admission or authority.
+
+A durable attempt prevents retry after a caller crash, while per-recipient
+evidence prevents one success from hiding a sibling failure or unknown outcome.
+The Ledger rejects a transport that does not match the recipient runtime.
+Claude `transport_delivered` records only native frame acceptance and a
+correlated Delivery Job ID; ACK, overload retry, model completion, reply, and
+task completion remain separate evidence.
 
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after

@@ -103,30 +103,36 @@ This crash-safe preparation seam reserves Ledger quota for later per-recipient
 evidence but still reports `deliveryStarted: false`. It is not transport
 delivery, model receipt, or task completion.
 
-Dispatch prepared Codex recipients explicitly:
+Dispatch prepared Codex or Claude recipients explicitly:
 
 ```bash
 cxmsg team dispatch <logical-message-id> --json
 ```
 
-Dispatch v1 is Codex-only. Before the first attempt it verifies that every
-pending recipient is still a live Node, maps to exactly one current cxmsg
-session, can accept direct input, is idle, and belongs to the frozen Project.
-A Claude recipient, missing or ambiguous session, or recipient already Busy at
-preflight rejects the whole invocation with zero new attempts. This avoids
-silently steering an unrelated Busy turn.
+Before the first attempt it verifies that every pending recipient is still the
+exact frozen Node and has a usable runtime transport. A Codex recipient must
+map to the exact thread, accept direct input, and be idle. Multiple registry
+aliases are permitted only when they all name that same stable thread. A Claude
+recipient is resolved by exact native session ID, while the sender's Codex
+thread must resolve to exactly one running or transport-unreachable bridge.
+Missing, ambiguous, or Busy Codex preflight rejects the whole invocation with
+zero new attempts. This avoids silently steering an unrelated Busy turn.
 
 After preflight, recipients dispatch sequentially. Each recipient gets one
-durable attempt and exactly one terminal evidence record: `turn_started`,
-`failed`, or `unknown`. A busy race is a known per-recipient failure; an
-unexpected transport exception is `unknown`. Existing or unresolved attempts
-are never redriven, and successful or failed siblings do not overwrite each
-other. Every actual Codex turn starts with approval policy `never` and receives
-ordinary untrusted Peer Message context, never authority.
+durable attempt and exactly one outcome record. Codex acceptance is
+`turn_started`; Claude frame acceptance is `transport_delivered` with an opaque
+`claude-job:<uuid>` correlation. The Claude Delivery Job separately tracks ACK,
+529/overload retry, and terminal completion, so transport acceptance is never
+reported as model or task completion. A busy Codex race is a known
+per-recipient failure; an unexpected transport exception is `unknown`.
+Existing or unresolved attempts are never redriven, and successful or failed
+siblings do not overwrite each other. Every actual Codex turn starts with
+approval policy `never`; every runtime receives ordinary untrusted Peer Message
+context, never authority. The Ledger rejects runtime/transport mismatches.
 
 The JSON result includes `deliveryStarted: false` when resolving. Membership,
 role, and plan possession are coordination metadata only; none authorizes work,
 grants a permission, approves a prompt, or expands a peer's authority.
 
-Claude mention dispatch, explicit wake-all, scheduled fallback policies, and
-digest composition remain separately gated future work.
+Explicit wake-all, scheduled fallback policies, and digest composition remain
+separately gated future work.

@@ -3455,25 +3455,80 @@ async function commandTeam(args) {
     if (!logicalMessageId || args.some((value) => value !== "--json")) {
       usage(2);
     }
-    await ensureServer();
-    const result = await withAppServer(async (client) =>
+    const teamRecord = await readDeliveryLedgerIndexed(logicalMessageId);
+    if (!teamRecord?.teamDeliveries) {
+      throw new Error(`unknown prepared Team Cast message: ${logicalMessageId}`);
+    }
+    const pending = teamRecord.teamDeliveries.filter(
+      (delivery) =>
+        delivery.state === "prepared" && delivery.attempts.length === 0,
+    );
+    const needsCodex = pending.some((delivery) =>
+      delivery.targetNodeKey.startsWith("codex:"),
+    );
+    const needsClaude = pending.some((delivery) =>
+      delivery.targetNodeKey.startsWith("claude:"),
+    );
+    let sourceSession = null;
+    let claudePeers = [];
+    if (needsClaude) {
+      const senderThreadId = teamRecord.logicalMessage.senderNodeKey?.startsWith(
+        "codex:",
+      )
+        ? teamRecord.logicalMessage.senderNodeKey.slice("codex:".length)
+        : null;
+      const sourceMatches = listSessionRecords().filter(
+        (record) => record.threadId === senderThreadId,
+      );
+      const bridgeCandidates = await Promise.all(
+        sourceMatches.map(async (record) => ({
+          record,
+          state: await claudeBridgeState(record.name),
+        })),
+      );
+      const usableBridges = bridgeCandidates.filter(
+        ({ state }) => state.running || state.status === "unreachable",
+      );
+      if (usableBridges.length !== 1) {
+        throw new Error(
+          `Team Cast Claude sender bridge is ${usableBridges.length ? "ambiguous" : "missing"}`,
+        );
+      }
+      sourceSession = usableBridges[0].record;
+      claudePeers = await listClaudePeers();
+    }
+    if (needsCodex) await ensureServer();
+    const run = async (client) =>
       dispatchPreparedTeamCastMessage(
         { logicalMessageId },
         {
           preflightRecipient: async ({ targetNodeKey, targetThreadId }) => {
-            if (!targetNodeKey.startsWith("codex:") || !targetThreadId) {
+            if (targetNodeKey.startsWith("claude:")) {
+              const sessionId = targetNodeKey.slice("claude:".length);
+              const peer = resolveClaudePeer(claudePeers, sessionId);
+              if (peer.sessionId !== sessionId) {
+                throw new Error("Team Cast Claude recipient identity changed");
+              }
+              return {
+                transport: "claude-uds",
+                sourceSession,
+                peer,
+              };
+            }
+            if (!targetNodeKey.startsWith("codex:") || !targetThreadId || !client) {
               throw new Error(
-                "Team Cast dispatch currently requires Codex recipients",
+                "Team Cast recipient runtime is unsupported",
               );
             }
             const matches = listSessionRecords().filter(
               (record) => record.threadId === targetThreadId,
             );
-            if (matches.length !== 1) {
+            if (matches.length === 0) {
               throw new Error(
-                `Team Cast recipient session is ${matches.length ? "ambiguous" : "missing"}: ${targetNodeKey}`,
+                `Team Cast recipient session is missing: ${targetNodeKey}`,
               );
             }
+            matches.sort((left, right) => left.name.localeCompare(right.name));
             const thread = await readThreadMetadata(client, targetThreadId);
             if (activeTurnId(thread)) {
               throw new Error(`Team Cast recipient is busy: ${targetNodeKey}`);
@@ -3483,15 +3538,43 @@ async function commandTeam(args) {
                 `Team Cast recipient cannot accept input: ${targetNodeKey}`,
               );
             }
-            return { session: matches[0], thread };
+            return {
+              transport: "codex-app-server",
+              session: matches[0],
+              allowResume: matches.every(sessionAllowsAppServerResume),
+              thread,
+            };
           },
           dispatchRecipient: async ({
             context,
+            attemptId,
             logicalMessageId: messageId,
             senderNodeKey,
             message,
             route,
           }) => {
+            if (context.transport === "claude-uds") {
+              const delivery = await sendClaudeFromCodex({
+                from: context.sourceSession.name,
+                target: context.peer.sessionId,
+                message,
+                logicalMessageId: attemptId,
+              });
+              if (delivery.status !== "transport_delivered") {
+                return {
+                  state: "unknown",
+                  turnId: null,
+                  transportResult: `claude-job:${delivery.jobId}`,
+                  errorCode: "ECLAUDEDELIVERY",
+                };
+              }
+              return {
+                state: "transport_delivered",
+                turnId: null,
+                transportResult: `claude-job:${delivery.jobId}`,
+                errorCode: null,
+              };
+            }
             try {
               const delivery = await deliverPeerMessageWhenIdle(
                 client,
@@ -3504,7 +3587,7 @@ async function commandTeam(args) {
                   route,
                 },
                 {
-                  allowResume: sessionAllowsAppServerResume(context.session),
+                  allowResume: context.allowResume,
                 },
               );
               return {
@@ -3526,8 +3609,10 @@ async function commandTeam(args) {
             }
           },
         },
-      ),
-    );
+      );
+    const result = needsCodex
+      ? await withAppServer((client) => run(client))
+      : await run(null);
     const statuses = new Set(result.outcomes.map((outcome) => outcome.status));
     const output = {
       logicalMessageId: result.logicalMessageId,

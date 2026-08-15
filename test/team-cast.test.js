@@ -27,6 +27,7 @@ const ids = {
   first: "40345678-5234-4234-8234-123456789abc",
   second: "50345678-5234-4234-8234-123456789abc",
   cross: "60345678-5234-4234-8234-123456789abc",
+  claude: "a0345678-5234-4234-8234-123456789abc",
   group: "70345678-5234-4234-8234-123456789abc",
   cluster: "80345678-5234-4234-8234-123456789abc",
   crossCluster: "90345678-5234-4234-8234-123456789abc",
@@ -47,6 +48,10 @@ const ids = {
   fanoutMessage: "91345678-6234-4234-8234-123456789abc",
   fanoutTurn: "a1345678-6234-4234-8234-123456789abc",
   preflightMessage: "b1345678-6234-4234-8234-123456789abc",
+  claudePlan: "c1345678-6234-4234-8234-123456789abc",
+  claudeSelection: "d1345678-6234-4234-8234-123456789abc",
+  claudeMessage: "e1345678-6234-4234-8234-123456789abc",
+  claudeTransportMismatch: "f1345678-6234-4234-8234-123456789abc",
 };
 const keys = Object.fromEntries(
   ["sender", "first", "second", "cross"].map((name) => [
@@ -54,6 +59,7 @@ const keys = Object.fromEntries(
     `codex:${ids[name]}`,
   ]),
 );
+keys.claude = `claude:${ids.claude}`;
 
 await directory.ensureProject({
   routingId: "team-first",
@@ -73,7 +79,17 @@ for (const name of ["sender", "first", "second", "cross"]) {
     projectId: name === "cross" ? ids.secondProject : ids.firstProject,
   });
 }
+await directory.upsertNode({
+  runtimeKind: "claude",
+  nativeId: ids.claude,
+  displayName: "claude-reviewer",
+  projectId: ids.firstProject,
+});
 const direct = await conversations.ensureDirectConversation(keys.sender, keys.first);
+const claudeDirect = await conversations.ensureDirectConversation(
+  keys.sender,
+  keys.claude,
+);
 await groups.ensureGroupConversation({
   conversationId: ids.group,
   label: "team-reviewers",
@@ -519,6 +535,77 @@ test("a failed recipient preflight starts zero Team Cast attempts", async () => 
         delivery.state === "prepared" && delivery.attempts.length === 0,
     ),
   );
+});
+
+test("Claude recipient evidence distinguishes transport from model completion", async () => {
+  const plan = await teams.resolveTeamCastPlan({
+    senderNodeKey: keys.sender,
+    selector: {
+      kind: "conversation",
+      id: claudeDirect.conversation.conversationId,
+    },
+    planId: ids.claudePlan,
+  });
+  const selection = await teams.resolveTeamCastMentionSelection({
+    planId: plan.plan.planId,
+    senderNodeKey: keys.sender,
+    mentionedNodeKeys: [keys.claude],
+    selectionId: ids.claudeSelection,
+  });
+  await teams.prepareTeamCastMentionMessage({
+    selectionId: selection.selection.selectionId,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.claudeMessage,
+    message: "bounded Claude review pointer",
+  });
+  let jobId = null;
+  const result = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.claudeMessage },
+    {
+      preflightRecipient: async () => ({ transport: "claude-uds" }),
+      dispatchRecipient: async ({ attemptId, targetNodeKey }) => {
+        assert.equal(targetNodeKey, keys.claude);
+        jobId = attemptId;
+        return {
+          state: "transport_delivered",
+          turnId: null,
+          transportResult: `claude-job:${attemptId}`,
+          errorCode: null,
+        };
+      },
+    },
+  );
+  const delivery = result.record.teamDeliveries[0];
+  assert.equal(delivery.state, "transport_delivered");
+  assert.equal(delivery.attempts[0].transport, "claude-uds");
+  assert.equal(delivery.transportResult, `claude-job:${jobId}`);
+  assert.equal(delivery.turnId, null);
+});
+
+test("Team Cast transport must match the recipient runtime", async () => {
+  await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.claudeSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.claudeTransportMismatch,
+    message: "reject a mismatched runtime transport",
+  });
+  await assert.rejects(
+    teams.dispatchPreparedTeamCastMessage(
+      { logicalMessageId: ids.claudeTransportMismatch },
+      {
+        preflightRecipient: async () => ({
+          transport: "codex-app-server",
+        }),
+        dispatchRecipient: async () => assert.fail("dispatch must not start"),
+      },
+    ),
+    /transport does not match recipient runtime/,
+  );
+  const record = await ledger.readDeliveryLedgerIndexed(
+    ids.claudeTransportMismatch,
+  );
+  assert.equal(record.teamDeliveries[0].state, "prepared");
+  assert.equal(record.teamDeliveries[0].attempts.length, 0);
 });
 
 test("Project-role selector requires exact stable bindings", async () => {
