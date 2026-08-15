@@ -318,7 +318,7 @@ function usage(exitCode = 0) {
   cxmsg team selection <selection-id> [--recipients] [--json]
   cxmsg team prepare --selection <selection-id> --from <node-key>
              [--logical-message-id <uuid>] [--json] -- <message...>
-  cxmsg team dispatch <logical-message-id> [--json]
+  cxmsg team dispatch <logical-message-id> [--when-busy reject|when-idle] [--json]
   cxmsg message info <message-id|reply-handle|content-ref> [--json]
   cxmsg message show <message-id|reply-handle|content-ref> [--offset <bytes>] [--limit <bytes>] [--json]
   cxmsg grant <sender> <target>
@@ -3451,9 +3451,21 @@ async function commandTeam(args) {
   const operation = args.shift();
   if (operation === "dispatch") {
     const logicalMessageId = args.shift();
-    const jsonOutput = args.includes("--json");
-    if (!logicalMessageId || args.some((value) => value !== "--json")) {
-      usage(2);
+    let jsonOutput = false;
+    let whenBusy = "reject";
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--when-busy") whenBusy = args.shift();
+      else throw new Error(`unknown Team Cast dispatch option: ${option}`);
+    }
+    if (
+      !logicalMessageId ||
+      !["reject", "when-idle"].includes(whenBusy)
+    ) {
+      throw new Error(
+        "Team Cast --when-busy must be reject or when-idle",
+      );
     }
     const teamRecord = await readDeliveryLedgerIndexed(logicalMessageId);
     if (!teamRecord?.teamDeliveries) {
@@ -3531,6 +3543,15 @@ async function commandTeam(args) {
             matches.sort((left, right) => left.name.localeCompare(right.name));
             const thread = await readThreadMetadata(client, targetThreadId);
             if (activeTurnId(thread)) {
+              if (whenBusy === "when-idle") {
+                return {
+                  transport: "codex-app-server",
+                  scheduleWakePolicy: "when-idle",
+                  session: matches[0],
+                  allowResume: matches.every(sessionAllowsAppServerResume),
+                  thread,
+                };
+              }
               throw new Error(`Team Cast recipient is busy: ${targetNodeKey}`);
             }
             if (thread.canAcceptDirectInput === false) {

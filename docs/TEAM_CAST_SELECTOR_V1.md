@@ -107,6 +107,7 @@ Dispatch prepared Codex or Claude recipients explicitly:
 
 ```bash
 cxmsg team dispatch <logical-message-id> --json
+cxmsg team dispatch <logical-message-id> --when-busy when-idle --json
 ```
 
 Before the first attempt it verifies that every pending recipient is still the
@@ -117,6 +118,11 @@ recipient is resolved by exact native session ID, while the sender's Codex
 thread must resolve to exactly one running or transport-unreachable bridge.
 Missing, ambiguous, or Busy Codex preflight rejects the whole invocation with
 zero new attempts. This avoids silently steering an unrelated Busy turn.
+The optional `--when-busy when-idle` policy changes only the Busy case: each
+exact Busy Codex recipient moves durably from `prepared` to `scheduled`, while
+idle siblings dispatch normally. This transition creates no attempt and uses
+the existing Delivery Ledger and Scheduler rather than a Team-specific queue.
+The default `reject` behavior remains unchanged.
 
 After preflight, recipients dispatch sequentially. Each recipient gets one
 durable attempt and exactly one outcome record. Codex acceptance is
@@ -130,9 +136,16 @@ siblings do not overwrite each other. Every actual Codex turn starts with
 approval policy `never`; every runtime receives ordinary untrusted Peer Message
 context, never authority. The Ledger rejects runtime/transport mismatches.
 
+The shared Scheduler preserves target-lane FIFO, waits through Busy and restart
+boundaries, revalidates the exact Codex Node/Project and successor state, claims
+the recipient before start, and writes one Team attempt inside `beforeStart`.
+A Busy race releases the claim with zero attempts. The frozen Team expiry is
+also the scheduled deadline; expiry becomes terminal without target access.
+Claude recipients are not placed in this Codex-only fallback.
+
 The JSON result includes `deliveryStarted: false` when resolving. Membership,
 role, and plan possession are coordination metadata only; none authorizes work,
 grants a permission, approves a prompt, or expands a peer's authority.
 
-Explicit wake-all, scheduled fallback policies, and digest composition remain
-separately gated future work.
+Explicit wake-all, `after-turn`/`after-job` Team policies, and digest composition
+remain separately gated future work.

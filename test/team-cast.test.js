@@ -52,6 +52,7 @@ const ids = {
   claudeSelection: "d1345678-6234-4234-8234-123456789abc",
   claudeMessage: "e1345678-6234-4234-8234-123456789abc",
   claudeTransportMismatch: "f1345678-6234-4234-8234-123456789abc",
+  scheduledMessage: "12345678-7234-4234-8234-123456789abc",
 };
 const keys = Object.fromEntries(
   ["sender", "first", "second", "cross"].map((name) => [
@@ -351,6 +352,25 @@ test("one Ledger batch prepares every selected Team Cast recipient", async () =>
   assert.equal(committed.record.teamDeliveries[0].attempts.length, 0);
   assert.equal(committed.record.delivery.deliveryId,
     committed.record.teamDeliveries[0].deliveryId);
+  const legacyProjection = structuredClone(committed.record);
+  for (const delivery of legacyProjection.teamDeliveries) {
+    delete delivery.schedule;
+  }
+  delete legacyProjection.delivery.schedule;
+  assert.equal(
+    ledger.validDeliveryLedgerIndexRecord(
+      {
+        version: 1,
+        messageId: ids.teamMessage,
+        projection: legacyProjection,
+        projectionSha256: createHash("sha256")
+          .update(JSON.stringify(legacyProjection))
+          .digest("hex"),
+      },
+      ids.teamMessage,
+    ),
+    true,
+  );
   const repeated = await ledger.commitPreparedTeamCastDelivery({
     logicalMessage,
     recipients: selection.recipientNodeKeys.map((nodeKey) => ({
@@ -606,6 +626,59 @@ test("Team Cast transport must match the recipient runtime", async () => {
   );
   assert.equal(record.teamDeliveries[0].state, "prepared");
   assert.equal(record.teamDeliveries[0].attempts.length, 0);
+});
+
+test("a Busy Team Cast recipient can enter the shared when-idle ledger", async () => {
+  await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.fanoutSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.scheduledMessage,
+    message: "schedule only the explicitly Busy recipient",
+  });
+  const result = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.scheduledMessage },
+    {
+      preflightRecipient: async ({ targetNodeKey }) =>
+        targetNodeKey === keys.second
+          ? {
+              transport: "codex-app-server",
+              scheduleWakePolicy: "when-idle",
+            }
+          : { transport: "codex-app-server" },
+      dispatchRecipient: async () => ({
+        state: "turn_started",
+        turnId: ids.fanoutTurn,
+        transportResult: "started",
+        errorCode: null,
+      }),
+    },
+  );
+  assert.deepEqual(
+    result.outcomes.map(({ targetNodeKey, status, attempted }) => ({
+      targetNodeKey,
+      status,
+      attempted,
+    })),
+    [
+      { targetNodeKey: keys.first, status: "turn_started", attempted: true },
+      { targetNodeKey: keys.second, status: "scheduled", attempted: false },
+    ].sort((left, right) => left.targetNodeKey.localeCompare(right.targetNodeKey)),
+  );
+  const scheduled = result.record.teamDeliveries.find(
+    (delivery) => delivery.targetNodeKey === keys.second,
+  );
+  assert.equal(scheduled.wakePolicy, "when-idle");
+  assert.equal(scheduled.state, "scheduled");
+  assert.equal(scheduled.schedule.wakePolicy, "when-idle");
+  assert.equal(scheduled.attempts.length, 0);
+  await ledger.rebuildDeliveryLedgerIndex();
+  const rebuilt = await ledger.readDeliveryLedgerIndexed(ids.scheduledMessage);
+  assert.equal(
+    rebuilt.teamDeliveries.find(
+      (delivery) => delivery.targetNodeKey === keys.second,
+    ).state,
+    "scheduled",
+  );
 });
 
 test("Project-role selector requires exact stable bindings", async () => {

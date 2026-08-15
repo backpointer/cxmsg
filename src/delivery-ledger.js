@@ -489,6 +489,17 @@ function expectedTeamDeliveryTransport(delivery) {
   return null;
 }
 
+function validTeamSchedule(record) {
+  return Boolean(
+    record?.schemaVersion === 1 &&
+      record.recordType === "team-delivery-schedule" &&
+      UUID_PATTERN.test(record.messageId || "") &&
+      UUID_PATTERN.test(record.deliveryId || "") &&
+      record.wakePolicy === "when-idle" &&
+      validTimestamp(record.scheduledAt),
+  );
+}
+
 function validClaim(record) {
   if (
     record?.schemaVersion !== 1 ||
@@ -593,10 +604,15 @@ function validTeamEvidence(record) {
     record.recordType !== "team-delivery-evidence" ||
     !UUID_PATTERN.test(record.messageId || "") ||
     !UUID_PATTERN.test(record.deliveryId || "") ||
-    !UUID_PATTERN.test(record.attemptId || "") ||
-    !["turn_started", "transport_delivered", "failed", "unknown"].includes(
-      record.state,
-    ) ||
+    (record.attemptId !== null &&
+      !UUID_PATTERN.test(record.attemptId || "")) ||
+    ![
+      "turn_started",
+      "transport_delivered",
+      "failed",
+      "unknown",
+      "expired",
+    ].includes(record.state) ||
     !validTimestamp(record.observedAt) ||
     (record.turnId !== null && !UUID_PATTERN.test(record.turnId || "")) ||
     (record.transportResult !== null &&
@@ -609,19 +625,30 @@ function validTeamEvidence(record) {
   }
   if (record.state === "turn_started") {
     return Boolean(
-      record.turnId &&
+      record.attemptId !== null &&
+        record.turnId &&
         record.transportResult &&
         record.errorCode === null,
     );
   }
   if (record.state === "transport_delivered") {
     return Boolean(
-      record.turnId === null &&
+      record.attemptId !== null &&
+        record.turnId === null &&
         /^claude-job:[0-9a-f-]{36}$/i.test(record.transportResult || "") &&
         record.errorCode === null,
     );
   }
+  if (record.state === "expired") {
+    return Boolean(
+      record.attemptId === null &&
+        record.turnId === null &&
+        record.transportResult === null &&
+        record.errorCode === "EDELIVERYEXPIRED",
+    );
+  }
   return Boolean(
+    record.attemptId !== null &&
     record.turnId === null &&
       record.errorCode &&
       (record.state === "failed"
@@ -640,6 +667,9 @@ export function validDeliveryLedgerRecord(record) {
   }
   if (record?.recordType === "team-delivery-evidence") {
     return validTeamEvidence(record);
+  }
+  if (record?.recordType === "team-delivery-schedule") {
+    return validTeamSchedule(record);
   }
   return false;
 }
@@ -804,6 +834,113 @@ function indexProjectionDigest(projection) {
   return createHash("sha256").update(JSON.stringify(projection)).digest("hex");
 }
 
+function validTeamDeliveryProjection(candidate, messageId) {
+  if (
+    ![
+      "prepared",
+      "scheduled",
+      "turn_started",
+      "transport_delivered",
+      "failed",
+      "unknown",
+      "expired",
+    ].includes(candidate.state) ||
+    !Array.isArray(candidate.attempts) ||
+    candidate.attempts.length > 1 ||
+    !Array.isArray(candidate.evidence) ||
+    candidate.evidence.length > 1 ||
+    !Number.isSafeInteger(candidate.claimCount) ||
+    candidate.claimCount < 0 ||
+    !validTimestamp(candidate.updatedAt)
+  ) {
+    return false;
+  }
+  const scheduled = candidate.schedule != null;
+  if (
+    scheduled !== (candidate.wakePolicy === "when-idle") ||
+    (!scheduled && candidate.wakePolicy !== "mention-wake") ||
+    (scheduled &&
+      (!validTeamSchedule(candidate.schedule) ||
+        candidate.schedule.messageId !== messageId ||
+        candidate.schedule.deliveryId !== candidate.deliveryId ||
+        !candidate.targetNodeKey.startsWith("codex:")))
+  ) {
+    return false;
+  }
+  if (
+    candidate.attempts.some(
+      (attempt) =>
+        !validAttempt(attempt) ||
+        attempt.transport !== expectedTeamDeliveryTransport(candidate) ||
+        attempt.messageId !== messageId ||
+        attempt.deliveryId !== candidate.deliveryId ||
+        attempt.retryOfAttemptId !== undefined ||
+        (scheduled
+          ? !UUID_PATTERN.test(attempt.claimId || "")
+          : attempt.claimId !== null),
+    )
+  ) {
+    return false;
+  }
+  if (
+    candidate.claim !== null &&
+    (!scheduled ||
+      !validClaim(candidate.claim) ||
+      candidate.claim.action !== "acquired" ||
+      candidate.claim.messageId !== messageId ||
+      candidate.claim.deliveryId !== candidate.deliveryId)
+  ) {
+    return false;
+  }
+  if ((!scheduled && candidate.claimCount !== 0) || (candidate.claim && candidate.claimCount < 1)) {
+    return false;
+  }
+  if (
+    candidate.evidence.some(
+      (evidence) =>
+        !validTeamEvidence(evidence) ||
+        evidence.messageId !== messageId ||
+        evidence.deliveryId !== candidate.deliveryId ||
+        (evidence.attemptId === null
+          ? evidence.state !== "expired" ||
+            !scheduled ||
+            candidate.attempts.length !== 0
+          : !candidate.attempts.some(
+              (attempt) => attempt.attemptId === evidence.attemptId,
+            )),
+    )
+  ) {
+    return false;
+  }
+  if (candidate.evidence.length === 1) {
+    const evidence = candidate.evidence[0];
+    return Boolean(
+      candidate.state === evidence.state &&
+        candidate.turnId === evidence.turnId &&
+        candidate.transportResult === evidence.transportResult &&
+        candidate.errorCode === evidence.errorCode &&
+        candidate.updatedAt === evidence.observedAt,
+    );
+  }
+  if (candidate.attempts.length === 1) {
+    return Boolean(
+      candidate.state === (scheduled ? "scheduled" : "prepared") &&
+        candidate.updatedAt === candidate.attempts[0].startedAt,
+    );
+  }
+  if (scheduled) {
+    return Boolean(
+      candidate.state === "scheduled" &&
+        Date.parse(candidate.updatedAt) >=
+          Date.parse(candidate.schedule.scheduledAt),
+    );
+  }
+  return Boolean(
+    candidate.state === "prepared" &&
+      candidate.updatedAt === candidate.createdAt,
+  );
+}
+
 function validIndexProjection(projection, messageId) {
   const delivery = projection?.delivery;
   if (!delivery || projection.logicalMessage?.messageId !== messageId) return false;
@@ -827,11 +964,13 @@ function validIndexProjection(projection, messageId) {
           evidence,
           claim,
           claimCount,
+          schedule,
           turnId,
           transportResult,
           errorCode,
           ...initial
         } = candidate;
+        initial.wakePolicy = "mention-wake";
         initial.state = "prepared";
         initial.updatedAt = initial.createdAt;
         return initial;
@@ -839,53 +978,8 @@ function validIndexProjection(projection, messageId) {
     };
     return Boolean(
       validBatch(baseBatch) &&
-        projection.teamDeliveries.every(
-          (candidate) =>
-            [
-              "prepared",
-              "turn_started",
-              "transport_delivered",
-              "failed",
-              "unknown",
-            ].includes(candidate.state) &&
-            candidate.wakePolicy === "mention-wake" &&
-            Array.isArray(candidate.attempts) &&
-            candidate.attempts.length <= 1 &&
-            candidate.attempts.every(
-              (attempt) =>
-                validAttempt(attempt) &&
-                attempt.transport ===
-                  expectedTeamDeliveryTransport(candidate) &&
-                attempt.messageId === messageId &&
-                attempt.deliveryId === candidate.deliveryId &&
-                attempt.retryOfAttemptId === undefined &&
-                (attempt.claimId === undefined || attempt.claimId === null),
-            ) &&
-            Array.isArray(candidate.evidence) &&
-            candidate.evidence.length <= 1 &&
-            candidate.evidence.every(
-              (evidence) =>
-                validTeamEvidence(evidence) &&
-                evidence.messageId === messageId &&
-                evidence.deliveryId === candidate.deliveryId &&
-                candidate.attempts.some(
-                  (attempt) => attempt.attemptId === evidence.attemptId,
-                ),
-            ) &&
-            candidate.claim === null &&
-            candidate.claimCount === 0 &&
-            (candidate.evidence.length === 0
-              ? candidate.state === "prepared" &&
-                candidate.updatedAt ===
-                  (candidate.attempts[0]?.startedAt || candidate.createdAt)
-              : candidate.attempts.length === 1 &&
-                candidate.evidence.length === 1 &&
-                candidate.state === candidate.evidence[0].state &&
-                candidate.turnId === candidate.evidence[0].turnId &&
-                candidate.transportResult ===
-                  candidate.evidence[0].transportResult &&
-                candidate.errorCode === candidate.evidence[0].errorCode &&
-                candidate.updatedAt === candidate.evidence[0].observedAt),
+        projection.teamDeliveries.every((candidate) =>
+          validTeamDeliveryProjection(candidate, messageId),
         ),
     );
   }
@@ -1229,11 +1323,21 @@ function reservedEvidenceBytes(messages) {
       records += message.teamDeliveries.reduce(
         (count, delivery) =>
           count +
-          (delivery.state !== "prepared"
+          (["turn_started", "transport_delivered", "failed", "expired"].includes(
+            delivery.state,
+          )
             ? 0
-            : delivery.attempts.length === 0
-              ? 2
-              : 1),
+            : delivery.state === "unknown"
+              ? 1
+              : delivery.state === "prepared"
+                ? delivery.attempts.length === 0
+                  ? 5
+                  : 1
+                : delivery.attempts.length > 0
+                  ? 2
+                  : delivery.claim
+                    ? 3
+                    : 4),
         0,
       );
       continue;
@@ -1279,8 +1383,10 @@ function cloneBatch(record) {
     logicalMessage: structuredClone(record.logicalMessage),
     delivery: deliveries[0],
   };
-  if (record.logicalMessage.teamCast) projection.teamDeliveries = deliveries;
-  else if (deliveries.length > 1) projection.groupDeliveries = deliveries;
+  if (record.logicalMessage.teamCast) {
+    for (const delivery of deliveries) delivery.schedule = null;
+    projection.teamDeliveries = deliveries;
+  } else if (deliveries.length > 1) projection.groupDeliveries = deliveries;
   return projection;
 }
 
@@ -1289,17 +1395,99 @@ function applyDeliveryEvent(projected, record) {
     const delivery = projected.teamDeliveries.find(
       (candidate) => candidate.deliveryId === record.deliveryId,
     );
-    if (!delivery || delivery.wakePolicy !== "mention-wake") {
+    if (
+      !delivery ||
+      !["mention-wake", "when-idle"].includes(delivery.wakePolicy)
+    ) {
       throw new Error(`invalid Team Cast Delivery event: ${record.messageId}`);
     }
-    if (record.recordType === "delivery-attempt") {
+    if (record.recordType === "team-delivery-schedule") {
+      if (
+        !validTeamSchedule(record) ||
+        delivery.wakePolicy !== "mention-wake" ||
+        delivery.state !== "prepared" ||
+        delivery.schedule != null ||
+        delivery.attempts.length !== 0 ||
+        delivery.evidence.length !== 0 ||
+        delivery.claim !== null ||
+        !delivery.targetNodeKey.startsWith("codex:")
+      ) {
+        throw new Error(`invalid Team Cast schedule: ${record.messageId}`);
+      }
+      delivery.wakePolicy = "when-idle";
+      delivery.state = "scheduled";
+      delivery.schedule = structuredClone(record);
+      delivery.updatedAt = record.scheduledAt;
+    } else if (record.recordType === "delivery-claim") {
+      if (
+        !validClaim(record) ||
+        delivery.wakePolicy !== "when-idle" ||
+        delivery.state !== "scheduled" ||
+        delivery.attempts.length !== 0
+      ) {
+        throw new Error(`invalid Team Cast claim: ${record.messageId}`);
+      }
+      if (record.action === "acquired") {
+        if (
+          delivery.claim &&
+          Date.parse(record.claimedAt) < Date.parse(delivery.claim.leaseUntil)
+        ) {
+          throw new Error(`overlapping Team Cast claim: ${record.messageId}`);
+        }
+        delivery.claim = structuredClone(record);
+        delivery.claimCount += 1;
+        delivery.updatedAt = record.claimedAt;
+      } else if (record.action === "renewed") {
+        const claim = delivery.claim;
+        if (
+          !claim ||
+          claim.claimId !== record.claimId ||
+          claim.workerId !== record.workerId ||
+          Date.parse(record.renewedAt) <
+            Date.parse(claim.renewedAt || claim.claimedAt) ||
+          Date.parse(record.renewedAt) >= Date.parse(claim.leaseUntil) ||
+          Date.parse(record.leaseUntil) <= Date.parse(claim.leaseUntil)
+        ) {
+          throw new Error(`Team Cast claim renewal has no live owner: ${record.messageId}`);
+        }
+        delivery.claim = {
+          ...claim,
+          leaseUntil: record.leaseUntil,
+          renewedAt: record.renewedAt,
+          renewalCount: (claim.renewalCount || 0) + 1,
+        };
+        delivery.updatedAt = record.renewedAt;
+      } else {
+        if (
+          !delivery.claim ||
+          delivery.claim.claimId !== record.claimId ||
+          delivery.claim.workerId !== record.workerId ||
+          Date.parse(record.releasedAt) <
+            Date.parse(
+              delivery.claim.renewedAt || delivery.claim.claimedAt,
+            )
+        ) {
+          throw new Error(`Team Cast claim release has no owner: ${record.messageId}`);
+        }
+        delivery.claim = null;
+        delivery.updatedAt = record.releasedAt;
+      }
+    } else if (record.recordType === "delivery-attempt") {
+      const direct =
+        delivery.wakePolicy === "mention-wake" &&
+        delivery.state === "prepared" &&
+        record.claimId === null;
+      const scheduled =
+        delivery.wakePolicy === "when-idle" &&
+        delivery.state === "scheduled" &&
+        delivery.claim?.claimId === record.claimId &&
+        Date.parse(record.startedAt) >= Date.parse(delivery.updatedAt);
       if (
         !validAttempt(record) ||
         record.transport !== expectedTeamDeliveryTransport(delivery) ||
-        delivery.state !== "prepared" ||
+        (!direct && !scheduled) ||
         delivery.attempts.length !== 0 ||
         delivery.evidence.length !== 0 ||
-        (record.claimId !== undefined && record.claimId !== null) ||
         record.retryOfAttemptId !== undefined
       ) {
         throw new Error(
@@ -1310,18 +1498,27 @@ function applyDeliveryEvent(projected, record) {
       delivery.updatedAt = record.startedAt;
     } else if (record.recordType === "team-delivery-evidence") {
       const attempt = delivery.attempts[0];
+      const expiry =
+        record.state === "expired" &&
+        record.attemptId === null &&
+        delivery.wakePolicy === "when-idle" &&
+        delivery.state === "scheduled" &&
+        delivery.attempts.length === 0 &&
+        delivery.claim === null;
+      const attempted =
+        record.attemptId !== null &&
+        ["prepared", "scheduled"].includes(delivery.state) &&
+        delivery.attempts.length === 1 &&
+        attempt?.attemptId === record.attemptId;
       if (
         !validTeamEvidence(record) ||
-        delivery.state !== "prepared" ||
-        delivery.attempts.length !== 1 ||
-        attempt.attemptId !== record.attemptId ||
+        (!expiry && !attempted) ||
         (record.state === "turn_started" &&
           attempt.transport !== "codex-app-server") ||
         (record.state === "transport_delivered" &&
           attempt.transport !== "claude-uds") ||
         delivery.evidence.length !== 0 ||
-        Date.parse(record.observedAt) <
-          Date.parse(delivery.attempts[0].startedAt)
+        Date.parse(record.observedAt) < Date.parse(delivery.updatedAt)
       ) {
         throw new Error(
           `invalid Team Cast Delivery evidence: ${record.messageId}`,
@@ -1333,6 +1530,7 @@ function applyDeliveryEvent(projected, record) {
       delivery.errorCode = record.errorCode;
       delivery.updatedAt = record.observedAt;
       delivery.evidence.push(structuredClone(record));
+      delivery.claim = null;
     } else {
       throw new Error(
         `unsupported Team Cast Delivery event: ${record.messageId}`,
@@ -2198,6 +2396,90 @@ export async function beginTeamCastRecipientDelivery(
   });
 }
 
+export async function scheduleTeamCastRecipientDelivery(
+  messageId,
+  targetNodeKey,
+  {
+    now = new Date().toISOString(),
+    wakePolicy = "when-idle",
+    quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
+    segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
+  } = {},
+) {
+  messageId = validateUuid("logical message id", messageId);
+  if (!NODE_KEY_PATTERN.test(targetNodeKey || "")) {
+    throw new Error("Team Cast schedule target must be a stable Node key");
+  }
+  targetNodeKey = targetNodeKey.toLowerCase();
+  if (wakePolicy !== "when-idle") {
+    throw new Error("Team Cast scheduled fallback must be when-idle");
+  }
+  if (!validTimestamp(now)) {
+    throw new Error("Team Cast schedule timestamp is invalid");
+  }
+  validateStorageOptions(quotaBytes, segmentBytes);
+  return withDeliveryLedgerMutation(async () => {
+    const messages = readDeliveryIndexLocked();
+    const record = messages.get(messageId);
+    const delivery = record?.teamDeliveries?.find(
+      (candidate) => candidate.targetNodeKey === targetNodeKey,
+    );
+    if (!delivery) throw new Error("unknown Team Cast recipient Delivery");
+    if (delivery.schedule) {
+      if (
+        delivery.wakePolicy === wakePolicy &&
+        delivery.state === "scheduled"
+      ) {
+        return { record: structuredClone(record), scheduled: false };
+      }
+      throw new Error("Team Cast recipient already has another outcome");
+    }
+    if (!delivery.targetNodeKey.startsWith("codex:")) {
+      throw new Error("Team Cast scheduled fallback currently requires Codex");
+    }
+    if (Date.parse(record.logicalMessage.teamCast.expiresAt) <= Date.parse(now)) {
+      throw new Error("Team Cast recipient expired before scheduling");
+    }
+    const lane = delivery.targetThreadId || delivery.targetNodeKey;
+    let queuedForLane = 0;
+    for (const message of messages.values()) {
+      const candidates = message.teamDeliveries || [message.delivery];
+      queuedForLane += candidates.filter(
+        (candidate) =>
+          SCHEDULED_WAKE_POLICIES.includes(candidate.wakePolicy) &&
+          candidate.state === "scheduled" &&
+          candidate.attempts.length === 0 &&
+          (candidate.targetThreadId || candidate.target) === lane,
+      ).length;
+    }
+    if (queuedForLane >= SCHEDULED_DELIVERY_PER_TARGET_LIMIT) {
+      throw new Error(
+        `scheduled Delivery queue for ${lane} reached ${SCHEDULED_DELIVERY_PER_TARGET_LIMIT}`,
+      );
+    }
+    const event = {
+      schemaVersion: 1,
+      recordType: "team-delivery-schedule",
+      messageId,
+      deliveryId: delivery.deliveryId,
+      wakePolicy,
+      scheduledAt: now,
+    };
+    if (!validTeamSchedule(event)) throw new Error("invalid Team Cast schedule");
+    const after = new Map(messages);
+    const projected = structuredClone(record);
+    after.set(messageId, projected);
+    applyDeliveryEvent(projected, event);
+    appendLedgerRecord(event, {
+      quotaBytes,
+      segmentBytes,
+      reserveBytes: reservedEvidenceBytes(after),
+    });
+    updateDeliveryIndexLocked(after, messageId);
+    return { record: structuredClone(projected), scheduled: true };
+  });
+}
+
 export async function appendTeamCastRecipientEvidence(
   messageId,
   targetNodeKey,
@@ -2346,10 +2628,24 @@ export async function beginRetryDelivery(messageId, options = {}) {
   });
 }
 
+function scheduledDeliveryForMutation(record, targetNodeKey = null) {
+  if (targetNodeKey === null) return record?.delivery || null;
+  if (!NODE_KEY_PATTERN.test(targetNodeKey || "")) {
+    throw new Error("scheduled Delivery target must be a stable Node key");
+  }
+  const normalized = targetNodeKey.toLowerCase();
+  return (
+    record?.teamDeliveries?.find(
+      (delivery) => delivery.targetNodeKey === normalized,
+    ) || null
+  );
+}
+
 export async function claimScheduledDelivery(
   messageId,
   {
     workerId,
+    targetNodeKey = null,
     leaseMs = 30_000,
     now = new Date().toISOString(),
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
@@ -2366,24 +2662,25 @@ export async function claimScheduledDelivery(
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
+    const delivery = scheduledDeliveryForMutation(record, targetNodeKey);
     if (
-      record.delivery.admissionState !== "admitted" ||
-      !SCHEDULED_WAKE_POLICIES.includes(record.delivery.wakePolicy) ||
-      record.delivery.state !== "scheduled" ||
-      record.delivery.attempts.length > 0
+      delivery?.admissionState !== "admitted" ||
+      !SCHEDULED_WAKE_POLICIES.includes(delivery.wakePolicy) ||
+      delivery.state !== "scheduled" ||
+      delivery.attempts.length > 0
     ) {
       throw new Error("Delivery is not claimable for scheduled dispatch");
     }
     const claimedAt = Date.parse(now);
-    if (record.delivery.claim && Date.parse(record.delivery.claim.leaseUntil) > claimedAt) {
-      return { claim: structuredClone(record.delivery.claim), acquired: false };
+    if (delivery.claim && Date.parse(delivery.claim.leaseUntil) > claimedAt) {
+      return { claim: structuredClone(delivery.claim), acquired: false };
     }
     const event = {
       schemaVersion: 1,
       recordType: "delivery-claim",
       action: "acquired",
       messageId,
-      deliveryId: record.delivery.deliveryId,
+      deliveryId: delivery.deliveryId,
       claimId: randomUUID(),
       workerId,
       claimedAt: now,
@@ -2410,6 +2707,7 @@ export async function releaseScheduledDeliveryClaim(
     claimId,
     workerId,
     reason,
+    targetNodeKey = null,
     now = new Date().toISOString(),
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
     segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
@@ -2424,10 +2722,12 @@ export async function releaseScheduledDeliveryClaim(
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
-    if (!record.delivery.claim) return { released: false, record };
+    const delivery = scheduledDeliveryForMutation(record, targetNodeKey);
+    if (!delivery) throw new Error("unknown scheduled Delivery target");
+    if (!delivery.claim) return { released: false, record };
     if (
-      record.delivery.claim.claimId !== claimId ||
-      record.delivery.claim.workerId !== workerId
+      delivery.claim.claimId !== claimId ||
+      delivery.claim.workerId !== workerId
     ) {
       throw new Error("Delivery claim is owned by another scheduler worker");
     }
@@ -2436,7 +2736,7 @@ export async function releaseScheduledDeliveryClaim(
       recordType: "delivery-claim",
       action: "released",
       messageId,
-      deliveryId: record.delivery.deliveryId,
+      deliveryId: delivery.deliveryId,
       claimId,
       workerId,
       reason,
@@ -2461,6 +2761,7 @@ export async function renewScheduledDeliveryClaim(
   {
     claimId,
     workerId,
+    targetNodeKey = null,
     leaseMs = 30_000,
     now = new Date().toISOString(),
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
@@ -2478,11 +2779,13 @@ export async function renewScheduledDeliveryClaim(
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
-    const claim = record.delivery.claim;
+    const delivery = scheduledDeliveryForMutation(record, targetNodeKey);
+    if (!delivery) throw new Error("unknown scheduled Delivery target");
+    const claim = delivery.claim;
     const renewedAt = Date.parse(now);
     if (
-      record.delivery.state !== "scheduled" ||
-      record.delivery.attempts.length > 0 ||
+      delivery.state !== "scheduled" ||
+      delivery.attempts.length > 0 ||
       claim?.claimId !== claimId ||
       claim?.workerId !== workerId ||
       Date.parse(claim.leaseUntil) <= renewedAt
@@ -2496,7 +2799,7 @@ export async function renewScheduledDeliveryClaim(
       recordType: "delivery-claim",
       action: "renewed",
       messageId,
-      deliveryId: record.delivery.deliveryId,
+      deliveryId: delivery.deliveryId,
       claimId,
       workerId,
       renewedAt: now,
@@ -2515,7 +2818,11 @@ export async function renewScheduledDeliveryClaim(
       reserveBytes: reservedEvidenceBytes(after),
     });
     updateDeliveryIndexLocked(after, messageId);
-    return { claim: structuredClone(projected.delivery.claim), renewed: true };
+    const projectedDelivery = scheduledDeliveryForMutation(
+      projected,
+      targetNodeKey,
+    );
+    return { claim: structuredClone(projectedDelivery.claim), renewed: true };
   });
 }
 
@@ -2524,6 +2831,7 @@ export async function beginScheduledDelivery(
   {
     claimId,
     workerId,
+    targetNodeKey = null,
     now = new Date().toISOString(),
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
     segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
@@ -2537,14 +2845,15 @@ export async function beginScheduledDelivery(
     const messages = readDeliveryIndexLocked();
     const record = messages.get(messageId);
     if (!record) throw new Error(`unknown Delivery Ledger message: ${messageId}`);
+    const delivery = scheduledDeliveryForMutation(record, targetNodeKey);
     if (
-      record.delivery.admissionState !== "admitted" ||
-      !SCHEDULED_WAKE_POLICIES.includes(record.delivery.wakePolicy) ||
-      record.delivery.state !== "scheduled" ||
-      record.delivery.attempts.length > 0 ||
-      record.delivery.claim?.claimId !== claimId ||
-      record.delivery.claim?.workerId !== workerId ||
-      Date.parse(record.delivery.claim.leaseUntil) <= Date.parse(now)
+      delivery?.admissionState !== "admitted" ||
+      !SCHEDULED_WAKE_POLICIES.includes(delivery.wakePolicy) ||
+      delivery.state !== "scheduled" ||
+      delivery.attempts.length > 0 ||
+      delivery.claim?.claimId !== claimId ||
+      delivery.claim?.workerId !== workerId ||
+      Date.parse(delivery.claim.leaseUntil) <= Date.parse(now)
     ) {
       throw new Error("scheduled Delivery claim is missing, expired, or already dispatched");
     }
@@ -2552,7 +2861,7 @@ export async function beginScheduledDelivery(
       schemaVersion: 1,
       recordType: "delivery-attempt",
       messageId,
-      deliveryId: record.delivery.deliveryId,
+      deliveryId: delivery.deliveryId,
       attemptId: randomUUID(),
       claimId,
       transport: "codex-app-server",

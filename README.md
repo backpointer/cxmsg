@@ -545,6 +545,7 @@ cxmsg team prepare --selection <selection-uuid> \
   --from codex:<uuid> --logical-message-id <uuid> -- \
   "Review handoff pointer abc123"
 cxmsg team dispatch <logical-message-id> --json
+cxmsg team dispatch <logical-message-id> --when-busy when-idle --json
 ```
 
 Default output exposes only the recipient count and set digest. Use
@@ -559,7 +560,12 @@ outcomes. It never steers a Busy Codex turn or redrives an existing attempt.
 Codex acceptance records `turn_started`; Claude frame acceptance records
 `transport_delivered` plus a correlated Claude Delivery Job ID. That job, not
 the Team Cast state, tracks ACK, overload retry, and later completion. Wake-all
-and scheduled fallback are not enabled by this release. See
+is not enabled by this release. By default a Busy Codex recipient rejects the
+whole preflight with zero attempts. `--when-busy when-idle` instead moves only
+that explicit recipient into the existing Delivery Ledger/Scheduler claim
+protocol; it never steers the active turn, creates a second queue, or schedules
+Claude recipients. The original 15-minute Team Cast expiry remains the fallback
+deadline. See
 [Team Cast selector plan v1](docs/TEAM_CAST_SELECTOR_V1.md).
 
 When a Directory Project exists, `cxmsg route bind` also pins the binding to

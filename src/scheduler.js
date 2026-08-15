@@ -14,6 +14,7 @@ import { fileURLToPath } from "node:url";
 import { AppServerClient, appServerVersion } from "./app-server-client.js";
 import {
   appendDeliveryEvidence,
+  appendTeamCastRecipientEvidence,
   beginScheduledDelivery,
   claimScheduledDelivery,
   listDeliveryLedgerIndexed,
@@ -41,6 +42,7 @@ import {
   TargetBusyError,
 } from "./messaging.js";
 import {
+  listSessionRecords,
   readSessionRecord,
   sessionAllowsAppServerResume,
 } from "./registry.js";
@@ -52,7 +54,11 @@ import {
   readThreadMetadata,
 } from "./thread-activity.js";
 import { writeCoordinationEvent } from "./observability.js";
-import { findNodeSuccessors } from "./node-directory.js";
+import {
+  findNodeSuccessors,
+  readNode,
+  readNodeTombstone,
+} from "./node-directory.js";
 import {
   beginTurnLifecycleConnection,
   endTurnLifecycleConnection,
@@ -229,13 +235,36 @@ export async function scheduledTriggerReadiness(
   return { state: "blocked", errorCode: "ETRIGGERPOLICY" };
 }
 
+function scheduledDeliveryCandidates(records) {
+  return records.flatMap((record) => {
+    if (!Array.isArray(record.teamDeliveries)) return [record];
+    return record.teamDeliveries
+      .filter(
+        (delivery) =>
+          delivery.admissionState === "admitted" &&
+          ["when-idle", "after-turn", "after-job"].includes(
+            delivery.wakePolicy,
+          ) &&
+          delivery.state === "scheduled" &&
+          delivery.attempts.length === 0,
+      )
+      .map((delivery) => ({
+        ...structuredClone(record),
+        delivery: structuredClone(delivery),
+        teamRecipientNodeKey: delivery.targetNodeKey,
+      }));
+  });
+}
+
 async function eligibleScheduledDeliveries(
   client,
   now,
   triggerReadiness = scheduledTriggerReadiness,
 ) {
   const firstByTarget = new Map();
-  const candidates = (await listDeliveryLedgerIndexed())
+  const candidates = scheduledDeliveryCandidates(
+    await listDeliveryLedgerIndexed(),
+  )
     .filter((record) => {
       const delivery = record.delivery;
       return (
@@ -454,7 +483,9 @@ export async function reconcileTurnLifecycle(
       if (targets.size >= limit) break;
     }
   }
-  for (const record of await listDeliveryLedgerIndexed()) {
+  for (const record of scheduledDeliveryCandidates(
+    await listDeliveryLedgerIndexed(),
+  )) {
     if (targets.size >= limit) break;
     if (
       record.delivery.admissionState === "admitted" &&
@@ -499,20 +530,50 @@ export async function reconcileTurnLifecycle(
   return outcomes;
 }
 
-async function markUnknown(messageId, error, now) {
-  return appendDeliveryEvidence(messageId, {
-    attemptId: null,
-    state: "unknown",
-    evidenceKind: "scheduler",
-    errorCode: boundedErrorCode(error),
-    observedAt: new Date(now).toISOString(),
-  });
+async function appendScheduledEvidence(record, evidence) {
+  const messageId = record.logicalMessage.messageId;
+  if (record.teamRecipientNodeKey) {
+    return appendTeamCastRecipientEvidence(
+      messageId,
+      record.teamRecipientNodeKey,
+      evidence,
+    );
+  }
+  return appendDeliveryEvidence(messageId, evidence);
 }
 
-export function scheduledTargetIdentity(record, { successors = findNodeSuccessors } = {}) {
+async function markUnknown(record, error, now) {
+  const evidence = {
+    attemptId: null,
+    state: "unknown",
+    errorCode: boundedErrorCode(error),
+    observedAt: new Date(now).toISOString(),
+  };
+  if (!record.teamRecipientNodeKey) evidence.evidenceKind = "scheduler";
+  return appendScheduledEvidence(record, evidence);
+}
+
+export function scheduledTargetIdentity(
+  record,
+  {
+    successors = findNodeSuccessors,
+    node = readNode,
+    tombstone = readNodeTombstone,
+  } = {},
+) {
   const threadId = record?.delivery?.targetThreadId;
   if (!UUID_PATTERN.test(threadId || "")) return { state: "legacy" };
   const nodeKey = `codex:${threadId.toLowerCase()}`;
+  if (record.teamRecipientNodeKey) {
+    if (
+      record.teamRecipientNodeKey !== nodeKey ||
+      tombstone("codex", threadId) ||
+      node("codex", threadId)?.projectId !==
+        record.logicalMessage.teamCast?.projectId
+    ) {
+      return { state: "unavailable", nodeKey, errorCode: "ETARGETNODE" };
+    }
+  }
   const replacements = successors(nodeKey);
   if (replacements.length === 0) return { state: "current", nodeKey };
   return {
@@ -529,6 +590,7 @@ export async function dispatchScheduledDelivery(
   {
     now = () => Date.now(),
     session = readSessionRecord,
+    sessions = listSessionRecords,
     readThread = readThreadMetadata,
     deliver = deliverPeerMessageWhenIdle,
     triggerReadiness = scheduledTriggerReadiness,
@@ -539,16 +601,33 @@ export async function dispatchScheduledDelivery(
 ) {
   const messageId = record.logicalMessage.messageId;
   const delivery = record.delivery;
+  const targetNodeKey = record.teamRecipientNodeKey || null;
+  const resolveTarget = () => {
+    if (!targetNodeKey) {
+      const target = session(delivery.target);
+      return target
+        ? { target, allowResume: sessionAllowsAppServerResume(target) }
+        : null;
+    }
+    const matches = sessions()
+      .filter((candidate) => candidate.threadId === delivery.targetThreadId)
+      .sort((left, right) => left.name.localeCompare(right.name));
+    if (matches.length === 0) return null;
+    return {
+      target: matches[0],
+      allowResume: matches.every(sessionAllowsAppServerResume),
+    };
+  };
   const expiry = record.logicalMessage.route?.expiry
     ? Date.parse(record.logicalMessage.route.expiry)
     : null;
   if (expiry !== null && expiry <= now()) {
-    await appendDeliveryEvidence(messageId, {
+    await appendScheduledEvidence(record, {
       attemptId: null,
       state: "expired",
-      evidenceKind: "scheduler",
       errorCode: "EDELIVERYEXPIRED",
       observedAt: new Date(now()).toISOString(),
+      ...(!targetNodeKey ? { evidenceKind: "scheduler" } : {}),
     });
     await log({
       kind: "scheduled-delivery",
@@ -573,15 +652,16 @@ export async function dispatchScheduledDelivery(
     identity = { state: "unavailable" };
   }
   if (identity.state === "unavailable") {
+    const identityErrorCode = identity.errorCode || "ESUCCESSORUNAVAILABLE";
     await log({
       kind: "scheduled-delivery",
       phase: "target-identity",
       correlationId: messageId,
       target: delivery.target,
       outcome: "blocked",
-      errorCode: "ESUCCESSORUNAVAILABLE",
+      errorCode: identityErrorCode,
     });
-    return { state: "blocked", messageId, errorCode: "ESUCCESSORUNAVAILABLE" };
+    return { state: "blocked", messageId, errorCode: identityErrorCode };
   }
   if (identity.state === "predecessor") {
     await log({
@@ -595,24 +675,29 @@ export async function dispatchScheduledDelivery(
     return { state: "blocked", messageId, errorCode: "ETARGETPREDECESSOR" };
   }
 
-  const target = session(delivery.target);
+  const resolvedTarget = resolveTarget();
+  const target = resolvedTarget?.target || null;
   if (!target || target.threadId !== delivery.targetThreadId) {
     const error = new Error("scheduled Delivery target identity is unavailable");
     error.code = "ETARGETIDENTITY";
-    await markUnknown(messageId, error, now());
+    if (!targetNodeKey) await markUnknown(record, error, now());
     await log({
       kind: "scheduled-delivery",
       phase: "target",
       correlationId: messageId,
       target: delivery.target,
-      outcome: "unknown",
+      outcome: targetNodeKey ? "blocked" : "unknown",
       errorCode: error.code,
     });
-    return { state: "unknown", messageId, errorCode: error.code };
+    return {
+      state: targetNodeKey ? "blocked" : "unknown",
+      messageId,
+      errorCode: error.code,
+    };
   }
   const observed = await readThread(client, target.threadId);
   if (observed.status?.type === "active") return { state: "busy", messageId };
-  const allowResume = sessionAllowsAppServerResume(target);
+  const allowResume = resolvedTarget.allowResume;
   if (observed.status?.type === "notLoaded" && !allowResume) {
     return {
       state: "blocked",
@@ -623,6 +708,7 @@ export async function dispatchScheduledDelivery(
 
   const claimResult = await claimScheduledDelivery(messageId, {
     workerId,
+    targetNodeKey,
     leaseMs: SCHEDULER_CLAIM_LEASE_MS,
     now: new Date(now()).toISOString(),
   });
@@ -638,7 +724,7 @@ export async function dispatchScheduledDelivery(
 
   let attempt = null;
   try {
-    const currentTarget = session(delivery.target);
+    const currentTarget = resolveTarget()?.target || null;
     if (!currentTarget || currentTarget.threadId !== delivery.targetThreadId) {
       const error = new Error("scheduled Delivery target identity changed after claim");
       error.code = "ETARGETIDENTITY";
@@ -649,6 +735,7 @@ export async function dispatchScheduledDelivery(
       await releaseScheduledDeliveryClaim(messageId, {
         claimId: claimResult.claim.claimId,
         workerId,
+        targetNodeKey,
         reason: "dispatch_unavailable",
         now: new Date(now()).toISOString(),
       });
@@ -672,10 +759,11 @@ export async function dispatchScheduledDelivery(
       const identityErrorCode =
         currentIdentity.state === "predecessor"
           ? "ETARGETPREDECESSOR"
-          : "ESUCCESSORUNAVAILABLE";
+          : currentIdentity.errorCode || "ESUCCESSORUNAVAILABLE";
       await releaseScheduledDeliveryClaim(messageId, {
         claimId: claimResult.claim.claimId,
         workerId,
+        targetNodeKey,
         reason: "dispatch_unavailable",
         now: new Date(now()).toISOString(),
       });
@@ -727,24 +815,26 @@ export async function dispatchScheduledDelivery(
           await renewClaim(messageId, {
             claimId: claimResult.claim.claimId,
             workerId,
+            targetNodeKey,
             leaseMs: SCHEDULER_CLAIM_LEASE_MS,
             now: new Date(now()).toISOString(),
           });
           attempt = await beginScheduledDelivery(messageId, {
             claimId: claimResult.claim.claimId,
             workerId,
+            targetNodeKey,
             now: new Date(now()).toISOString(),
           });
         },
       },
     );
-    await appendDeliveryEvidence(messageId, {
+    await appendScheduledEvidence(record, {
       attemptId: attempt.attemptId,
       state: "turn_started",
-      evidenceKind: "dispatch-result",
       transportResult: result.delivery,
       turnId: result.turnId,
       observedAt: new Date(now()).toISOString(),
+      ...(!targetNodeKey ? { evidenceKind: "dispatch-result" } : {}),
     });
     await log({
       kind: "scheduled-delivery",
@@ -771,6 +861,7 @@ export async function dispatchScheduledDelivery(
       await releaseScheduledDeliveryClaim(messageId, {
         claimId: claimResult.claim.claimId,
         workerId,
+        targetNodeKey,
         reason: "target_busy",
         now: new Date(now()).toISOString(),
       });
@@ -784,13 +875,25 @@ export async function dispatchScheduledDelivery(
       });
       return { state: "busy", messageId };
     }
-    await appendDeliveryEvidence(messageId, {
-      attemptId: attempt?.attemptId || null,
-      state: "unknown",
-      evidenceKind: attempt ? "dispatch-result" : "scheduler",
-      errorCode: boundedErrorCode(error),
-      observedAt: new Date(now()).toISOString(),
-    });
+    if (targetNodeKey && !attempt) {
+      await releaseScheduledDeliveryClaim(messageId, {
+        claimId: claimResult.claim.claimId,
+        workerId,
+        targetNodeKey,
+        reason: "dispatch_unavailable",
+        now: new Date(now()).toISOString(),
+      });
+    } else {
+      await appendScheduledEvidence(record, {
+        attemptId: attempt?.attemptId || null,
+        state: "unknown",
+        errorCode: boundedErrorCode(error),
+        observedAt: new Date(now()).toISOString(),
+        ...(!targetNodeKey
+          ? { evidenceKind: attempt ? "dispatch-result" : "scheduler" }
+          : {}),
+      });
+    }
     await log({
       kind: "scheduled-delivery",
       phase: "dispatch",

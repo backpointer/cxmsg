@@ -208,8 +208,10 @@ model wake-ups and exact per-recipient evidence.
       a separate Claude Delivery Job.
 - [ ] Add explicit `wake-all` with per-recipient fallback and token-cost
       visibility.
-- [ ] Add `when-idle`, `after-turn`, and `after-job` per-recipient policies
-      without creating a second scheduling truth.
+- [x] Add an explicit Codex `when-idle` Busy fallback per recipient by reusing
+      the shared Delivery Ledger and Scheduler claim protocol.
+- [ ] Add `after-turn` and `after-job` per-recipient policies without creating
+      a second scheduling truth.
 - [ ] Add bounded digest-on-next-cxmsg-turn composition; never steer an
       external or unrelated Busy turn with a digest.
 

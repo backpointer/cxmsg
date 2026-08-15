@@ -76,6 +76,10 @@ they carry different authority and delivery semantics.
 - **Prepared Team Cast Delivery**: a recipient-specific entry committed with
   every sibling recipient in one Ledger batch after body persistence but before
   transport. Prepared state has no attempt, claim, receipt, or authority.
+- **Scheduled Team Cast Fallback**: an explicit Codex recipient transition from
+  `mention-wake`/`prepared` to `when-idle`/`scheduled`. It uses the shared
+  Delivery Ledger and Scheduler claim protocol, never a second Team queue, and
+  starts no attempt while the recipient is Busy.
 - **Team Cast Recipient Evidence**: one recipient's durable post-attempt state,
   independently `turn_started`, `transport_delivered`, `failed`, or `unknown`.
   `turn_started` is Codex App Server acceptance; `transport_delivered` is

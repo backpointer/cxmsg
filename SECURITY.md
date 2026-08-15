@@ -359,6 +359,16 @@ Claude `transport_delivered` records only native frame acceptance and a
 correlated Delivery Job ID; ACK, overload retry, model completion, reply, and
 task completion remain separate evidence.
 
+Busy fallback is opt-in per dispatch invocation. The default remains
+fail-before-attempt. With `--when-busy when-idle`, only an exact frozen Codex
+recipient may transition to `scheduled`; Claude recipients continue through
+their native transport rather than entering the Codex Scheduler. The fallback
+reuses the ordinary Delivery Ledger claim lease, target lane, lifecycle wake,
+body digest verification, successor rejection, and expiry handling. Scheduler
+restart rebuilds the same journal, and a Busy race releases the unused claim
+without creating an attempt. Node Tombstone, Project mismatch, or successor
+replacement blocks delivery rather than following a new identity.
+
 Codex App Server and the Claude Code session transport used by this project are
 version-sensitive integrations. Pin compatible client versions and retest after
 upgrades.

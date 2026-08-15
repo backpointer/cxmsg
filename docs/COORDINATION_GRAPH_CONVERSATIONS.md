@@ -794,6 +794,16 @@ thread are not identity ambiguity, but the sender must still resolve to exactly
 one usable Claude bridge. Scheduled busy fallback and wake-all remain separate
 gates.
 
+Version 0.38.0 adds the first scheduled Team policy without introducing another
+queue. An explicit `--when-busy when-idle` dispatch option transitions only
+Busy Codex recipients from `prepared` to `scheduled`; idle Codex and Claude
+siblings retain their normal transport path. The existing Scheduler flattens
+these recipient Deliveries into the same target lanes, then applies the same
+lease, lifecycle, body-integrity, exact-identity, and expiry gates. A Busy race
+releases the claim before any attempt, restart rebuilds the journal, and a
+terminal Team outcome clears the live claim. `after-turn`, `after-job`, and
+wake-all remain separate gates.
+
 ### Phase 7: Graph Projection and extended Doctor
 
 - derive filtered Project, Cluster, Conversation, reachability, history, and

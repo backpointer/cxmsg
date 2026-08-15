@@ -20,6 +20,7 @@ import {
   beginTeamCastRecipientDelivery,
   commitPreparedTeamCastDelivery,
   readDeliveryLedgerIndexed,
+  scheduleTeamCastRecipientDelivery,
 } from "./delivery-ledger.js";
 import { withFileLock } from "./file-lock.js";
 import { readGroupConversation } from "./group-conversations.js";
@@ -904,13 +905,28 @@ export async function dispatchPreparedTeamCastMessage(
       });
       continue;
     }
+    const context = contexts.get(delivery.targetNodeKey);
+    if (context?.scheduleWakePolicy === "when-idle") {
+      const scheduled = await scheduleTeamCastRecipientDelivery(
+        logicalMessageId,
+        delivery.targetNodeKey,
+        { now },
+      );
+      outcomes.push({
+        targetNodeKey: delivery.targetNodeKey,
+        status: "scheduled",
+        attempted: false,
+        scheduled: scheduled.scheduled,
+      });
+      continue;
+    }
     const begun = await beginTeamCastRecipientDelivery(
       logicalMessageId,
       delivery.targetNodeKey,
       {
         now,
         transport:
-          contexts.get(delivery.targetNodeKey)?.transport ||
+          context?.transport ||
           "codex-app-server",
       },
     );
@@ -925,7 +941,7 @@ export async function dispatchPreparedTeamCastMessage(
     let evidence;
     try {
       evidence = await dispatchRecipient({
-        context: contexts.get(delivery.targetNodeKey),
+        context,
         attemptId: begun.attempt.attemptId,
         targetNodeKey: delivery.targetNodeKey,
         targetThreadId: delivery.targetThreadId,
