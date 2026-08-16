@@ -353,8 +353,8 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap extension — Inbound Peer Message Policy
 
-- Status: SLICES 1-3 IMPLEMENTED; Slice 1 independent focused audit PASS;
-  public activation disabled
+- Status: SLICES 1-4 INTEGRATED; Slice 1 independent focused audit PASS;
+  cross-path review and public activation pending
 
 - [x] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
       privacy, authority, deduplication, fan-out, scheduling, and retention
@@ -374,8 +374,11 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Revalidate scheduled recipients after lease renewal, persist the exact
       continuing-policy snapshot on the attempt, and deny with zero attempts
       after claim recovery when current policy changed.
-- [ ] Integrate Group and Team fan-out, then activate the public CLI only after
-      the cross-path gate passes.
+- [x] Integrate Group store-only and Team Cast with per-recipient initial and
+      pre-dispatch policy evaluation, partial outcomes, all-denied no-body
+      behavior, and denied inbox suppression.
+- [ ] Independently review the complete cross-path gate, then expose owner-only
+      public mutation CLI and activate enforcement only if that review passes.
 - [ ] Add redacted trace, graph, and web projections only after core evidence
       is stable.
 

@@ -6,7 +6,7 @@ export const CXMSG_VERSION = JSON.parse(
 
 export const CXMSG_IMPLEMENTATION_REVISIONS = Object.freeze({
   cli: 5,
-  scheduler: 3,
+  scheduler: 4,
   hostRelay: 1,
   claudeBridge: 29,
 });

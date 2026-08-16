@@ -25,6 +25,11 @@ import {
 import { withFileLock } from "./file-lock.js";
 import { readGroupConversation } from "./group-conversations.js";
 import {
+  evaluateInboundPolicy,
+  INBOUND_POLICY_FEATURE_ACTIVE,
+  resolveInboundSenderIdentity,
+} from "./inbound-policy.js";
+import {
   MAX_STORED_MESSAGE_BYTES,
   readWholeMessageBody,
   storeMessageBody,
@@ -798,6 +803,10 @@ export async function prepareTeamCastMentionMessage(
   {
     bodyStore = storeMessageBody,
     ledgerCommit = commitPreparedTeamCastDelivery,
+    ledgerRead = readDeliveryLedgerIndexed,
+    policyEvaluator = INBOUND_POLICY_FEATURE_ACTIVE
+      ? evaluateInboundPolicy
+      : null,
   } = {},
 ) {
   selectionId = validateUuid("Team Cast selection id", selectionId);
@@ -850,10 +859,60 @@ export async function prepareTeamCastMentionMessage(
     for (const nodeKey of selection.recipientNodeKeys) {
       exactLiveNode(nodeKey, selection.projectId);
     }
-    const body = await bodyStore({
-      messageId: logicalMessageId,
-      body: message,
-    });
+    const messageSha256 = createHash("sha256").update(message).digest("hex");
+    const existingLedger = await ledgerRead(logicalMessageId);
+    if (existingLedger) {
+      if (
+        existingLedger.logicalMessage?.senderNodeKey !== senderNodeKey ||
+        existingLedger.logicalMessage?.body?.bytes !== messageBytes ||
+        existingLedger.logicalMessage?.body?.sha256 !== messageSha256 ||
+        existingLedger.logicalMessage?.teamCast?.selectionId !== selectionId
+      ) {
+        throw new Error(
+          `Team Cast message idempotency conflict: ${logicalMessageId}`,
+        );
+      }
+      return {
+        selection: publicTeamCastSelection(selection),
+        logicalMessageId,
+        body: {
+          bytes: existingLedger.logicalMessage.body.bytes,
+          sha256: existingLedger.logicalMessage.body.sha256,
+          contentRef: existingLedger.logicalMessage.body.contentRef,
+        },
+        ledger: existingLedger,
+        created: false,
+        deliveryStarted: false,
+      };
+    }
+    const policySenderIdentity = resolveInboundSenderIdentity(senderNodeKey);
+    const recipientPolicies = new Map(
+      selection.recipientNodeKeys.map((nodeKey) => {
+        const decision =
+          typeof policyEvaluator === "function"
+            ? policyEvaluator({
+                targetNodeKey: nodeKey,
+                senderIdentity: policySenderIdentity,
+              })
+            : null;
+        return [nodeKey, decision?.decision === "deny" ? decision : null];
+      }),
+    );
+    const hasAdmittedRecipient = [...recipientPolicies.values()].some(
+      (decision) => decision === null,
+    );
+    const preparedAt = new Date(now).toISOString();
+    const body = hasAdmittedRecipient
+      ? await bodyStore({
+          messageId: logicalMessageId,
+          body: message,
+        })
+      : {
+          contentRef: null,
+          bodyBytes: messageBytes,
+          bodySha256: messageSha256,
+          createdAt: preparedAt,
+        };
     if (Date.parse(selection.expiresAt) <= Date.parse(body.createdAt)) {
       throw new Error("Team Cast selection expired before body persistence");
     }
@@ -902,6 +961,9 @@ export async function prepareTeamCastMentionMessage(
         targetThreadId: nodeKey.startsWith("codex:")
           ? nodeKey.slice("codex:".length)
           : null,
+        ...(recipientPolicies.get(nodeKey)
+          ? { inboundPolicy: recipientPolicies.get(nodeKey) }
+          : {}),
       })),
       now: body.createdAt,
     });
@@ -927,6 +989,9 @@ export async function dispatchPreparedTeamCastMessage(
     dispatchRecipient,
     bodyRead = readWholeMessageBody,
     scheduleRecipient = scheduleTeamCastRecipientDelivery,
+    policyEvaluator = INBOUND_POLICY_FEATURE_ACTIVE
+      ? evaluateInboundPolicy
+      : null,
   },
 ) {
   logicalMessageId = validateUuid("logical message id", logicalMessageId);
@@ -961,16 +1026,22 @@ export async function dispatchPreparedTeamCastMessage(
       }),
     );
   }
-  const message = bodyRead(record.logicalMessage.body.contentRef);
-  if (
-    Buffer.byteLength(message, "utf8") !== record.logicalMessage.body.bytes ||
-    createHash("sha256").update(message).digest("hex") !==
-      record.logicalMessage.body.sha256
-  ) {
-    throw new Error("Team Cast Message Body conflicts with Ledger evidence");
+  let message = null;
+  if (pending.length > 0) {
+    message = bodyRead(record.logicalMessage.body.contentRef);
+    if (
+      Buffer.byteLength(message, "utf8") !== record.logicalMessage.body.bytes ||
+      createHash("sha256").update(message).digest("hex") !==
+        record.logicalMessage.body.sha256
+    ) {
+      throw new Error("Team Cast Message Body conflicts with Ledger evidence");
+    }
   }
 
   const outcomes = [];
+  const senderIdentity = resolveInboundSenderIdentity(
+    record.logicalMessage.senderNodeKey,
+  );
   for (const delivery of record.teamDeliveries) {
     if (delivery.state !== "prepared") {
       outcomes.push({
@@ -989,6 +1060,36 @@ export async function dispatchPreparedTeamCastMessage(
       continue;
     }
     const context = contexts.get(delivery.targetNodeKey);
+    const inbound =
+      typeof policyEvaluator === "function"
+        ? policyEvaluator({
+            targetNodeKey: delivery.targetNodeKey,
+            senderIdentity,
+          })
+        : null;
+    if (inbound?.decision === "deny") {
+      const denied = await appendTeamCastRecipientEvidence(
+        logicalMessageId,
+        delivery.targetNodeKey,
+        {
+          attemptId: null,
+          state: "policy_denied",
+          turnId: null,
+          transportResult: null,
+          errorCode: "EINBOUNDDENIED",
+          inboundPolicy: inbound,
+          observedAt: now,
+        },
+      );
+      record = denied.record;
+      outcomes.push({
+        targetNodeKey: delivery.targetNodeKey,
+        status: "policy_denied",
+        attempted: false,
+        errorCode: "EINBOUNDDENIED",
+      });
+      continue;
+    }
     if (
       ["when-idle", "after-turn", "after-job"].includes(
         context?.scheduleWakePolicy,
@@ -1030,6 +1131,9 @@ export async function dispatchPreparedTeamCastMessage(
         transport:
           context?.transport ||
           "codex-app-server",
+        ...(inbound?.decision === "continue"
+          ? { inboundPolicySnapshot: inbound }
+          : {}),
       },
     );
     if (!begun.created) {

@@ -578,18 +578,18 @@ async function markUnknown(record, error, now) {
 }
 
 function scheduledInboundDecision(record, evaluator) {
-  if (record.teamRecipientNodeKey || typeof evaluator !== "function") {
-    return null;
-  }
+  if (typeof evaluator !== "function") return null;
   const targetThreadId = record.delivery?.targetThreadId;
   if (!UUID_PATTERN.test(targetThreadId || "")) return null;
+  const targetNodeKey =
+    record.teamRecipientNodeKey || `codex:${targetThreadId.toLowerCase()}`;
   const senderNodeKey =
     record.logicalMessage?.senderNodeKey ||
     (record.logicalMessage?.senderThreadId
       ? `codex:${record.logicalMessage.senderThreadId.toLowerCase()}`
       : null);
   return evaluator({
-    targetNodeKey: `codex:${targetThreadId.toLowerCase()}`,
+    targetNodeKey,
     senderIdentity: resolveInboundSenderIdentity(senderNodeKey),
   });
 }

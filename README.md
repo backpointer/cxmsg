@@ -172,15 +172,18 @@ migration.
 
 Inbound Peer Message Policy v1 currently has an internal owner-private record
 Adapter, pure evaluator, schema inspection, Doctor foundation, and inactive
-direct, Explicit-Retry, and Scheduler integration. Injected integration tests
+direct, Explicit-Retry, Scheduler, Group, and Team integration. Injected tests
 prove that direct Codex sends, direct replies, Claude ordinary ingress, the one
 Explicit Retry, and scheduled work after lease renewal can produce metadata-only
 terminal denial with zero new attempt or wake. A continuing scheduled decision
 is stored as a closed snapshot on its actual attempt; an expired pre-attempt
 claim must evaluate current policy again. The cross-path feature gate remains
 off, so public policy mutation and message enforcement are deliberately
-unavailable until Group and Team paths also pass integration. If policy records
-appear before activation, Doctor reports
+unavailable until an independent cross-path review passes. Group and Team
+fan-out preserve one frozen recipient set with per-recipient outcomes; an
+all-denied new fan-out stores no Message Body, and denied Group recipients are
+absent from inbox and digest projections. If policy records appear before
+activation, Doctor reports
 `EINBOUNDPOLICYINACTIVE`; do not treat those records as enforced blocking.
 Removing the final internal rule removes its empty configuration record, while
 an invalid record requires exact file-digest confirmation to purge. Neither

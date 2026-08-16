@@ -14,8 +14,10 @@ process.env.CXMSG_STATE_DIR = stateDir;
 const directory = await import(`../src/node-directory.js?team=${Date.now()}`);
 const conversations = await import(`../src/conversations.js?team=${Date.now()}`);
 const groups = await import(`../src/group-conversations.js?team=${Date.now()}`);
+const inbound = await import(`../src/inbound-policy.js?team=${Date.now()}`);
 const registry = await import(`../src/registry.js?team=${Date.now()}`);
 const routes = await import(`../src/route-admission.js?team=${Date.now()}`);
+const scheduler = await import(`../src/scheduler.js?team=${Date.now()}`);
 const teams = await import(`../src/team-cast.js?team=${Date.now()}`);
 const bodies = await import(`../src/message-bodies.js?team=${Date.now()}`);
 const ledger = await import(`../src/delivery-ledger.js?team=${Date.now()}`);
@@ -63,6 +65,11 @@ const ids = {
   wakeAllWideSelection: "92345678-7234-4234-8234-123456789abc",
   afterTurnMessage: "a2345678-7234-4234-8234-123456789abc",
   afterTurnTrigger: "b2345678-7234-4234-8234-123456789abc",
+  mixedPolicyMessage: "c2345678-7234-4234-8234-123456789abc",
+  allDeniedPolicyMessage: "d2345678-7234-4234-8234-123456789abc",
+  inactivePolicyMessage: "e2345678-7234-4234-8234-123456789abc",
+  policyWorker: "f2345678-7234-4234-8234-123456789abc",
+  dispatchPolicyMessage: "03345678-8234-4234-8234-123456789abc",
 };
 const keys = Object.fromEntries(
   ["sender", "first", "second", "cross"].map((name) => [
@@ -968,6 +975,227 @@ test("one wake-all schedule failure stays visible without hiding siblings", asyn
       (delivery) => delivery.targetNodeKey === keys.first,
     ).state,
     "turn_started",
+  );
+});
+
+test("Team Cast policy denial preserves partial fan-out and all-denied stores no body", async () => {
+  await inbound.upsertInboundDenyRule({
+    targetNodeKey: keys.first,
+    selectorKind: "sender-node",
+    selectorValue: keys.sender,
+  });
+  const inactive = await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.fanoutSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.inactivePolicyMessage,
+    message: "inactive Team Cast policy pointer",
+  });
+  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, false);
+  assert.ok(
+    inactive.ledger.teamDeliveries.every(
+      (delivery) => delivery.admissionState === "admitted",
+    ),
+  );
+  await ledger.scheduleTeamCastRecipientDelivery(
+    ids.inactivePolicyMessage,
+    keys.first,
+    { wakePolicy: "when-idle" },
+  );
+  const scheduledRecord = await ledger.readDeliveryLedgerIndexed(
+    ids.inactivePolicyMessage,
+  );
+  const scheduledDelivery = scheduledRecord.teamDeliveries.find(
+    (delivery) => delivery.targetNodeKey === keys.first,
+  );
+  let scheduledTurnStarts = 0;
+  const scheduledOutcome = await scheduler.dispatchScheduledDelivery(
+    {
+      ...structuredClone(scheduledRecord),
+      delivery: structuredClone(scheduledDelivery),
+      teamRecipientNodeKey: keys.first,
+    },
+    {},
+    ids.policyWorker,
+    {
+      now: () => Date.now(),
+      sessions: () => [
+        { name: "first", threadId: ids.first, cwd: firstRoot },
+      ],
+      readThread: async () => ({
+        id: ids.first,
+        status: { type: "idle" },
+      }),
+      triggerReadiness: async () => ({ state: "eligible" }),
+      policyEvaluator: inbound.evaluateInboundPolicy,
+      deliver: async (_client, _thread, _payload, options) => {
+        await options.beforeStart();
+        scheduledTurnStarts += 1;
+        return { delivery: "started", turnId: ids.fanoutTurn };
+      },
+      log: async () => {},
+    },
+  );
+  assert.equal(scheduledOutcome.state, "policy_denied");
+  assert.equal(scheduledTurnStarts, 0);
+  const deniedScheduled = (
+    await ledger.readDeliveryLedgerIndexed(ids.inactivePolicyMessage)
+  ).teamDeliveries.find((delivery) => delivery.targetNodeKey === keys.first);
+  assert.equal(deniedScheduled.state, "policy_denied");
+  assert.equal(deniedScheduled.attempts.length, 0);
+  assert.equal(deniedScheduled.claim, null);
+  await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.fanoutSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.dispatchPolicyMessage,
+    message: "revalidate immediately before Team Cast dispatch",
+  });
+  const dispatchTargets = [];
+  const revalidated = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.dispatchPolicyMessage },
+    {
+      policyEvaluator: inbound.evaluateInboundPolicy,
+      preflightRecipient: async () => ({ transport: "codex-app-server" }),
+      dispatchRecipient: async ({ targetNodeKey }) => {
+        dispatchTargets.push(targetNodeKey);
+        return {
+          state: "turn_started",
+          turnId: ids.fanoutTurn,
+          transportResult: "started",
+          errorCode: null,
+        };
+      },
+    },
+  );
+  assert.deepEqual(dispatchTargets, [keys.second]);
+  assert.deepEqual(
+    revalidated.outcomes.map(({ targetNodeKey, status, attempted }) => ({
+      targetNodeKey,
+      status,
+      attempted,
+    })),
+    [
+      {
+        targetNodeKey: keys.first,
+        status: "policy_denied",
+        attempted: false,
+      },
+      {
+        targetNodeKey: keys.second,
+        status: "turn_started",
+        attempted: true,
+      },
+    ],
+  );
+  const mixed = await teams.prepareTeamCastMentionMessage(
+    {
+      selectionId: ids.fanoutSelection,
+      senderNodeKey: keys.sender,
+      logicalMessageId: ids.mixedPolicyMessage,
+      message: "mixed Team Cast policy pointer",
+    },
+    { policyEvaluator: inbound.evaluateInboundPolicy },
+  );
+  assert.match(mixed.body.contentRef, /^cxmsg-message:/);
+  assert.deepEqual(
+    mixed.ledger.teamDeliveries.map(
+      ({ targetNodeKey, admissionState, state }) => ({
+        targetNodeKey,
+        admissionState,
+        state,
+      }),
+    ),
+    [
+      {
+        targetNodeKey: keys.first,
+        admissionState: "denied",
+        state: "denied",
+      },
+      {
+        targetNodeKey: keys.second,
+        admissionState: "admitted",
+        state: "prepared",
+      },
+    ],
+  );
+  const preflighted = [];
+  const dispatched = [];
+  const mixedDispatch = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.mixedPolicyMessage },
+    {
+      preflightRecipient: async ({ targetNodeKey }) => {
+        preflighted.push(targetNodeKey);
+        return { transport: "codex-app-server" };
+      },
+      dispatchRecipient: async ({ targetNodeKey }) => {
+        dispatched.push(targetNodeKey);
+        return {
+          state: "turn_started",
+          turnId: ids.fanoutTurn,
+          transportResult: "started",
+          errorCode: null,
+        };
+      },
+    },
+  );
+  assert.deepEqual(preflighted, [keys.second]);
+  assert.deepEqual(dispatched, [keys.second]);
+  assert.deepEqual(
+    mixedDispatch.outcomes.map(({ targetNodeKey, status, attempted }) => ({
+      targetNodeKey,
+      status,
+      attempted,
+    })),
+    [
+      { targetNodeKey: keys.first, status: "denied", attempted: false },
+      { targetNodeKey: keys.second, status: "turn_started", attempted: true },
+    ],
+  );
+
+  await inbound.upsertInboundDenyRule({
+    targetNodeKey: keys.second,
+    selectorKind: "sender-node",
+    selectorValue: keys.sender,
+  });
+  let bodyWrites = 0;
+  const allDenied = await teams.prepareTeamCastMentionMessage(
+    {
+      selectionId: ids.fanoutSelection,
+      senderNodeKey: keys.sender,
+      logicalMessageId: ids.allDeniedPolicyMessage,
+      message: "metadata only denied Team Cast pointer",
+    },
+    {
+      policyEvaluator: inbound.evaluateInboundPolicy,
+      bodyStore: async () => {
+        bodyWrites += 1;
+        throw new Error("all-denied must not store a body");
+      },
+    },
+  );
+  assert.equal(bodyWrites, 0);
+  assert.equal(allDenied.body.contentRef, null);
+  assert.ok(
+    allDenied.ledger.teamDeliveries.every(
+      (delivery) =>
+        delivery.admissionState === "denied" &&
+        delivery.state === "denied" &&
+        delivery.attempts.length === 0,
+    ),
+  );
+  const deniedDispatch = await teams.dispatchPreparedTeamCastMessage(
+    { logicalMessageId: ids.allDeniedPolicyMessage },
+    {
+      preflightRecipient: async () =>
+        assert.fail("denied recipients must not preflight"),
+      dispatchRecipient: async () =>
+        assert.fail("denied recipients must not dispatch"),
+      bodyRead: () => assert.fail("all-denied must not read a body"),
+    },
+  );
+  assert.ok(
+    deniedDispatch.outcomes.every(
+      (outcome) => outcome.status === "denied" && !outcome.attempted,
+    ),
   );
 });
 

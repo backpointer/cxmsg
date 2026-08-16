@@ -18,7 +18,13 @@ import path from "node:path";
 import {
   commitStoreOnlyGroupDelivery,
   listDeliveryLedger,
+  readDeliveryLedgerIndexed,
 } from "./delivery-ledger.js";
+import {
+  evaluateInboundPolicy,
+  INBOUND_POLICY_FEATURE_ACTIVE,
+  resolveInboundSenderIdentity,
+} from "./inbound-policy.js";
 import {
   CONVERSATIONS_DIR,
   CONVERSATIONS_LOCK_PATH,
@@ -614,6 +620,10 @@ export async function storeOnlyGroupMessage({
 }, {
   bodyStore = storeMessageBody,
   ledgerCommit = commitStoreOnlyGroupDelivery,
+  ledgerRead = readDeliveryLedgerIndexed,
+  policyEvaluator = INBOUND_POLICY_FEATURE_ACTIVE
+    ? evaluateInboundPolicy
+    : null,
 } = {}) {
   conversationId = validateUuid("Group Conversation id", conversationId);
   senderNodeKey = normalizeNodeKey(senderNodeKey);
@@ -719,10 +729,52 @@ export async function storeOnlyGroupMessage({
         });
       }
 
-      const body = await bodyStore({
-        messageId: logicalMessageId,
-        body: message,
-      });
+      const existingLedger = await ledgerRead(logicalMessageId);
+      if (existingLedger) {
+        if (
+          existingLedger.logicalMessage?.body?.bytes !== bodyBytes ||
+          existingLedger.logicalMessage?.body?.sha256 !== bodySha256 ||
+          existingLedger.logicalMessage?.group?.conversationId !==
+            conversationId ||
+          JSON.stringify(
+            existingLedger.logicalMessage?.group?.recipientNodeKeys,
+          ) !== JSON.stringify(groupMessage.recipientNodeKeys)
+        ) {
+          throw new Error(
+            `Group message idempotency conflict: ${logicalMessageId}`,
+          );
+        }
+        persistGroupSummary(conversation);
+        return {
+          conversation: groupPublic(conversation, { members: true }),
+          message: structuredClone(groupMessage),
+          ledger: existingLedger,
+          created: false,
+        };
+      }
+      const senderIdentity = resolveInboundSenderIdentity(senderNodeKey);
+      const recipientPolicies = new Map(
+        groupMessage.recipientNodeKeys.map((nodeKey) => {
+          const decision =
+            typeof policyEvaluator === "function"
+              ? policyEvaluator({ targetNodeKey: nodeKey, senderIdentity })
+              : null;
+          return [nodeKey, decision?.decision === "deny" ? decision : null];
+        }),
+      );
+      const hasAdmittedRecipient = [...recipientPolicies.values()].some(
+        (decision) => decision === null,
+      );
+      const body = hasAdmittedRecipient
+        ? await bodyStore({
+            messageId: logicalMessageId,
+            body: message,
+          })
+        : {
+            contentRef: null,
+            bodyBytes,
+            bodySha256,
+          };
       const route = groupMessageRoute(groupMessage);
       const ledger = await ledgerCommit({
         logicalMessage: {
@@ -760,6 +812,9 @@ export async function storeOnlyGroupMessage({
           targetThreadId: nodeKey.startsWith("codex:")
             ? nodeKey.slice("codex:".length)
             : null,
+          ...(recipientPolicies.get(nodeKey)
+            ? { inboundPolicy: recipientPolicies.get(nodeKey) }
+            : {}),
         })),
         now: groupMessage.recordedAt,
       });
@@ -944,6 +999,7 @@ function groupInboxEntries(nodeKey, includeAcknowledged = false) {
       const delivery = source?.groupDeliveries?.find(
         (candidate) => candidate.targetNodeKey === nodeKey,
       );
+      if (delivery?.admissionState !== "admitted") continue;
       entries.push({
         conversationId: conversation.conversationId,
         conversationLabel: conversation.label,
@@ -1071,6 +1127,12 @@ export async function consumeGroupInboxDigest({
       const cursor = readCursor(nodeKey);
       const cursors = { ...cursor.cursors };
       const selectedByConversation = new Map();
+      const ledgerByMessageId = new Map(
+        listDeliveryLedger().map((record) => [
+          record.logicalMessage.messageId,
+          record,
+        ]),
+      );
       for (const acknowledgement of acknowledgements) {
         if (
           !UUID_PATTERN.test(acknowledgement?.conversationId || "") ||
@@ -1088,7 +1150,16 @@ export async function consumeGroupInboxDigest({
             candidate.sequence === acknowledgement.sequence &&
             candidate.logicalMessageId === acknowledgement.logicalMessageId,
         );
-        if (!message?.recipientNodeKeys.includes(nodeKey)) {
+        const source = message
+          ? ledgerByMessageId.get(message.logicalMessageId)
+          : null;
+        const delivery = source?.groupDeliveries?.find(
+          (candidate) => candidate.targetNodeKey === nodeKey,
+        );
+        if (
+          !message?.recipientNodeKeys.includes(nodeKey) ||
+          delivery?.admissionState !== "admitted"
+        ) {
           throw new Error("Group inbox digest acknowledgement does not belong to this Node");
         }
         const selected = selectedByConversation.get(conversation.conversationId) || [];
@@ -1106,6 +1177,11 @@ export async function consumeGroupInboxDigest({
             message.sequence > prior &&
             message.sequence <= next &&
             message.recipientNodeKeys.includes(nodeKey) &&
+            ledgerByMessageId
+              .get(message.logicalMessageId)
+              ?.groupDeliveries?.find(
+                (candidate) => candidate.targetNodeKey === nodeKey,
+              )?.admissionState === "admitted" &&
             !sequences.includes(message.sequence),
         );
         if (omitted) {
@@ -1155,7 +1231,19 @@ export async function acknowledgeGroupInbox({
       const message = conversation?.messages.find(
         (candidate) => candidate.sequence === sequence,
       );
-      if (!message?.recipientNodeKeys.includes(nodeKey)) {
+      const source = message
+        ? listDeliveryLedger().find(
+            (record) =>
+              record.logicalMessage.messageId === message.logicalMessageId,
+          )
+        : null;
+      const delivery = source?.groupDeliveries?.find(
+        (candidate) => candidate.targetNodeKey === nodeKey,
+      );
+      if (
+        !message?.recipientNodeKeys.includes(nodeKey) ||
+        delivery?.admissionState !== "admitted"
+      ) {
         throw new Error("Group inbox entry does not belong to this Node");
       }
       const cursor = readCursor(nodeKey);

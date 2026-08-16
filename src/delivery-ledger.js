@@ -339,6 +339,62 @@ function validConversationProjection(message) {
   );
 }
 
+function validFanoutTarget(delivery) {
+  const targetIdentity = NODE_KEY_PATTERN.exec(delivery?.targetNodeKey || "");
+  return Boolean(
+    targetIdentity &&
+      delivery.target === delivery.targetNodeKey &&
+      (targetIdentity[1].toLowerCase() === "codex"
+        ? delivery.targetThreadId?.toLowerCase() ===
+          targetIdentity[2].toLowerCase()
+        : delivery.targetThreadId === null),
+  );
+}
+
+function validFanoutDenial(delivery, message, wakePolicy) {
+  return Boolean(
+    UUID_PATTERN.test(delivery?.deliveryId || "") &&
+      validFanoutTarget(delivery) &&
+      delivery.replyHandle === null &&
+      delivery.admissionState === "denied" &&
+      delivery.admissionReason === "inbound_policy" &&
+      delivery.wakePolicy === wakePolicy &&
+      delivery.state === "denied" &&
+      validTimestamp(delivery.createdAt) &&
+      delivery.updatedAt === delivery.createdAt &&
+      [null, `cxmsg-message:${message.messageId}`].includes(
+        message.body.contentRef,
+      ) &&
+      validInboundPolicyDenial(delivery.inboundPolicy) &&
+      Object.keys(delivery).every((field) =>
+        [
+          "deliveryId",
+          "target",
+          "targetNodeKey",
+          "targetThreadId",
+          "replyHandle",
+          "admissionState",
+          "admissionReason",
+          "inboundPolicy",
+          "wakePolicy",
+          "state",
+          "createdAt",
+          "updatedAt",
+        ].includes(field),
+      ),
+  );
+}
+
+function validFanoutBodyRetention(deliveries, message) {
+  const hasAdmittedRecipient = deliveries.some(
+    (delivery) => delivery.admissionState === "admitted",
+  );
+  return (
+    message.body.contentRef ===
+    (hasAdmittedRecipient ? `cxmsg-message:${message.messageId}` : null)
+  );
+}
+
 function validInitialDelivery(delivery, message, { storeOnly = false } = {}) {
   const common = Boolean(
     UUID_PATTERN.test(delivery?.deliveryId || "") &&
@@ -358,6 +414,9 @@ function validInitialDelivery(delivery, message, { storeOnly = false } = {}) {
   );
   if (!common) return false;
   if (delivery.admissionState === "denied") {
+    if (storeOnly) {
+      return validFanoutDenial(delivery, message, "store-only");
+    }
     return Boolean(
       delivery.replyHandle === null &&
         delivery.state === "denied" &&
@@ -533,6 +592,13 @@ function validTeamCastEnvelope(teamCast, message) {
 }
 
 function validPreparedTeamDelivery(delivery, message) {
+  if (delivery?.admissionState === "denied") {
+    return validFanoutDenial(
+      delivery,
+      message,
+      message.teamCast.wakePolicy,
+    );
+  }
   const targetIdentity = NODE_KEY_PATTERN.exec(delivery?.targetNodeKey || "");
   return Boolean(
     targetIdentity &&
@@ -613,10 +679,13 @@ function validBatch(record) {
     ) {
       return false;
     }
-    return deliveries.every(
+    return Boolean(
+      validFanoutBodyRetention(deliveries, message) &&
+      deliveries.every(
       (delivery, index) =>
         delivery.targetNodeKey === group.recipientNodeKeys[index] &&
         validInitialDelivery(delivery, message, { storeOnly: true }),
+      )
     );
   }
   if (
@@ -627,10 +696,13 @@ function validBatch(record) {
   ) {
     return false;
   }
-  return deliveries.every(
-    (delivery, index) =>
-      delivery.targetNodeKey === teamCast.recipientNodeKeys[index] &&
-      validPreparedTeamDelivery(delivery, message),
+  return Boolean(
+    validFanoutBodyRetention(deliveries, message) &&
+    deliveries.every(
+      (delivery, index) =>
+        delivery.targetNodeKey === teamCast.recipientNodeKeys[index] &&
+        validPreparedTeamDelivery(delivery, message),
+    ),
   );
 }
 
@@ -831,6 +903,7 @@ function validTeamEvidence(record) {
       "failed",
       "unknown",
       "expired",
+      "policy_denied",
     ].includes(record.state) ||
     !validTimestamp(record.observedAt) ||
     (record.turnId !== null && !UUID_PATTERN.test(record.turnId || "")) ||
@@ -842,6 +915,16 @@ function validTeamEvidence(record) {
   ) {
     return false;
   }
+  if (record.state === "policy_denied") {
+    return Boolean(
+      record.attemptId === null &&
+        record.turnId === null &&
+        record.transportResult === null &&
+        record.errorCode === "EINBOUNDDENIED" &&
+        validInboundPolicyDenial(record.inboundPolicy),
+    );
+  }
+  if (record.inboundPolicy !== undefined) return false;
   if (record.state === "turn_started") {
     return Boolean(
       record.attemptId !== null &&
@@ -1096,6 +1179,7 @@ function indexProjectionDigest(projection) {
 function validTeamDeliveryProjection(candidate, messageId, initialWakePolicy) {
   if (
     ![
+      "denied",
       "prepared",
       "scheduled",
       "turn_started",
@@ -1103,6 +1187,7 @@ function validTeamDeliveryProjection(candidate, messageId, initialWakePolicy) {
       "failed",
       "unknown",
       "expired",
+      "policy_denied",
     ].includes(candidate.state) ||
     !Array.isArray(candidate.attempts) ||
     candidate.attempts.length > 1 ||
@@ -1113,6 +1198,18 @@ function validTeamDeliveryProjection(candidate, messageId, initialWakePolicy) {
     !validTimestamp(candidate.updatedAt)
   ) {
     return false;
+  }
+  if (candidate.admissionState === "denied") {
+    return Boolean(
+      candidate.state === "denied" &&
+        candidate.wakePolicy === initialWakePolicy &&
+        candidate.attempts.length === 0 &&
+        candidate.evidence.length === 0 &&
+        candidate.claim === null &&
+        candidate.claimCount === 0 &&
+        candidate.schedule === null &&
+        candidate.updatedAt === candidate.createdAt
+    );
   }
   const scheduled = candidate.schedule != null;
   if (
@@ -1162,9 +1259,11 @@ function validTeamDeliveryProjection(candidate, messageId, initialWakePolicy) {
         evidence.messageId !== messageId ||
         evidence.deliveryId !== candidate.deliveryId ||
         (evidence.attemptId === null
-          ? evidence.state !== "expired" ||
-            !scheduled ||
-            candidate.attempts.length !== 0
+          ? (evidence.state === "expired" &&
+              (!scheduled || candidate.attempts.length !== 0)) ||
+            (evidence.state === "policy_denied" &&
+              candidate.attempts.length !== 0) ||
+            !["expired", "policy_denied"].includes(evidence.state)
           : !candidate.attempts.some(
               (attempt) => attempt.attemptId === evidence.attemptId,
             )),
@@ -1231,7 +1330,8 @@ function validIndexProjection(projection, messageId) {
           ...initial
         } = candidate;
         initial.wakePolicy = projection.logicalMessage.teamCast.wakePolicy;
-        initial.state = "prepared";
+        initial.state =
+          initial.admissionState === "denied" ? "denied" : "prepared";
         initial.updatedAt = initial.createdAt;
         return initial;
       }),
@@ -1272,7 +1372,8 @@ function validIndexProjection(projection, messageId) {
           errorCode,
           ...initial
         } = candidate;
-        initial.state = "scheduled";
+        initial.state =
+          initial.admissionState === "denied" ? "denied" : "scheduled";
         initial.updatedAt = initial.createdAt;
         return initial;
       }),
@@ -1281,7 +1382,7 @@ function validIndexProjection(projection, messageId) {
       validBatch(baseBatch) &&
         projection.groupDeliveries.every(
           (candidate) =>
-            ["scheduled", "failed", "expired", "cancelled"].includes(
+            ["denied", "scheduled", "failed", "expired", "cancelled"].includes(
               candidate.state,
             ) &&
             candidate.wakePolicy === "store-only" &&
@@ -1296,8 +1397,12 @@ function validIndexProjection(projection, messageId) {
             ) &&
             candidate.claim === null &&
             candidate.claimCount === 0 &&
-            (candidate.evidence.length === 0
-              ? candidate.state === "scheduled" &&
+            (candidate.admissionState === "denied"
+              ? candidate.state === "denied" &&
+                candidate.evidence.length === 0 &&
+                candidate.updatedAt === candidate.createdAt
+              : candidate.evidence.length === 0
+                ? candidate.state === "scheduled" &&
                 candidate.updatedAt === candidate.createdAt
               : candidate.evidence.length === 1 &&
                 candidate.state === candidate.evidence[0].state &&
@@ -1603,7 +1708,7 @@ function reservedEvidenceBytes(messages) {
       records += message.teamDeliveries.reduce(
         (count, delivery) =>
           count +
-          (["turn_started", "transport_delivered", "failed", "expired"].includes(
+          (["denied", "turn_started", "transport_delivered", "failed", "expired", "policy_denied"].includes(
             delivery.state,
           )
             ? 0
@@ -1798,6 +1903,14 @@ function applyDeliveryEvent(projected, record) {
         delivery.state === "scheduled" &&
         delivery.attempts.length === 0 &&
         delivery.claim === null;
+      const policyDenied =
+        record.state === "policy_denied" &&
+        record.attemptId === null &&
+        delivery.attempts.length === 0 &&
+        ((delivery.state === "prepared" && delivery.claim === null) ||
+          (SCHEDULED_WAKE_POLICIES.includes(delivery.wakePolicy) &&
+            delivery.state === "scheduled" &&
+            delivery.claim !== null));
       const attempted =
         record.attemptId !== null &&
         ["prepared", "scheduled"].includes(delivery.state) &&
@@ -1805,7 +1918,7 @@ function applyDeliveryEvent(projected, record) {
         attempt?.attemptId === record.attemptId;
       if (
         !validTeamEvidence(record) ||
-        (!expiry && !attempted) ||
+        (!expiry && !policyDenied && !attempted) ||
         (record.state === "turn_started" &&
           attempt.transport !== "codex-app-server") ||
         (record.state === "transport_delivered" &&
@@ -2423,7 +2536,11 @@ export async function commitStoreOnlyGroupDelivery(
     ) {
       throw new Error("Group Delivery recipient runtime identity is inconsistent");
     }
-    return { nodeKey, targetThreadId };
+    const inboundPolicy = recipient.inboundPolicy ?? null;
+    if (inboundPolicy !== null && !validInboundPolicyDenial(inboundPolicy)) {
+      throw new Error("Group Delivery recipient policy evidence is invalid");
+    }
+    return { nodeKey, targetThreadId, inboundPolicy };
   });
   if (
     JSON.stringify([...normalizedRecipients].sort((left, right) =>
@@ -2456,6 +2573,7 @@ export async function commitStoreOnlyGroupDelivery(
         (delivery) => ({
           nodeKey: delivery.targetNodeKey,
           targetThreadId: delivery.targetThreadId,
+          inboundPolicy: delivery.inboundPolicy ?? null,
         }),
       );
       if (
@@ -2480,10 +2598,15 @@ export async function commitStoreOnlyGroupDelivery(
         targetNodeKey: recipient.nodeKey,
         targetThreadId: recipient.targetThreadId,
         replyHandle: null,
-        admissionState: "admitted",
-        admissionReason: "group_membership",
+        admissionState: recipient.inboundPolicy ? "denied" : "admitted",
+        admissionReason: recipient.inboundPolicy
+          ? "inbound_policy"
+          : "group_membership",
+        ...(recipient.inboundPolicy
+          ? { inboundPolicy: structuredClone(recipient.inboundPolicy) }
+          : {}),
         wakePolicy: "store-only",
-        state: "scheduled",
+        state: recipient.inboundPolicy ? "denied" : "scheduled",
         createdAt: now,
         updatedAt: now,
       })),
@@ -2546,7 +2669,11 @@ export async function commitPreparedTeamCastDelivery(
         "Team Cast Delivery recipient runtime identity is inconsistent",
       );
     }
-    return { nodeKey, targetThreadId };
+    const inboundPolicy = recipient.inboundPolicy ?? null;
+    if (inboundPolicy !== null && !validInboundPolicyDenial(inboundPolicy)) {
+      throw new Error("Team Cast recipient policy evidence is invalid");
+    }
+    return { nodeKey, targetThreadId, inboundPolicy };
   });
   if (
     JSON.stringify(
@@ -2573,6 +2700,7 @@ export async function commitPreparedTeamCastDelivery(
         (delivery) => ({
           nodeKey: delivery.targetNodeKey,
           targetThreadId: delivery.targetThreadId,
+          inboundPolicy: delivery.inboundPolicy ?? null,
         }),
       );
       if (
@@ -2597,10 +2725,15 @@ export async function commitPreparedTeamCastDelivery(
         targetNodeKey: recipient.nodeKey,
         targetThreadId: recipient.targetThreadId,
         replyHandle: null,
-        admissionState: "admitted",
-        admissionReason: "team_cast_plan",
+        admissionState: recipient.inboundPolicy ? "denied" : "admitted",
+        admissionReason: recipient.inboundPolicy
+          ? "inbound_policy"
+          : "team_cast_plan",
+        ...(recipient.inboundPolicy
+          ? { inboundPolicy: structuredClone(recipient.inboundPolicy) }
+          : {}),
         wakePolicy: logicalMessage.teamCast.wakePolicy,
-        state: "prepared",
+        state: recipient.inboundPolicy ? "denied" : "prepared",
         createdAt: now,
         updatedAt: now,
       })),
@@ -2688,6 +2821,7 @@ export async function beginTeamCastRecipientDelivery(
   {
     now = new Date().toISOString(),
     transport = "codex-app-server",
+    inboundPolicySnapshot = undefined,
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
     segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
   } = {},
@@ -2733,6 +2867,9 @@ export async function beginTeamCastRecipientDelivery(
       deliveryId: delivery.deliveryId,
       attemptId: randomUUID(),
       claimId: null,
+      ...(inboundPolicySnapshot
+        ? { inboundPolicySnapshot: structuredClone(inboundPolicySnapshot) }
+        : {}),
       transport,
       startedAt: now,
     };
@@ -2850,6 +2987,7 @@ export async function appendTeamCastRecipientEvidence(
     turnId = null,
     transportResult = null,
     errorCode = null,
+    inboundPolicy = undefined,
     observedAt = new Date().toISOString(),
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
     segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
@@ -2878,6 +3016,7 @@ export async function appendTeamCastRecipientEvidence(
       turnId,
       transportResult,
       errorCode,
+      ...(inboundPolicy ? { inboundPolicy: structuredClone(inboundPolicy) } : {}),
       observedAt,
     };
     if (!validTeamEvidence(event)) {

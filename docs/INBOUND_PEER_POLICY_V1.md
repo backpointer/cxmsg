@@ -1,7 +1,8 @@
 # Inbound Peer Message Policy v1
 
-Status: Slices 1 through 3 implemented behind the inactive cross-path feature
-gate; Group, Team, and public mutation remain unavailable
+Status: Slices 1 through 4 integrated behind the inactive cross-path feature
+gate; independent cross-path review and public mutation/activation remain
+unavailable
 
 ## Purpose
 
@@ -108,6 +109,16 @@ decision becomes an actual attempt. A matching deny instead records terminal
 retained body, and consumes zero attempts. Expired pre-attempt claims do not
 carry policy authority: a replacement worker must evaluate current policy
 again.
+
+Group and Team fan-out evaluate the frozen recipient set independently. One
+recipient denial never changes sibling delivery or collapses a mixed outcome.
+An all-denied new fan-out commits metadata-only recipient evidence without
+writing a Message Body. A mixed fan-out retains one owner-private body for its
+admitted recipients, while denied Group recipients are absent from inbox and
+digest projections. Team Cast evaluates at preparation and again immediately
+before each direct attempt; scheduled Team recipients use the Scheduler
+revalidation rule above. A body retained before a later policy change is not
+deleted, but the newly denied recipient receives no attempt or context.
 
 The following are not ordinary Peer Message admission and remain governed by
 their existing separate contracts:
@@ -274,9 +285,10 @@ create a policy that only some paths enforce:
    Retry evaluation, and both initial and post-admission denial evidence;
 3. Scheduler revalidation, policy snapshot evidence, and crash/idempotency
    tests;
-4. Group store-only and Team Cast per-recipient integration, then public CLI
-   mutation and feature activation only after the cross-path gate passes;
-5. trace, graph, and web redacted projections.
+4. Group store-only and Team Cast per-recipient integration;
+5. independent cross-path review, then public CLI mutation and feature
+   activation only after the gate passes;
+6. trace, graph, and web redacted projections.
 
 Intermediate slices are internal foundations, not partial feature completion.
 Doctor must report any integration gap. No release may expose policy mutation

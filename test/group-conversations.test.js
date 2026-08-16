@@ -12,6 +12,7 @@ process.env.CXMSG_STATE_DIR = stateDir;
 
 const directory = await import(`../src/node-directory.js?groups=${Date.now()}`);
 const groups = await import(`../src/group-conversations.js?groups=${Date.now()}`);
+const inbound = await import(`../src/inbound-policy.js?groups=${Date.now()}`);
 const ledger = await import(`../src/delivery-ledger.js?groups=${Date.now()}`);
 const scheduler = await import(`../src/scheduler.js?groups=${Date.now()}`);
 const messaging = await import(`../src/messaging.js?groups=${Date.now()}`);
@@ -36,6 +37,10 @@ const ids = {
   replyMessage: "81345678-4234-4234-8234-123456789abc",
   crashMessage: "91345678-4234-4234-8234-123456789abc",
   cliMessage: "a1345678-4234-4234-8234-123456789abc",
+  policyConversation: "b1345678-4234-4234-8234-123456789abc",
+  mixedPolicyMessage: "c1345678-4234-4234-8234-123456789abc",
+  allDeniedMessage: "d1345678-4234-4234-8234-123456789abc",
+  inactivePolicyMessage: "e1345678-4234-4234-8234-123456789abc",
 };
 const nodeKeys = {
   first: `codex:${ids.first}`,
@@ -233,6 +238,12 @@ test("a failed Ledger commit is recoverable without a second sequence", async ()
   );
   assert.ok(prepared);
   assert.equal(ledger.readDeliveryLedger(ids.crashMessage), null);
+  assert.equal(
+    groups
+      .listGroupInbox(nodeKeys.second, { includeAcknowledged: true })
+      .some((entry) => entry.logicalMessageId === ids.crashMessage),
+    false,
+  );
   const interrupted = await recent.listRecentConversations(nodeKeys.first, {
     kind: "group",
   });
@@ -484,5 +495,125 @@ test("Group Conversation state is owner-private", () => {
     for (const name of readdirSync(directory)) {
       assert.equal(lstatSync(path.join(directory, name)).mode & 0o077, 0);
     }
+  }
+});
+
+test("Group policy denial is recipient-local and all-denied stores no body", async () => {
+  await groups.ensureGroupConversation({
+    conversationId: ids.policyConversation,
+    label: "policy-review-team",
+    members: [nodeKeys.first, nodeKeys.second, nodeKeys.third],
+  });
+  await inbound.upsertInboundDenyRule({
+    targetNodeKey: nodeKeys.second,
+    selectorKind: "sender-node",
+    selectorValue: nodeKeys.first,
+  });
+  const expiry = new Date(Date.now() + 60_000).toISOString();
+  const inactive = await groups.storeOnlyGroupMessage({
+    conversationId: ids.policyConversation,
+    senderNodeKey: nodeKeys.first,
+    message: "inactive Group policy context",
+    logicalMessageId: ids.inactivePolicyMessage,
+    expiry,
+  });
+  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, false);
+  assert.ok(
+    inactive.ledger.groupDeliveries.every(
+      (delivery) => delivery.admissionState === "admitted",
+    ),
+  );
+  const mixed = await groups.storeOnlyGroupMessage(
+    {
+      conversationId: ids.policyConversation,
+      senderNodeKey: nodeKeys.first,
+      message: "mixed recipient policy context",
+      logicalMessageId: ids.mixedPolicyMessage,
+      expiry,
+    },
+    { policyEvaluator: inbound.evaluateInboundPolicy },
+  );
+  assert.match(mixed.ledger.logicalMessage.body.contentRef, /^cxmsg-message:/);
+  assert.deepEqual(
+    mixed.ledger.groupDeliveries.map(
+      ({ targetNodeKey, admissionState, state }) => ({
+        targetNodeKey,
+        admissionState,
+        state,
+      }),
+    ),
+    [
+      {
+        targetNodeKey: nodeKeys.second,
+        admissionState: "denied",
+        state: "denied",
+      },
+      {
+        targetNodeKey: nodeKeys.third,
+        admissionState: "admitted",
+        state: "scheduled",
+      },
+    ].sort((left, right) =>
+      left.targetNodeKey.localeCompare(right.targetNodeKey),
+    ),
+  );
+  assert.equal(
+    groups
+      .listGroupInbox(nodeKeys.second, { includeAcknowledged: true })
+      .some((entry) => entry.logicalMessageId === ids.mixedPolicyMessage),
+    false,
+  );
+  assert.equal(
+    groups
+      .listGroupInbox(nodeKeys.third, { includeAcknowledged: true })
+      .some((entry) => entry.logicalMessageId === ids.mixedPolicyMessage),
+    true,
+  );
+
+  await inbound.upsertInboundDenyRule({
+    targetNodeKey: nodeKeys.third,
+    selectorKind: "sender-node",
+    selectorValue: nodeKeys.first,
+  });
+  let bodyWrites = 0;
+  const allDenied = await groups.storeOnlyGroupMessage(
+    {
+      conversationId: ids.policyConversation,
+      senderNodeKey: nodeKeys.first,
+      message: "metadata only denied group context",
+      logicalMessageId: ids.allDeniedMessage,
+      expiry,
+    },
+    {
+      policyEvaluator: inbound.evaluateInboundPolicy,
+      bodyStore: async () => {
+        bodyWrites += 1;
+        throw new Error("all-denied must not store a body");
+      },
+    },
+  );
+  assert.equal(bodyWrites, 0);
+  assert.equal(allDenied.ledger.logicalMessage.body.contentRef, null);
+  assert.ok(
+    allDenied.ledger.groupDeliveries.every(
+      (delivery) =>
+        delivery.admissionState === "denied" &&
+        delivery.state === "denied" &&
+        delivery.attempts.length === 0,
+    ),
+  );
+  await ledger.rebuildDeliveryLedgerIndex();
+  assert.ok(
+    (
+      await ledger.readDeliveryLedgerIndexed(ids.allDeniedMessage)
+    ).groupDeliveries.every((delivery) => delivery.state === "denied"),
+  );
+  for (const nodeKey of [nodeKeys.second, nodeKeys.third]) {
+    assert.equal(
+      groups
+        .listGroupInbox(nodeKey, { includeAcknowledged: true })
+        .some((entry) => entry.logicalMessageId === ids.allDeniedMessage),
+      false,
+    );
   }
 });
