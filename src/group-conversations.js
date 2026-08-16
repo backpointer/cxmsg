@@ -765,6 +765,9 @@ export async function storeOnlyGroupMessage({
       const hasAdmittedRecipient = [...recipientPolicies.values()].some(
         (decision) => decision === null,
       );
+      const hasDeniedRecipient = [...recipientPolicies.values()].some(
+        (decision) => decision !== null,
+      );
       const body = hasAdmittedRecipient
         ? await bodyStore({
             messageId: logicalMessageId,
@@ -784,6 +787,13 @@ export async function storeOnlyGroupMessage({
             ? senderNodeKey.slice("codex:".length)
             : null,
           senderNodeKey,
+          ...(hasDeniedRecipient
+            ? {
+                senderIdentitySha256: createHash("sha256")
+                  .update(senderNodeKey)
+                  .digest("hex"),
+              }
+            : {}),
           ...(replyToMessageId ? { replyToMessageId } : {}),
           body: {
             messageId: logicalMessageId,

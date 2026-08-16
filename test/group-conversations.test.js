@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -17,6 +17,7 @@ const ledger = await import(`../src/delivery-ledger.js?groups=${Date.now()}`);
 const scheduler = await import(`../src/scheduler.js?groups=${Date.now()}`);
 const messaging = await import(`../src/messaging.js?groups=${Date.now()}`);
 const recent = await import(`../src/recent-conversations.js?groups=${Date.now()}`);
+const inspectors = await import(`../src/inspectors.js?groups=${Date.now()}`);
 const cxmsgPath = path.resolve("bin/cxmsg.js");
 
 function cxmsg(...args) {
@@ -534,6 +535,10 @@ test("Group policy denial is recipient-local and all-denied stores no body", asy
     { policyEvaluator: inbound.evaluateInboundPolicy },
   );
   assert.match(mixed.ledger.logicalMessage.body.contentRef, /^cxmsg-message:/);
+  assert.equal(
+    mixed.ledger.logicalMessage.senderIdentitySha256,
+    createHash("sha256").update(nodeKeys.first).digest("hex"),
+  );
   assert.deepEqual(
     mixed.ledger.groupDeliveries.map(
       ({ targetNodeKey, admissionState, state }) => ({
@@ -594,6 +599,10 @@ test("Group policy denial is recipient-local and all-denied stores no body", asy
   );
   assert.equal(bodyWrites, 0);
   assert.equal(allDenied.ledger.logicalMessage.body.contentRef, null);
+  assert.equal(
+    allDenied.ledger.logicalMessage.senderIdentitySha256,
+    createHash("sha256").update(nodeKeys.first).digest("hex"),
+  );
   assert.ok(
     allDenied.ledger.groupDeliveries.every(
       (delivery) =>
@@ -616,4 +625,18 @@ test("Group policy denial is recipient-local and all-denied stores no body", asy
       false,
     );
   }
+  await assert.rejects(
+    ledger.appendStoreOnlyGroupDeliveryEvidence(ids.allDeniedMessage, {
+      targetNodeKey: nodeKeys.second,
+      state: "expired",
+      errorCode: "EDELIVERYEXPIRED",
+    }),
+    /already has terminal evidence/,
+  );
+  const inactiveEvidence = inspectors
+    .inspectRouteState({ stateDir, sessions: [] })
+    .find((check) => check.id === "inbound-policies.inactive-evidence");
+  assert.equal(inactiveEvidence.status, "fail");
+  assert.equal(inactiveEvidence.errorCode, "EINBOUNDPOLICYBYPASS");
+  assert.doesNotMatch(JSON.stringify(inactiveEvidence), /31345678-4234/);
 });

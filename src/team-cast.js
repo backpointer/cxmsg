@@ -901,6 +901,9 @@ export async function prepareTeamCastMentionMessage(
     const hasAdmittedRecipient = [...recipientPolicies.values()].some(
       (decision) => decision === null,
     );
+    const hasDeniedRecipient = [...recipientPolicies.values()].some(
+      (decision) => decision !== null,
+    );
     const preparedAt = new Date(now).toISOString();
     const body = hasAdmittedRecipient
       ? await bodyStore({
@@ -932,6 +935,13 @@ export async function prepareTeamCastMentionMessage(
         ? senderIdentity.nativeId
         : null,
       senderNodeKey,
+      ...(hasDeniedRecipient
+        ? {
+            senderIdentitySha256: createHash("sha256")
+              .update(senderNodeKey)
+              .digest("hex"),
+          }
+        : {}),
       body: {
         messageId: logicalMessageId,
         bytes: body.bodyBytes,

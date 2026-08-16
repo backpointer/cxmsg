@@ -3218,6 +3218,41 @@ export function inspectRouteState({
     ...quarantine.checks,
     ...scheduleSuccessors.checks,
   ];
+  const inboundPolicyEvidenceCount = Array.isArray(ledger.projections)
+    ? ledger.projections.filter((record) => {
+        const deliveries = [
+          record.delivery,
+          ...(record.groupDeliveries || []),
+          ...(record.teamDeliveries || []),
+        ].filter(Boolean);
+        return deliveries.some(
+          (delivery) =>
+            delivery.admissionState === "denied" ||
+            delivery.inboundPolicy ||
+            delivery.attempts?.some(
+              (attempt) => attempt.inboundPolicySnapshot,
+            ) ||
+            delivery.evidence?.some((evidence) => evidence.inboundPolicy),
+        );
+      }).length
+    : 0;
+  const inactiveEvidenceValid =
+    INBOUND_POLICY_FEATURE_ACTIVE || inboundPolicyEvidenceCount === 0;
+  checks.push(
+    diagnosticCheck({
+      id: "inbound-policies.inactive-evidence",
+      scope: "inbound-policies",
+      status: inactiveEvidenceValid ? "pass" : "fail",
+      summary: inactiveEvidenceValid
+        ? "The Inbound Policy feature gate and durable delivery evidence agree"
+        : "Durable Inbound Policy evidence exists while the feature gate is off",
+      verification: "records",
+      errorCode: inactiveEvidenceValid ? null : "EINBOUNDPOLICYBYPASS",
+      remediation: inactiveEvidenceValid
+        ? null
+        : "Do not treat staged policy evidence as active enforcement; inspect the writer that bypassed the shared feature gate",
+    }),
+  );
   const inTargetScope = (record) =>
     !target ||
     record.target === target ||

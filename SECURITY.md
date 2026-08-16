@@ -176,6 +176,15 @@ never be represented as effective enforcement.
 Policy configuration and denial evidence have separate lifetimes: removing an
 empty or exact-digest-confirmed invalid configuration record never removes
 Delivery Ledger evidence, retained bodies, tombstones, or audit events.
+Inbound Policy evaluation may be injected only by isolated tests while the
+shared feature gate is off. Doctor reports `EINBOUNDPOLICYBYPASS` if durable
+denial or evaluation evidence appears in that state. An initially denied batch
+must bind its evaluated sender identity through a SHA-256 digest.
+Stable Node keys and Project UUIDs are routing identities, not credentials.
+They may appear in owner-private Ledger evidence and explicit owner-local
+Delivery or Graph detail commands. Doctor summaries and coordination events
+use bounded codes or shortened digests and do not expose Message Bodies, full
+paths, endpoints, capability tokens, or credentials.
 
 New ordinary Codex deliveries use an owner-only append-only Delivery Ledger.
 The atomic batch contains redacted Logical Message metadata and one recipient

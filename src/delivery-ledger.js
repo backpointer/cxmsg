@@ -328,6 +328,23 @@ function validSenderIdentityDigest(message) {
   );
 }
 
+function validDeniedBatchSenderIdentityBinding(message, deliveries) {
+  const denied = deliveries.filter(
+    (delivery) => delivery?.admissionState === "denied",
+  );
+  if (denied.length === 0) return true;
+  if (!SHA256_PATTERN.test(message.senderIdentitySha256 || "")) return false;
+  const verifiedSenderNodeKeys = denied
+    .map((delivery) => delivery.inboundPolicy?.senderNodeKey)
+    .filter(Boolean);
+  if (verifiedSenderNodeKeys.length === 0) return true;
+  return (
+    new Set(verifiedSenderNodeKeys).size === 1 &&
+    message.senderIdentitySha256 ===
+      createHash("sha256").update(verifiedSenderNodeKeys[0]).digest("hex")
+  );
+}
+
 function validConversationProjection(message) {
   const conversationId = message.conversationId;
   const conversationSequence = message.conversationSequence;
@@ -566,6 +583,7 @@ function validTeamCastEnvelope(teamCast, message) {
           "from",
           "senderThreadId",
           "senderNodeKey",
+          "senderIdentitySha256",
           "body",
           "route",
           "routeFingerprint",
@@ -652,6 +670,7 @@ function validBatch(record) {
         UUID_PATTERN.test(message.senderThreadId || "")) &&
       validSenderNode(message) &&
       validSenderIdentityDigest(message) &&
+      validDeniedBatchSenderIdentityBinding(message, deliveries || []) &&
       validConversationProjection(message) &&
       (message.replyToMessageId === undefined ||
         (UUID_PATTERN.test(message.replyToMessageId || "") &&

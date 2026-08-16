@@ -142,6 +142,8 @@ deduplication:
 
 - Logical Message ID and immutable route/fingerprint digest;
 - sender and recipient stable Node keys when verified;
+- a SHA-256 binding of the evaluated sender identity on every initially denied
+  batch; a verified sender binding must equal the digest of its stable Node key;
 - matched selector kind and opaque rule ID;
 - Project UUID only when it was independently verified;
 - body byte count and SHA-256, but no content reference or body text;
@@ -294,6 +296,9 @@ Intermediate slices are internal foundations, not partial feature completion.
 Doctor must report any integration gap. No release may expose policy mutation
 or claim feature completion while an ordinary delivery path can bypass the
 policy silently.
+While the shared feature gate is off, explicitly injected evaluators are test
+adapters only. Durable policy evidence in that state is a Doctor failure with
+`EINBOUNDPOLICYBYPASS`; it cannot be described as effective enforcement.
 
 ## Acceptance tests
 
@@ -338,6 +343,10 @@ policy silently.
 29. Doctor reports recipient Successor policy gaps and never transfers policy.
 30. A tombstoned claimed sender does not match sender-Node policy and is
     classified as `sender_unverifiable`.
+31. An initially denied batch without the sender identity digest, or with a
+    digest inconsistent with its verified stable Node, is rejected.
+32. Durable policy evidence while the shared gate is off makes Doctor report
+    `EINBOUNDPOLICYBYPASS` without exposing stable identity values.
 
 ## Explicit v1 non-goals
 

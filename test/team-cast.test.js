@@ -1043,6 +1043,21 @@ test("Team Cast policy denial preserves partial fan-out and all-denied stores no
   assert.equal(deniedScheduled.state, "policy_denied");
   assert.equal(deniedScheduled.attempts.length, 0);
   assert.equal(deniedScheduled.claim, null);
+  assert.equal(deniedScheduled.evidence.length, 1);
+  await ledger.rebuildDeliveryLedgerIndex();
+  const rebuiltDeniedScheduled = (
+    await ledger.readDeliveryLedgerIndexed(ids.inactivePolicyMessage)
+  ).teamDeliveries.find((delivery) => delivery.targetNodeKey === keys.first);
+  assert.equal(rebuiltDeniedScheduled.state, "policy_denied");
+  assert.equal(rebuiltDeniedScheduled.attempts.length, 0);
+  assert.equal(rebuiltDeniedScheduled.evidence.length, 1);
+  await assert.rejects(
+    ledger.beginTeamCastRecipientDelivery(
+      ids.inactivePolicyMessage,
+      keys.first,
+    ),
+    /already terminal/,
+  );
   await teams.prepareTeamCastMentionMessage({
     selectionId: ids.fanoutSelection,
     senderNodeKey: keys.sender,
@@ -1096,6 +1111,10 @@ test("Team Cast policy denial preserves partial fan-out and all-denied stores no
     { policyEvaluator: inbound.evaluateInboundPolicy },
   );
   assert.match(mixed.body.contentRef, /^cxmsg-message:/);
+  assert.equal(
+    mixed.ledger.logicalMessage.senderIdentitySha256,
+    createHash("sha256").update(keys.sender).digest("hex"),
+  );
   assert.deepEqual(
     mixed.ledger.teamDeliveries.map(
       ({ targetNodeKey, admissionState, state }) => ({
@@ -1174,6 +1193,10 @@ test("Team Cast policy denial preserves partial fan-out and all-denied stores no
   );
   assert.equal(bodyWrites, 0);
   assert.equal(allDenied.body.contentRef, null);
+  assert.equal(
+    allDenied.ledger.logicalMessage.senderIdentitySha256,
+    createHash("sha256").update(keys.sender).digest("hex"),
+  );
   assert.ok(
     allDenied.ledger.teamDeliveries.every(
       (delivery) =>

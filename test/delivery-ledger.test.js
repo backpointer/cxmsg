@@ -163,6 +163,14 @@ test("metadata-only Inbound Policy denial evidence has a closed identity schema"
 
   assert.equal(ledger.validDeliveryLedgerRecord(denied), true);
 
+  const missingIdentityDigest = structuredClone(denied);
+  delete missingIdentityDigest.logicalMessage.senderIdentitySha256;
+  assert.equal(ledger.validDeliveryLedgerRecord(missingIdentityDigest), false);
+
+  const mismatchedIdentityDigest = structuredClone(denied);
+  mismatchedIdentityDigest.logicalMessage.senderIdentitySha256 = "f".repeat(64);
+  assert.equal(ledger.validDeliveryLedgerRecord(mismatchedIdentityDigest), false);
+
   const claimedUnverifiedIdentity = structuredClone(denied);
   claimedUnverifiedIdentity.deliveries[0].inboundPolicy.senderIdentityState =
     "unverifiable";
@@ -173,6 +181,24 @@ test("metadata-only Inbound Policy denial evidence has a closed identity schema"
   const extendedEvidence = structuredClone(denied);
   extendedEvidence.deliveries[0].inboundPolicy.unboundedDetail = "forbidden";
   assert.equal(ledger.validDeliveryLedgerRecord(extendedEvidence), false);
+
+  const mismatchedSelector = structuredClone(denied);
+  mismatchedSelector.deliveries[0].inboundPolicy.selectorKind =
+    "sender-project";
+  assert.equal(ledger.validDeliveryLedgerRecord(mismatchedSelector), false);
+
+  const failClosedMatchedRule = structuredClone(denied);
+  failClosedMatchedRule.deliveries[0].inboundPolicy.failClosed = true;
+  assert.equal(ledger.validDeliveryLedgerRecord(failClosedMatchedRule), false);
+
+  const unverifiableProjectClaim = structuredClone(denied);
+  unverifiableProjectClaim.deliveries[0].inboundPolicy.senderIdentityState =
+    "unverifiable";
+  unverifiableProjectClaim.deliveries[0].inboundPolicy.senderNodeKey = null;
+  assert.equal(
+    ledger.validDeliveryLedgerRecord(unverifiableProjectClaim),
+    false,
+  );
 });
 
 test("reply handles are recipient-scoped and collisions are retried", async () => {
