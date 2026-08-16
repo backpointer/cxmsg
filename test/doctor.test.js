@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   doctorExitCode,
   doctorOverall,
+  deduplicateDoctorChecks,
   renderDoctorText,
   runDoctor,
 } from "../src/doctor.js";
@@ -55,6 +56,7 @@ function ledgerBatch({
   deliveryId,
   batchId,
   targetThreadId = THREAD_ID,
+  target = "worker",
   createdAt = "2026-08-14T00:00:00.000Z",
   wakePolicy = "immediate",
   triggerId = null,
@@ -97,7 +99,7 @@ function ledgerBatch({
     deliveries: [
       {
         deliveryId,
-        target: "worker",
+        target,
         targetThreadId,
         admissionState: "admitted",
         admissionReason: "legacy-unbound",
@@ -184,6 +186,88 @@ test("healthy Doctor fixtures are redacted and mutate zero state files", async (
   }
 });
 
+test("target Doctor excludes global history and deduplicates finding ids", async () => {
+  const globalInspector = () => {
+    throw new Error("target Doctor must not run a global historical inspector");
+  };
+  const duplicatePass = pass("jobs.duplicate", "jobs");
+  const duplicateWarn = diagnosticCheck({
+    id: "jobs.duplicate",
+    scope: "jobs",
+    status: "warn",
+    summary: "stronger target finding",
+    verification: "fixture",
+    errorCode: "ETARGETFIXTURE",
+    required: false,
+  });
+  const session = {
+    name: "worker",
+    threadId: THREAD_ID,
+    cwd: "/private/target",
+  };
+  const report = await runDoctor({
+    target: "worker",
+    adapters: {
+      inspectRuntime: () => [pass("runtime.fixture", "runtime")],
+      inspectState: () => ({
+        checks: [pass("state.fixture", "state")],
+        sessions: [session],
+        allSessions: [session],
+        attachments: [],
+        jobs: [],
+        bridges: [],
+      }),
+      inspectMessageBodies: globalInspector,
+      inspectNodeDirectory: globalInspector,
+      inspectRouteState: (options) => {
+        assert.equal(options.target, "worker");
+        return [];
+      },
+      inspectInboundPolicies: globalInspector,
+      inspectConversationState: globalInspector,
+      inspectRepairState: globalInspector,
+      inspectRepairRetentionState: globalInspector,
+      inspectJobs: () => [duplicatePass, duplicateWarn],
+      inspectAttachments: () => [],
+      inspectPermissions: async () => [],
+      inspectAppServer: async () => [pass("app-server.fixture", "app-server")],
+      inspectBridges: async () => [],
+      inspectRelay: async () => [pass("relay.fixture", "relay")],
+      inspectRegisteredThreads: async () => [pass("sessions.fixture", "sessions")],
+    },
+  });
+  assert.equal(
+    report.checks.filter((check) => check.id === "jobs.duplicate").length,
+    1,
+  );
+  assert.equal(
+    report.checks.find((check) => check.id === "jobs.duplicate").status,
+    "warn",
+  );
+  assert.equal(
+    report.checks.find((check) => check.id === "doctor.target.scope").status,
+    "pass",
+  );
+});
+
+test("Doctor dedup keeps the strongest status and required boundary", () => {
+  const checks = deduplicateDoctorChecks([
+    pass("same"),
+    diagnosticCheck({
+      id: "same",
+      scope: "test",
+      status: "fail",
+      summary: "strongest",
+      verification: "fixture",
+      errorCode: "ESTRONG",
+      required: false,
+    }),
+  ]);
+  assert.equal(checks.length, 1);
+  assert.equal(checks[0].status, "fail");
+  assert.equal(checks[0].required, true);
+});
+
 test("Route Inspector validates scheduled Job trigger references without dispatch", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-trigger-"));
   try {
@@ -221,6 +305,59 @@ test("Route Inspector validates scheduled Job trigger references without dispatc
     assert.equal(inspect().status, "pass");
     await fs.rm(path.join(jobs, `${jobId}.json`));
     assert.equal(inspect().errorCode, "ETRIGGERJOBMISSING");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Route Inspector target scope excludes unrelated historical deliveries", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-route-target-"));
+  try {
+    await fs.chmod(root, 0o700);
+    const segments = path.join(root, "delivery-ledger", "segments");
+    const quarantine = path.join(root, "delivery-ledger", "quarantine");
+    await fs.mkdir(segments, { recursive: true, mode: 0o700 });
+    await fs.mkdir(quarantine, { mode: 0o700 });
+    const targetMessageId = "11345678-1234-4234-8234-123456789abc";
+    const otherMessageId = "21345678-1234-4234-8234-123456789abc";
+    const records = [
+      ledgerBatch({
+        messageId: targetMessageId,
+        deliveryId: "31345678-1234-4234-8234-123456789abc",
+        batchId: "41345678-1234-4234-8234-123456789abc",
+      }),
+      ledgerBatch({
+        messageId: otherMessageId,
+        deliveryId: "51345678-1234-4234-8234-123456789abc",
+        batchId: "61345678-1234-4234-8234-123456789abc",
+        target: "other",
+        targetThreadId: "71345678-1234-4234-8234-123456789abc",
+      }),
+    ];
+    await fs.writeFile(
+      path.join(segments, "segment-00000001.jsonl"),
+      `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+      { mode: 0o600 },
+    );
+    const checks = inspectRouteState({
+      stateDir: root,
+      target: "worker",
+      sessions: [
+        { name: "worker", threadId: THREAD_ID },
+        {
+          name: "other",
+          threadId: "71345678-1234-4234-8234-123456789abc",
+        },
+      ],
+    });
+    assert.ok(
+      checks.some((check) =>
+        check.id.endsWith(targetMessageId.slice(0, 8))),
+    );
+    assert.equal(
+      checks.some((check) => check.id.endsWith(otherMessageId.slice(0, 8))),
+      false,
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -508,6 +645,24 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   ]);
   assert.equal(missingClaudeDeadline[0].status, "fail");
   assert.equal(missingClaudeDeadline[0].errorCode, "ECOMPLETIONDEADLINE");
+
+  const terminalWithDeliveryFailure = inspectJobs([
+    {
+      version: 1,
+      kind: "delegation",
+      jobId: "82345678-1234-4234-8234-123456789abc",
+      status: "completed",
+      completedAt: "2026-08-14T00:00:30.000Z",
+      mirrorDelivery: {
+        status: "failed",
+        errorCode: "EAPPWSFRAME",
+      },
+    },
+  ]);
+  assert.equal(terminalWithDeliveryFailure.length, 1);
+  assert.equal(terminalWithDeliveryFailure[0].status, "warn");
+  assert.equal(terminalWithDeliveryFailure[0].errorCode, "EAPPWSFRAME");
+  assert.match(terminalWithDeliveryFailure[0].summary, /terminal/);
 });
 
 test("Message Body Store Inspector reports private metadata, quarantine, and quota", async () => {

@@ -831,6 +831,21 @@ function validAttachment(record, stem) {
 function validJob(record, stem) {
   const schedule = record?.schedule;
   const claim = schedule?.claim;
+  const failureEvidence = record?.failureEvidence;
+  const validFailureEvidence =
+    failureEvidence === undefined ||
+    failureEvidence === null ||
+    (typeof failureEvidence === "object" &&
+      /^[A-Z0-9_]{1,32}$/.test(failureEvidence.errorCode || "") &&
+      Object.keys(failureEvidence).every((field) =>
+        ["errorCode", "observedBytes", "limitBytes"].includes(field),
+      ) &&
+      (failureEvidence.observedBytes === undefined
+        ? failureEvidence.limitBytes === undefined
+        : Number.isSafeInteger(failureEvidence.observedBytes) &&
+          failureEvidence.observedBytes >= 0 &&
+          Number.isSafeInteger(failureEvidence.limitBytes) &&
+          failureEvidence.limitBytes >= 0));
   const validSchedule =
     schedule === undefined ||
     schedule === null ||
@@ -859,6 +874,7 @@ function validJob(record, stem) {
           record.executionThreadId === null ||
           UUID_PATTERN.test(record.executionThreadId)) &&
         typeof record.status === "string" &&
+        validFailureEvidence &&
         validSchedule &&
         (record.status !== "scheduled" ||
           (record.kind === "delegation" && schedule)),
@@ -2945,6 +2961,7 @@ export function inspectRepairRetentionState({ stateDir } = {}) {
 export function inspectRouteState({
   stateDir,
   sessions = [],
+  target = null,
   now = Date.now(),
   reconcileGraceMs = ROUTE_RECONCILE_GRACE_MS,
   ledgerQuotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
@@ -2984,14 +3001,25 @@ export function inspectRouteState({
     ...quarantine.checks,
     ...scheduleSuccessors.checks,
   ];
+  const inTargetScope = (record) =>
+    !target ||
+    record.target === target ||
+    record.from === target ||
+    record.logicalMessage?.from === target;
+  const scopedBindings = target
+    ? bindings.records.filter((record) => record.sessionName === target)
+    : bindings.records;
+  const scopedLegacyDeliveries = deliveries.records.filter(inTargetScope);
+  const scopedLedgerDeliveries = ledger.records.filter(inTargetScope);
+  const scopedQuarantine = quarantine.records.filter(inTargetScope);
   const predecessorNodeKeys = new Set(
     scheduleSuccessors.records.map((record) => record.predecessorNodeKey),
   );
   const sessionsByName = new Map(sessions.map((record) => [record.name, record]));
   const legacyMessageIds = new Set(
-    deliveries.records.map((record) => record.logicalMessageId),
+    scopedLegacyDeliveries.map((record) => record.logicalMessageId),
   );
-  for (const delivery of ledger.records) {
+  for (const delivery of scopedLedgerDeliveries) {
     if (!legacyMessageIds.has(delivery.logicalMessageId)) continue;
     checks.push(
       diagnosticCheck({
@@ -3006,7 +3034,7 @@ export function inspectRouteState({
       }),
     );
   }
-  for (const binding of bindings.records) {
+  for (const binding of scopedBindings) {
     const current = sessionsByName.get(binding.sessionName);
     const matches = current?.threadId === binding.threadId;
     checks.push(
@@ -3025,7 +3053,7 @@ export function inspectRouteState({
       }),
     );
   }
-  for (const delivery of [...deliveries.records, ...ledger.records]) {
+  for (const delivery of [...scopedLegacyDeliveries, ...scopedLedgerDeliveries]) {
     const deliveryScope = delivery.version === 2 ? "delivery-ledger" : "route-deliveries";
     if (delivery.targetThreadId) {
       const target = sessionsByName.get(delivery.target);
@@ -3207,21 +3235,23 @@ export function inspectRouteState({
     diagnosticCheck({
       id: "quarantine.records.count",
       scope: "quarantine",
-      status: quarantine.records.length > 0 ? "warn" : "pass",
+      status: scopedQuarantine.length > 0 ? "warn" : "pass",
       summary:
-        quarantine.records.length > 0
-          ? `${quarantine.records.length} quarantined route message(s) require operator review`
+        scopedQuarantine.length > 0
+          ? `${scopedQuarantine.length} quarantined route message(s) require operator review`
           : "No routed peer messages are quarantined",
       verification: "records",
-      errorCode: quarantine.records.length > 0 ? "EQUARANTINED" : null,
+      errorCode: scopedQuarantine.length > 0 ? "EQUARANTINED" : null,
       remediation:
-        quarantine.records.length > 0
+        scopedQuarantine.length > 0
           ? "Inspect metadata with cxmsg quarantine list; this release intentionally has no automatic release"
           : null,
       required: false,
     }),
   );
-  const scheduled = ledger.records.filter((delivery) => delivery.status === "scheduled");
+  const scheduled = scopedLedgerDeliveries.filter(
+    (delivery) => delivery.status === "scheduled",
+  );
   const lifecyclePath = path.join(stateDir, "turn-lifecycle.json");
   const lifecycleMetadata = secureMetadata(lifecyclePath, "file");
   if (!["missing", "secure"].includes(lifecycleMetadata.status)) {
@@ -4000,6 +4030,37 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
   for (const job of jobs) {
     const kind = job.kind || "delegation";
     if (!job.kind) legacy += 1;
+    const label = job.jobId.slice(0, 8);
+    if (job.mirrorDelivery?.status === "failed") {
+      checks.push(diagnosticCheck({
+        id: `jobs.delivery.${label}.mirror`,
+        scope: "jobs",
+        status: "warn",
+        summary: `Delegation ${label} is terminal but its optional peer mirror failed`,
+        verification: "record",
+        errorCode: job.mirrorDelivery.errorCode || "EPEERDELIVERY",
+        remediation:
+          "Treat the Job result as durable; inspect or retry coordination delivery separately",
+        required: false,
+      }));
+    }
+    if (
+      kind === "claude-request" &&
+      !PENDING_JOB_STATES.has(job.status) &&
+      ["pending", "failed"].includes(job.reply?.status)
+    ) {
+      checks.push(diagnosticCheck({
+        id: `jobs.delivery.${label}.claude-reply`,
+        scope: "jobs",
+        status: "warn",
+        summary: `Claude request ${label} is terminal but its peer response was not delivered`,
+        verification: "record",
+        errorCode: job.reply?.errorCode || "EPEERDELIVERY",
+        remediation:
+          "Keep the durable Job result and retry only the correlated Claude response delivery",
+        required: false,
+      }));
+    }
     if (
       !PENDING_JOB_STATES.has(job.status) &&
       !(kind === "claude-delivery" &&
@@ -4008,7 +4069,6 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
       continue;
     }
     active += 1;
-    const label = job.jobId.slice(0, 8);
     if (kind === "delegation") {
       if (job.status === "scheduled") {
         const expired = Date.parse(job.schedule?.expiresAt || "") <= now;

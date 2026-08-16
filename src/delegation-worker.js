@@ -1,6 +1,9 @@
 import { setTimeout as delay } from "node:timers/promises";
 import { createApprovalHandler } from "./approvals.js";
-import { AppServerClient } from "./app-server-client.js";
+import {
+  AppServerClient,
+  appServerFailureEvidence,
+} from "./app-server-client.js";
 import {
   APPROVAL_MODES,
   EXECUTION_MODES,
@@ -29,12 +32,16 @@ import { readThreadMetadata } from "./thread-activity.js";
 
 export { APPROVAL_MODES, EXECUTION_MODES, MIRROR_MODES };
 
-async function executionThread(client, sourceThread, record, job) {
+async function executionThread(client, record, job) {
   if (job.execution === "inline") {
+    const sourceThread = await readThreadMetadata(client, record.threadId);
+    if (sourceThread.status?.type === "active") {
+      throw new Error("target session already has an active turn");
+    }
     return { thread: sourceThread, creationMode: null };
   }
   const forkParams = {
-    threadId: sourceThread.id,
+    threadId: record.threadId,
     approvalPolicy: job.approval === "never" ? "never" : "on-request",
     deferGoalContinuation: true,
     includeTurns: false,
@@ -102,15 +109,18 @@ async function mirrorResult(client, job) {
         status: "delivered",
         turnId: delivery.turnId,
         deliveredAt: new Date().toISOString(),
+        errorCode: null,
         error: null,
       },
     });
   } catch (error) {
+    const failureEvidence = appServerFailureEvidence(error, "EPEERDELIVERY");
     return await updateJob(job, {
       mirrorDelivery: {
         status: "failed",
         turnId: null,
         deliveredAt: new Date().toISOString(),
+        errorCode: failureEvidence.errorCode,
         error: error.message,
       },
     });
@@ -153,11 +163,7 @@ export async function runDelegationWorker(
   try {
     await client.connect();
     const { record } = await validateDelegationAuthority(job, client);
-    const thread = await readThreadMetadata(client, record.threadId);
-    if (thread.status?.type === "active") {
-      throw new Error("target session already has an active turn");
-    }
-    const execution = await executionThread(client, thread, record, job);
+    const execution = await executionThread(client, record, job);
     if (execution.creationMode) {
       await classifyExecutionThread({
         threadId: execution.thread.id,
@@ -193,8 +199,14 @@ export async function runDelegationWorker(
   } catch (error) {
     job = readJob(jobId) || job;
     if (isPendingJob(job)) {
+      const failureEvidence = appServerFailureEvidence(
+        error,
+        "EDELEGATIONWORKER",
+      );
       await updateJob(job, {
         status: "failed",
+        failureCode: failureEvidence.errorCode,
+        failureEvidence,
         error: error.message,
         completedAt: new Date().toISOString(),
       });

@@ -150,6 +150,35 @@ test("request errors retain the initialized App Server contract", async () => {
   await client.close();
 });
 
+test("outbound frame preflight rejects structurally without retaining a pending request", async () => {
+  class OutboundFailureTransport extends FakeTransport {
+    sendText(value) {
+      const message = JSON.parse(value);
+      if (message.method === "thread/fork") {
+        const error = new Error("app-server WebSocket outbound frame exceeds the buffer limit");
+        error.code = "EAPPWSOUTBOUND";
+        error.observedBytes = 1_048_577;
+        error.limitBytes = 1_048_576;
+        throw error;
+      }
+      super.sendText(value);
+    }
+  }
+  const client = new AppServerClient({
+    transportFactory: () => new OutboundFailureTransport(),
+  });
+  await client.connect();
+  await assert.rejects(
+    client.request("thread/fork", { threadId: "fixture" }),
+    (error) =>
+      error?.code === "EAPPWSOUTBOUND" &&
+      error.observedBytes === 1_048_577 &&
+      error.limitBytes === 1_048_576,
+  );
+  assert.equal(client.pending.size, 0);
+  await client.close();
+});
+
 test("App Server socket validation requires a private owner-controlled path", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-app-socket-"));
   const socketPath = path.join(directory, "app-server.sock");

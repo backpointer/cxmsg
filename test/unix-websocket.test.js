@@ -112,7 +112,10 @@ test("UnixWebSocket times out upgrades, flushes close, and bounds frames", { tim
     header[1] = 126;
     header.writeUInt16BE(257, 2);
     boundedSocket.write(header);
-    assert.match((await boundedError).message, /buffer limit/);
+    const frameError = await boundedError;
+    assert.equal(frameError.code, "EAPPWSFRAME");
+    assert.equal(frameError.observedBytes, 257);
+    assert.equal(frameError.limitBytes, 256);
   } finally {
     for (const server of servers) {
       server.destroyConnections();
@@ -142,10 +145,17 @@ test("UnixWebSocket masks client frames and assembles split server fragments", {
       },
     );
   });
-  const client = new UnixWebSocket(socketPath);
+  const client = new UnixWebSocket(socketPath, { maxBufferBytes: 256 });
   try {
     const message = new Promise((resolve) => client.once("message", resolve));
     await client.connect();
+    assert.throws(
+      () => client.sendText("x".repeat(257)),
+      (error) =>
+        error?.code === "EAPPWSOUTBOUND" &&
+        error.observedBytes === 257 &&
+        error.limitBytes === 256,
+    );
     client.sendText("masked");
     assert.equal(await message, "hello");
     const frame = await clientFrame;

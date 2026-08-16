@@ -16,6 +16,7 @@ import {
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import {
+  appServerFailureEvidence,
   probeAppServerSocket,
   withAppServer,
 } from "../src/app-server-client.js";
@@ -1723,6 +1724,12 @@ async function commandClaudeBridge(action, target) {
 
   if (action === "status") {
     const state = await claudeBridgeOperationState(target);
+    const recordedRevision = state.record?.implementationRevision;
+    const implementation = !Number.isSafeInteger(recordedRevision)
+      ? "unknown"
+      : recordedRevision === CXMSG_IMPLEMENTATION_REVISIONS.claudeBridge
+        ? "current"
+        : "stale";
     const verification = state.safeToSignal
       ? "identity"
       : state.socketProbe.state === "healthy"
@@ -1737,8 +1744,16 @@ async function commandClaudeBridge(action, target) {
       `${state.status}\ttarget=${target}\tpid=${state.record?.pid || "-"}\tsocket=${state.record?.socketPath || "-"}` +
         `${state.record?.cxmsgVersion ? `\tcxmsg=${state.record.cxmsgVersion}` : ""}` +
         `${state.record?.implementationRevision ? `\trevision=${state.record.implementationRevision}` : ""}` +
-        `\tverification=${verification}${error}\n`,
+        `\timplementation=${implementation}\tverification=${verification}${error}\n`,
     );
+    if (implementation === "stale") {
+      process.stderr.write(
+        `cxmsg: Claude bridge ${target} runs stale implementation revision ` +
+          `${recordedRevision}; current=${CXMSG_IMPLEMENTATION_REVISIONS.claudeBridge}. ` +
+          `Restart it with: cxmsg claude bridge stop ${target} && ` +
+          `cxmsg claude bridge start ${target}\n`,
+      );
+    }
     return;
   }
 
@@ -2355,9 +2370,11 @@ async function commandDelegate(args) {
           throw new Error(`permission profile is blocked: ${permissions}`);
         }
       }
-      const thread = await readThreadMetadata(client, record.threadId);
-      if (thread.status?.type === "active") {
-        throw new Error("target session already has an active turn");
+      if (execution === "inline") {
+        const thread = await readThreadMetadata(client, record.threadId);
+        if (thread.status?.type === "active") {
+          throw new Error("target session already has an active turn");
+        }
       }
     });
     await updateJob(job, { status: "queued" });
@@ -2393,8 +2410,14 @@ async function commandDelegate(args) {
   } catch (error) {
     const current = readJob(jobId) || job;
     if (isPendingJob(current)) {
+      const failureEvidence = appServerFailureEvidence(
+        error,
+        "EDELEGATIONDISPATCH",
+      );
       await updateJob(current, {
         status: "failed",
+        failureCode: failureEvidence.errorCode,
+        failureEvidence,
         error: error.message,
         completedAt: new Date().toISOString(),
       });
@@ -2464,10 +2487,18 @@ function printJob(job, jsonOutput) {
   }
   if (job.status === "completed" && job.result) {
     process.stdout.write(`${job.result}\n`);
-    return;
+  } else {
+    const suffix = job.error ? `\t${job.error}` : "";
+    process.stdout.write(`${job.status}\t${job.jobId}${suffix}\n`);
   }
-  const suffix = job.error ? `\t${job.error}` : "";
-  process.stdout.write(`${job.status}\t${job.jobId}${suffix}\n`);
+  const peerDelivery =
+    job.kind === "claude-request" ? job.reply : job.mirrorDelivery;
+  if (peerDelivery?.status === "failed") {
+    process.stderr.write(
+      `cxmsg: job ${job.jobId} is ${job.status}; peer delivery failed separately` +
+        `${peerDelivery.errorCode ? ` (${peerDelivery.errorCode})` : ""}\n`,
+    );
+  }
 }
 
 async function loadAndRefreshJob(jobId) {
@@ -4743,6 +4774,19 @@ async function main() {
 }
 
 main().catch((error) => {
-  process.stderr.write(`cxmsg: ${error.message}\n`);
+  const details = [
+    typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code)
+      ? `code=${error.code}`
+      : null,
+    Number.isSafeInteger(error?.observedBytes)
+      ? `observed-bytes=${error.observedBytes}`
+      : null,
+    Number.isSafeInteger(error?.limitBytes)
+      ? `limit-bytes=${error.limitBytes}`
+      : null,
+  ].filter(Boolean);
+  process.stderr.write(
+    `cxmsg: ${error.message}${details.length ? ` [${details.join(" ")}]` : ""}\n`,
+  );
   process.exitCode = error.exitCode || 1;
 });

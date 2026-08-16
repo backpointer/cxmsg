@@ -346,8 +346,8 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap extension — Inbound Peer Message Policy
 
-- Status: SLICE 1 IMPLEMENTED; initial audit findings addressed; focused
-  re-audit pending; public activation disabled
+- Status: SLICE 1 IMPLEMENTED; independent focused audit PASS; public
+  activation disabled
 
 - [x] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
       privacy, authority, deduplication, fan-out, scheduling, and retention
@@ -357,12 +357,31 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Close the initial Adapter audit findings: final-rule deletion,
       exact-digest invalid-record purge, transient-file diagnostics, verified
       evidence projection, stable evaluator shape, and internal-only exports.
+- [ ] Before Slice 2 activation, hash stable Node and Project identities in
+      ordinary event projections rather than logging full keys.
+- [ ] Align legacy storage Modules with the new fail-closed `O_NOFOLLOW`
+      portability rule and define an explicit stale-policy-artifact cleanup
+      procedure without automatic repair.
 - [ ] Integrate direct Codex and Claude ordinary ingress with metadata-only
       terminal denial.
 - [ ] Revalidate scheduled recipients, integrate Group and Team fan-out, then
       activate the public CLI only after the cross-path gate passes.
 - [ ] Add redacted trace, graph, and web projections only after core evidence
       is stable.
+
+### Post-roadmap maintenance — long-session Delegation diagnostics
+
+- Status: IMPLEMENTED; audit pending
+
+- [x] Fork by stable server-side thread reference without a source
+      `thread/read` hydration step; preserve metadata preflight for inline work.
+- [x] Classify outbound, receive-buffer, single-frame, and fragmented
+      WebSocket bounds with structured byte evidence.
+- [x] Scope `doctor --target` to related runtime and Route evidence and
+      deduplicate stable finding IDs by strongest status.
+- [x] Surface stale bridge implementation state in the bridge status command.
+- [x] Keep terminal Job execution evidence independent from optional mirror or
+      Claude-response delivery failure.
 
 ## Explicit non-goals for this sequence
 

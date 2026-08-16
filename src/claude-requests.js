@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
-import { withAppServer } from "./app-server-client.js";
+import {
+  appServerFailureEvidence,
+  withAppServer,
+} from "./app-server-client.js";
 import { createApprovalHandler } from "./approvals.js";
 import {
   buildClaudePeerFrame,
@@ -156,6 +159,7 @@ export async function createClaudeRequestJob({ target, targetRecord, parsed, gra
     reply: {
       status: "pending",
       messageId: null,
+      errorCode: null,
       error: null,
       attemptedAt: null,
     },
@@ -192,15 +196,18 @@ export async function replyToClaudeRequest(bridgeRecord, targetRecord, job) {
       reply: {
         status: "delivered",
         messageId: delivery.messageId,
+        errorCode: null,
         error: null,
         attemptedAt: new Date().toISOString(),
       },
     });
   } catch (error) {
+    const failureEvidence = appServerFailureEvidence(error, "EPEERDELIVERY");
     return updateJob(job, {
       reply: {
         status: "failed",
         messageId: frame.msg_id,
+        errorCode: failureEvidence.errorCode,
         error: error.message,
         attemptedAt: new Date().toISOString(),
       },

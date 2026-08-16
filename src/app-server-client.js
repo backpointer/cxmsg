@@ -73,6 +73,24 @@ export function classifyAppServerNegativeAcceptance(error) {
   };
 }
 
+export function appServerFailureEvidence(error, fallback = "EAPPSERVER") {
+  const errorCode =
+    typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code)
+      ? error.code
+      : fallback;
+  const evidence = { errorCode };
+  if (
+    Number.isSafeInteger(error?.observedBytes) &&
+    error.observedBytes >= 0 &&
+    Number.isSafeInteger(error?.limitBytes) &&
+    error.limitBytes >= 0
+  ) {
+    evidence.observedBytes = error.observedBytes;
+    evidence.limitBytes = error.limitBytes;
+  }
+  return evidence;
+}
+
 export class AppServerClient {
   constructor({
     socketPath = defaultSocketPath(),
@@ -145,7 +163,13 @@ export class AppServerClient {
       }, this.timeoutMs);
 
       this.pending.set(id, { method, resolve, reject, timer });
-      this.transport.sendText(JSON.stringify(payload));
+      try {
+        this.transport.sendText(JSON.stringify(payload));
+      } catch (error) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(error);
+      }
     });
   }
 

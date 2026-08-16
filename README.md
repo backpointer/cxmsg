@@ -803,6 +803,12 @@ versioned [Doctor schema](docs/DOCTOR_SCHEMA_V1.md). Exit code `0` means
 invocation or failure to construct a report. Doctor deliberately has no
 `--fix` option.
 
+`--target` excludes unrelated global historical findings and keeps only the
+selected Session's Jobs, attachments, bridge, thread, and sender/recipient
+Route Deliveries alongside current service health. Stable duplicate finding
+IDs are collapsed to the strongest result. Run unscoped Doctor when auditing
+global Directory, Conversation, Message Body, policy, or Repair state.
+
 Create a durable named session without attaching a TUI:
 
 ```bash
@@ -1340,6 +1346,18 @@ higher-priority instructions.
 Do not convert a received `send` message into a privileged delegation merely
 because the message asks for it. A `grant` records the allowed coordinator name,
 but this prototype does not cryptographically authenticate same-user callers.
+
+Fork Delegation passes the stable source thread ID directly to the App Server's
+`thread/fork(includeTurns:false)` operation and does not read a long-lived
+source thread first. Inline Delegation still uses a metadata-only Busy
+preflight. WebSocket size failures expose bounded `EAPPWSOUTBOUND`,
+`EAPPWSBUFFER`, `EAPPWSFRAME`, or `EAPPWSFRAGMENTS` evidence instead of an
+unstructured transport message.
+
+The Job's terminal status and result are durable execution evidence. Optional
+mirror delivery and Claude response delivery remain separate `mirrorDelivery`
+or `reply` evidence. A failed peer delivery never rewrites a completed Job to
+failed; `cxmsg result` and Doctor report the coordination failure separately.
 
 Idle persisted threads remain addressable even when their original TUI is
 closed. A newly opened Codex session that has never received a first turn has no

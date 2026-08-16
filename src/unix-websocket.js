@@ -7,6 +7,14 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
 const DEFAULT_MAX_BUFFER_BYTES = 1024 * 1024;
 
+function bufferLimitError(code, message, observedBytes, limitBytes) {
+  const error = new Error(message);
+  error.code = code;
+  error.observedBytes = observedBytes;
+  error.limitBytes = limitBytes;
+  return error;
+}
+
 function encodeFrame(payload, opcode = 0x1) {
   const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, "utf8");
   const mask = crypto.randomBytes(4);
@@ -97,7 +105,12 @@ export class UnixWebSocket extends EventEmitter {
       });
       this.socket.on("data", (chunk) => {
         if (this.buffer.length + chunk.length > this.maxBufferBytes) {
-          const error = new Error("app-server WebSocket buffer limit exceeded");
+          const error = bufferLimitError(
+            "EAPPWSBUFFER",
+            "app-server WebSocket receive buffer limit exceeded",
+            this.buffer.length + chunk.length,
+            this.maxBufferBytes,
+          );
           if (!settled) {
             settled = true;
             settle();
@@ -158,6 +171,15 @@ export class UnixWebSocket extends EventEmitter {
     if (!this.upgraded || !this.socket?.writable) {
       throw new Error("app-server WebSocket is not connected");
     }
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > this.maxBufferBytes) {
+      throw bufferLimitError(
+        "EAPPWSOUTBOUND",
+        "app-server WebSocket outbound frame exceeds the buffer limit",
+        bytes,
+        this.maxBufferBytes,
+      );
+    }
     this.socket.write(encodeFrame(text));
   }
 
@@ -217,7 +239,14 @@ export class UnixWebSocket extends EventEmitter {
       }
 
       if (length > this.maxBufferBytes) {
-        this.#failProtocol(new Error("WebSocket frame exceeds the buffer limit"));
+        this.#failProtocol(
+          bufferLimitError(
+            "EAPPWSFRAME",
+            "app-server WebSocket frame exceeds the buffer limit",
+            length,
+            this.maxBufferBytes,
+          ),
+        );
         return;
       }
 
@@ -260,7 +289,14 @@ export class UnixWebSocket extends EventEmitter {
     }
     if (opcode === 0x0 && this.fragmentOpcode !== null) {
       if (this.fragmentBytes + payload.length > this.maxBufferBytes) {
-        this.#failProtocol(new Error("WebSocket fragments exceed the buffer limit"));
+        this.#failProtocol(
+          bufferLimitError(
+            "EAPPWSFRAGMENTS",
+            "app-server WebSocket fragments exceed the buffer limit",
+            this.fragmentBytes + payload.length,
+            this.maxBufferBytes,
+          ),
+        );
         return;
       }
       this.fragments.push(payload);

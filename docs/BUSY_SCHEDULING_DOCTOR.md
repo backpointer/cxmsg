@@ -57,14 +57,16 @@ rules are defined in the companion
 | Codex `send` to Codex | `turn/start` | `turn/steer` | No |
 | Claude ordinary message to Codex | `turn/start` | `turn/steer` | No |
 | Codex inline `delegate` | Starts authorized turn | Fails | Job records failure |
-| Codex fork `delegate` | Starts work in fork | Preflight currently rejects busy source | Job records failure |
+| Codex fork `delegate` | Starts work in fork | Starts an isolated server-side fork by thread reference | Job records failure |
 | Claude authorized request to Codex | Forks and starts | Polls until idle | Yes, bounded by one shared timeout |
 | Codex delivery to Claude | Sends immediately | Sends immediately; Claude controls consumption | Delivery Job only |
 
-The current App Server client handles requests and server approval requests,
-but drops ID-less notifications. Therefore busy waiting relies on repeated
-`thread/read` calls. Connection closure also fails pending requests without a
-reconnect-and-reconcile path.
+The App Server client handles requests, server approval requests, and bounded
+ID-less lifecycle notifications. Fork Delegation passes only the stable source
+thread ID to `thread/fork`; it does not request the source thread payload first.
+Inline Delegation still performs a metadata-only preflight because it writes to
+the original thread. Connection closure still fails pending requests without a
+blind reconnect-and-replay path.
 
 ## Delivery policy
 
@@ -152,15 +154,17 @@ Delegation keeps a separate command and authority path:
 cxmsg delegate --when-idle --from coordinator worker "Run the scoped review."
 ```
 
-The existing default remains fail-fast on a Busy source thread. The explicit
-`--when-idle` form creates a durable queued Job. Grant, permission profile,
+Inline execution remains fail-fast on a Busy source thread. Fork execution is
+isolated and uses the server-side thread reference without hydrating the source
+thread. The explicit `--when-idle` form creates a durable queued Job. Grant, permission profile,
 execution mode, and approval policy are validated both when queued and again
 immediately before execution. Revocation or policy change while queued fails
 the Job without starting a turn.
 
-Fork execution may eventually stop requiring the source thread to remain Idle
-after a safe, version-tested App Server fork contract is established. Until
-then, the conservative Idle precondition remains.
+The fork request uses `includeTurns:false`; a no-rollout or unloaded source may
+fall back to a standalone `thread/start` Execution Thread. Structured WebSocket
+limit failures distinguish outbound, receive-buffer, single-frame, and
+fragment accumulation limits and retain the observed and configured byte count.
 
 ## Scheduled Delivery and state machine
 

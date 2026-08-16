@@ -35,6 +35,33 @@ export function doctorOverall(checks) {
   return "healthy";
 }
 
+const CHECK_STATUS_PRIORITY = Object.freeze({
+  skipped: 0,
+  pass: 1,
+  warn: 2,
+  unknown: 3,
+  fail: 4,
+});
+
+export function deduplicateDoctorChecks(checks) {
+  const byId = new Map();
+  for (const check of checks) {
+    const previous = byId.get(check.id);
+    if (!previous) {
+      byId.set(check.id, check);
+      continue;
+    }
+    const previousPriority = CHECK_STATUS_PRIORITY[previous.status] ?? -1;
+    const currentPriority = CHECK_STATUS_PRIORITY[check.status] ?? -1;
+    const strongest = currentPriority > previousPriority ? check : previous;
+    byId.set(check.id, {
+      ...strongest,
+      required: previous.required !== false || check.required !== false,
+    });
+  }
+  return [...byId.values()];
+}
+
 export async function runDoctor({
   deep = false,
   target = null,
@@ -48,37 +75,56 @@ export async function runDoctor({
   checks.push(...(adapters.inspectRuntime || inspectRuntime)());
   const state = (adapters.inspectState || inspectState)({ stateDir, target });
   checks.push(...state.checks);
-  checks.push(
-    ...(adapters.inspectMessageBodies || inspectMessageBodies)({ stateDir }),
-  );
-  checks.push(
-    ...(adapters.inspectNodeDirectory || inspectNodeDirectory)({
-      stateDir,
-      sessions: state.allSessions || state.sessions,
-      jobs: state.jobs,
-    }),
-  );
-  checks.push(
-    ...(adapters.inspectRouteState || inspectRouteState)({
-      stateDir,
-      sessions: state.allSessions || state.sessions,
-    }),
-  );
-  checks.push(
-    ...(adapters.inspectInboundPolicies || inspectInboundPolicies)({ stateDir }),
-  );
-  checks.push(
-    ...(adapters.inspectConversationState || inspectConversationState)({
-      stateDir,
-      jobs: state.jobs,
-    }),
-  );
-  checks.push(...(adapters.inspectRepairState || inspectRepairState)({ stateDir }));
-  checks.push(
-    ...(adapters.inspectRepairRetentionState || inspectRepairRetentionState)({
-      stateDir,
-    }),
-  );
+  if (!target) {
+    checks.push(
+      ...(adapters.inspectMessageBodies || inspectMessageBodies)({ stateDir }),
+    );
+    checks.push(
+      ...(adapters.inspectNodeDirectory || inspectNodeDirectory)({
+        stateDir,
+        sessions: state.allSessions || state.sessions,
+        jobs: state.jobs,
+      }),
+    );
+    checks.push(
+      ...(adapters.inspectRouteState || inspectRouteState)({
+        stateDir,
+        sessions: state.allSessions || state.sessions,
+      }),
+    );
+    checks.push(
+      ...(adapters.inspectInboundPolicies || inspectInboundPolicies)({ stateDir }),
+    );
+    checks.push(
+      ...(adapters.inspectConversationState || inspectConversationState)({
+        stateDir,
+        jobs: state.jobs,
+      }),
+    );
+    checks.push(...(adapters.inspectRepairState || inspectRepairState)({ stateDir }));
+    checks.push(
+      ...(adapters.inspectRepairRetentionState || inspectRepairRetentionState)({
+        stateDir,
+      }),
+    );
+  } else {
+    checks.push(
+      ...(adapters.inspectRouteState || inspectRouteState)({
+        stateDir,
+        sessions: state.allSessions || state.sessions,
+        target,
+      }),
+    );
+    checks.push({
+      id: "doctor.target.scope",
+      scope: "doctor",
+      status: "pass",
+      summary: "Target mode excludes unrelated global historical state",
+      verification: "target-filter",
+      repairable: false,
+      required: false,
+    });
+  }
   checks.push(...(adapters.inspectJobs || inspectJobs)(state.jobs));
   checks.push(...(adapters.inspectAttachments || inspectAttachments)(state.attachments));
   checks.push(...await (adapters.inspectPermissions || inspectPermissions)(
@@ -104,12 +150,13 @@ export async function runDoctor({
     state.sessions,
     { deep, socketPath },
   ));
+  const scopedChecks = target ? deduplicateDoctorChecks(checks) : checks;
   return {
     schemaVersion: DOCTOR_SCHEMA_VERSION,
-    overall: doctorOverall(checks),
+    overall: doctorOverall(scopedChecks),
     deep,
     target,
-    checks,
+    checks: scopedChecks,
   };
 }
 

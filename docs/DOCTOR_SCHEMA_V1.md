@@ -69,6 +69,14 @@ Every check contains:
 - `required` controls the `overall` policy. Optional failures still make a
   report degraded; only required failures make it unhealthy.
 
+`--target` is a scoped operational view. It includes the selected Session,
+related Jobs and attachments, its Claude bridge and thread, current runtime and
+service health, plus Route Delivery evidence whose sender or recipient is that
+Session. Unrelated historical Directory, Conversation, Message Body, policy,
+and Repair findings remain available in the unscoped Doctor report. Duplicate
+stable finding IDs are collapsed to one entry while preserving the strongest
+status and required boundary.
+
 Bridge implementation findings use `EBRIDGEVERSIONUNKNOWN` when a legacy
 running bridge has no implementation revision and `EBRIDGESTALECODE` when its
 recorded revision differs from the current executable. Both are warnings:
@@ -80,6 +88,10 @@ compares the version returned by the Codex-owned handshake with the configured
 Codex CLI and reports `EAPPSERVERVERSIONMISMATCH` or
 `EAPPSERVERVERSIONUNKNOWN`; it never treats the App Server as a cxmsg-loaded
 module.
+
+`cxmsg claude bridge status <target>` also prints
+`implementation=current|stale|unknown`. A stale value emits an explicit
+restart warning; neither status nor Doctor restarts the bridge.
 The implementation revision is independent of the package version so local or
 unreleased code changes cannot be hidden behind an unchanged semantic version.
 Maintainers increment the relevant module revision whenever a long-running
