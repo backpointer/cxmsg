@@ -1696,9 +1696,31 @@ async function commandPeers(jsonOutput) {
     process.stdout.write("No cxmsg sessions found.\n");
     return;
   }
+  const columnWidth = (header, values, maximum) =>
+    Math.min(maximum, Math.max(header.length, ...values.map((value) => value.length)));
+  const column = (value, width) => {
+    const text = String(value);
+    return (text.length > width ? `${text.slice(0, width - 3)}...` : text).padEnd(
+      width,
+    );
+  };
+  const nameWidth = columnWidth(
+    "NAME",
+    peers.map((peer) => peer.name),
+    32,
+  );
+  const statusWidth = columnWidth(
+    "STATUS",
+    peers.map((peer) => peer.status),
+    20,
+  );
+  const threadWidth = "THREAD_ID_PREFIX".length;
+  process.stdout.write(
+    `${column("NAME", nameWidth)}  ${column("STATUS", statusWidth)}  ${column("THREAD_ID_PREFIX", threadWidth)}  CWD\n`,
+  );
   for (const peer of peers) {
     process.stdout.write(
-      `${peer.name}\t${peer.status}\t${peer.id.slice(0, 8)}\t${peer.cwd}\n`,
+      `${column(peer.name, nameWidth)}  ${column(peer.status, statusWidth)}  ${column(peer.id.slice(0, 8), threadWidth)}  ${peer.cwd}\n`,
     );
   }
 }
