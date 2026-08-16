@@ -4374,7 +4374,7 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
     }
     if (
       kind === "delegation" &&
-      job.status === "failed" &&
+      ["failed", "unknown"].includes(job.status) &&
       typeof job.failureStage === "string"
     ) {
       const turnEvidence = job.modelTurnStarted;

@@ -19,6 +19,16 @@ export function isTerminalTurnStatus(status) {
   return TERMINAL_TURN_STATUSES.includes(status);
 }
 
+export function isEmptyRolloutReadError(error) {
+  const message = [error?.details?.message, error?.message]
+    .filter((value) => typeof value === "string")
+    .join("\n");
+  return (
+    /thread-store internal error/i.test(message) &&
+    /rollout(?: at [^\n]+)? is empty/i.test(message)
+  );
+}
+
 export function summarizeTurnLifecycle(page) {
   const turns = Array.isArray(page?.data) ? page.data : [];
   return {

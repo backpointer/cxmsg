@@ -1464,6 +1464,15 @@ source thread, while the standalone Execution Thread records
 `creationMode: explicit-fresh`; no session role, grant, or Conversation identity
 is transferred to that thread.
 
+A new `fresh` Execution Thread can briefly expose an empty rollout between
+`turn/start` acceptance and the first durable rollout flush. cxmsg treats that
+specific App Server error as transient for five seconds and re-observes the
+same confirmed turn without creating another Job or model turn. If the rollout
+remains empty, the Job becomes terminal `unknown` with
+`failureCode=EROLLOUTEMPTY`, a redacted error, and explicit no-retry guidance.
+Fast worker failures and readiness timeouts include the durable Job ID and the
+exact `cxmsg result <job-id> --json` inspection command.
+
 Delegation tasks up to 16 KiB remain directly embedded in the owner-private Job.
 Larger tasks up to the 256 KiB Message Body Store limit are retained under the
 Job UUID; the Job stores only byte count, SHA-256, and content reference. The
@@ -1720,6 +1729,15 @@ is present, `cxmsg` validates the named profile through
 `permissionProfile/list` before dispatch. Common built-in profiles include
 `:read-only`, `:workspace`, and `:danger-full-access`, but availability can be
 restricted by managed requirements.
+
+List the exact profiles available for a target before Delegation:
+
+```bash
+cxmsg permissions worker
+```
+
+Built-in profile names are colon-prefixed. An unknown profile error includes
+this discovery command and suggests `:read-only` when `read-only` was supplied.
 
 Codex Peer Messages are limited to 256 KiB. Bodies through 16 KiB use inline
 delivery; larger bodies use a 2 KiB preview and Content Reference. Delegation

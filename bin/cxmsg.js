@@ -92,6 +92,7 @@ import {
 import {
   availablePermissionProfiles,
   captureScheduledDelegationTarget,
+  requirePermissionProfile,
   validateDelegationAuthority,
 } from "../src/delegation-authority.js";
 import {
@@ -2016,9 +2017,7 @@ async function commandClaudeGrant(args) {
   const profiles = await withAppServer((client) =>
     availablePermissionProfiles(client, record.cwd),
   );
-  const selected = profiles.find((profile) => profile.id === permissions);
-  if (!selected) throw new Error(`unknown permission profile: ${permissions}`);
-  if (!selected.allowed) throw new Error(`permission profile is blocked: ${permissions}`);
+  requirePermissionProfile(profiles, permissions, codexTarget);
 
   await withSessionLock(codexTarget, async () => {
     const current = readSessionRecord(codexTarget);
@@ -2418,11 +2417,7 @@ async function commandDelegate(args) {
   await withAppServer(async (client) => {
     if (permissions) {
       const profiles = await availablePermissionProfiles(client, record.cwd);
-      const selected = profiles.find((profile) => profile.id === permissions);
-      if (!selected) throw new Error(`unknown permission profile: ${permissions}`);
-      if (!selected.allowed) {
-        throw new Error(`permission profile is blocked: ${permissions}`);
-      }
+      requirePermissionProfile(profiles, permissions, target);
     }
     if (execution === "inline") {
       const thread = await readThreadMetadata(client, record.threadId);
@@ -2472,8 +2467,20 @@ async function commandDelegate(args) {
     let started = readJob(jobId);
     if (!started) throw new Error(`delegation job disappeared: ${jobId}`);
     started = await failJobIfWorkerExited(started);
-    if (started.status === "failed") throw new Error(started.error || "delegation failed");
-    if (!workerReady) throw new Error("delegation worker did not start before the readiness deadline");
+    if (!isPendingJob(started) && started.status !== "completed") {
+      const error = new Error(
+        `Delegation ${jobId} ended with status ${started.status}: ${started.error || "delegation worker stopped"}; inspect: cxmsg result ${jobId} --json`,
+      );
+      error.code = started.failureCode || "EDELEGATIONWORKER";
+      throw error;
+    }
+    if (!workerReady) {
+      const error = new Error(
+        `Delegation ${jobId} did not reach observable readiness; inspect: cxmsg result ${jobId} --json`,
+      );
+      error.code = "EDELEGATIONREADINESS";
+      throw error;
+    }
     process.stdout.write(
       `delegated ${jobId} to ${target} (${execution}, ${approval}, turn ${started.turnId || "pending"})\n`,
     );

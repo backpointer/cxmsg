@@ -1,6 +1,6 @@
 {
   "name": "codex-session-messaging",
-  "version": "0.52.1",
+  "version": "0.52.2",
   "private": true,
   "license": "MIT",
   "description": "Same-machine Codex session messaging with an optional Claude Code UDS bridge.",

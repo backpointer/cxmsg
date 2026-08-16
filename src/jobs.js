@@ -27,10 +27,12 @@ import { CXMSG_STATE_DIR } from "./runtime.js";
 import {
   findFinalTurnResult,
   findThreadTurn,
+  isEmptyRolloutReadError,
 } from "./thread-activity.js";
 
 const JOBS_DIR = path.join(CXMSG_STATE_DIR, "jobs");
 const WORKER_REGISTRATION_GRACE_MS = 10_000;
+const TURN_OBSERVATION_GRACE_MS = 5_000;
 
 export const JOB_OBSERVATION_NOTIFICATION_OPT_OUT = Object.freeze([
   "item/completed",
@@ -525,9 +527,35 @@ export async function failJobIfWorkerExited(
 
 export async function refreshJob(client, job) {
   if (!job.turnId) return job;
-  const turn = await findThreadTurn(client, job.threadId, job.turnId, {
-    itemsView: "notLoaded",
-  });
+  let turn;
+  try {
+    turn = await findThreadTurn(client, job.threadId, job.turnId, {
+      itemsView: "notLoaded",
+    });
+  } catch (error) {
+    if (!isEmptyRolloutReadError(error)) throw error;
+    const startedAt = Date.parse(
+      job.turnStartedAt || job.updatedAt || job.createdAt,
+    );
+    if (
+      Number.isFinite(startedAt) &&
+      Date.now() - startedAt < TURN_OBSERVATION_GRACE_MS
+    ) {
+      return readJob(job.jobId) || job;
+    }
+    return updateJob(job, {
+      status: "unknown",
+      failureCode: "EROLLOUTEMPTY",
+      failureEvidence: { errorCode: "EROLLOUTEMPTY" },
+      failureStage: "turn-observation",
+      modelTurnStarted: true,
+      rerouteGuidance:
+        "Turn start is confirmed but completion is unknown; inspect the retained thread and do not retry or redelegate automatically.",
+      error:
+        "execution thread rollout remained empty beyond the bounded observation grace",
+      completedAt: job.completedAt || new Date().toISOString(),
+    });
+  }
   if (!turn) {
     const startedAt = Date.parse(job.turnStartedAt || job.updatedAt || job.createdAt);
     if (Number.isFinite(startedAt) && Date.now() - startedAt < 10_000) {

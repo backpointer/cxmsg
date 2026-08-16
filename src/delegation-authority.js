@@ -22,6 +22,26 @@ export async function availablePermissionProfiles(client, cwd) {
   return result.data || [];
 }
 
+export function requirePermissionProfile(profiles, permissions, target) {
+  const selected = profiles.find((profile) => profile.id === permissions);
+  if (!selected) {
+    const prefixHint = permissions.startsWith(":")
+      ? ""
+      : "; built-in profile names are colon-prefixed (for example :read-only)";
+    throw authorityError(
+      "EPERMISSIONPROFILE",
+      `unknown permission profile: ${permissions}; inspect available profiles with: cxmsg permissions ${target}${prefixHint}`,
+    );
+  }
+  if (!selected.allowed) {
+    throw authorityError(
+      "EPERMISSIONBLOCKED",
+      `permission profile is blocked: ${permissions}`,
+    );
+  }
+  return selected;
+}
+
 export function captureScheduledDelegationTarget(record) {
   if (!record?.threadId) {
     throw authorityError("ETARGETIDENTITY", "scheduled Delegation target is unavailable");
@@ -132,19 +152,7 @@ export async function validateDelegationAuthority(
 
   if (job.permissions) {
     const profiles = await permissionProfiles(client, record.cwd);
-    const selected = profiles.find((profile) => profile.id === job.permissions);
-    if (!selected) {
-      throw authorityError(
-        "EPERMISSIONPROFILE",
-        `unknown permission profile: ${job.permissions}`,
-      );
-    }
-    if (!selected.allowed) {
-      throw authorityError(
-        "EPERMISSIONBLOCKED",
-        `permission profile is blocked: ${job.permissions}`,
-      );
-    }
+    requirePermissionProfile(profiles, job.permissions, job.target);
   }
   return { record };
 }

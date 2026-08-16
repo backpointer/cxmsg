@@ -18,6 +18,7 @@ import {
   refreshJob,
   updateJob,
 } from "./jobs.js";
+import { requirePermissionProfile } from "./delegation-authority.js";
 import {
   deliverDelegatedTask,
   truncateUtf8,
@@ -48,17 +49,11 @@ async function terminalFailure(job, message) {
   });
 }
 
-async function validatePermissionProfile(client, record, permissions) {
+async function validatePermissionProfile(client, record, permissions, target) {
   const result = await client.request("permissionProfile/list", {
     cwd: record.cwd,
   });
-  const profile = (result.data || []).find(
-    (candidate) => candidate.id === permissions,
-  );
-  if (!profile) throw new Error(`unknown permission profile: ${permissions}`);
-  if (!profile.allowed) {
-    throw new Error(`permission profile is blocked: ${permissions}`);
-  }
+  requirePermissionProfile(result.data || [], permissions, target);
 }
 
 async function waitForSourceThread(client, job, deadline) {
@@ -96,7 +91,12 @@ async function forkExecutionThread(client, sourceThread, record, permissions, ap
 }
 
 async function startClaudeRequest(client, job, targetRecord, deadline) {
-  await validatePermissionProfile(client, targetRecord, job.permissions);
+  await validatePermissionProfile(
+    client,
+    targetRecord,
+    job.permissions,
+    job.target,
+  );
   const sourceThread = await waitForSourceThread(client, job, deadline);
   const executionThread = await forkExecutionThread(
     client,

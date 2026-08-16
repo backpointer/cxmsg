@@ -10,6 +10,9 @@ const jobs = await import(`../src/jobs.js?execution-worker=${Date.now()}`);
 const bodies = await import(`../src/message-bodies.js?execution-worker=${Date.now()}`);
 const registry = await import(`../src/registry.js?execution-worker=${Date.now()}`);
 const directory = await import(`../src/node-directory.js?execution-worker=${Date.now()}`);
+const authority = await import(
+  `../src/delegation-authority.js?execution-worker=${Date.now()}`
+);
 const { runDelegationWorker } = await import(
   `../src/delegation-worker.js?execution-worker=${Date.now()}`
 );
@@ -230,6 +233,45 @@ class ResultFrameFailureClient extends FixtureClient {
     return super.request(method, params);
   }
 }
+
+class EmptyRolloutRaceClient extends ExplicitFreshClient {
+  static executionThreadId = "e6345678-1234-4234-8234-123456789abc";
+  static turnId = "e7345678-1234-4234-8234-123456789abc";
+  static requests = [];
+  static emptyReads = 0;
+
+  async request(method, params) {
+    if (method === "thread/turns/list" && this.constructor.emptyReads++ === 0) {
+      this.constructor.requests.push({ method, params });
+      throw new Error(
+        "thread/turns/list failed: thread-store internal error: rollout at /private/runtime/rollout.jsonl is empty",
+      );
+    }
+    return super.request(method, params);
+  }
+}
+
+test("permission profile errors expose the exact discovery command", () => {
+  assert.throws(
+    () => authority.requirePermissionProfile(
+      [{ id: ":read-only", allowed: true }],
+      "read-only",
+      "worker",
+    ),
+    (error) =>
+      error?.code === "EPERMISSIONPROFILE" &&
+      /cxmsg permissions worker/.test(error.message) &&
+      /:read-only/.test(error.message),
+  );
+  assert.equal(
+    authority.requirePermissionProfile(
+      [{ id: ":read-only", allowed: true }],
+      ":read-only",
+      "worker",
+    ).id,
+    ":read-only",
+  );
+});
 
 test("fork Delegation classifies its Execution Thread before completion", async () => {
   FixtureClient.requests = [];
@@ -517,6 +559,65 @@ test("terminal turn evidence survives a bounded result observation failure", asy
     ResultFrameFailureClient.options.optOutNotificationMethods,
     ["item/completed", "turn/completed"],
   );
+});
+
+test("a transient empty rollout is re-observed without failing the started turn", async () => {
+  const emptyRaceJobId = "e5345678-1234-4234-8234-123456789abc";
+  EmptyRolloutRaceClient.emptyReads = 0;
+  EmptyRolloutRaceClient.requests = [];
+  jobs.createJob({
+    jobId: emptyRaceJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: sourceThreadId,
+    task: "empty rollout race fixture",
+    execution: "fresh",
+  });
+
+  const result = await runDelegationWorker(emptyRaceJobId, {
+    Client: EmptyRolloutRaceClient,
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(result.result, "done");
+  assert.equal(result.modelTurnStarted, true);
+  assert.equal(result.failureCode, undefined);
+  assert.equal(EmptyRolloutRaceClient.emptyReads >= 2, true);
+  assert.doesNotMatch(JSON.stringify(result), /private\/runtime/);
+});
+
+test("a persistent empty rollout becomes redacted unknown evidence", async () => {
+  const persistentJobId = "f7345678-1234-4234-8234-123456789abc";
+  const created = jobs.createJob({
+    jobId: persistentJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: sourceThreadId,
+    task: "persistent empty rollout fixture",
+    execution: "fresh",
+  });
+  const running = await jobs.updateJob(created, {
+    status: "running",
+    threadId: "f8345678-1234-4234-8234-123456789abc",
+    turnId: "f9345678-1234-4234-8234-123456789abc",
+    turnStartedAt: "2026-08-16T00:00:00.000Z",
+    modelTurnStarted: true,
+  });
+  const result = await jobs.refreshJob(
+    {
+      async request() {
+        throw new Error(
+          "thread/turns/list failed: thread-store internal error: rollout at /private/runtime/rollout.jsonl is empty",
+        );
+      },
+    },
+    running,
+  );
+  assert.equal(result.status, "unknown");
+  assert.equal(result.failureCode, "EROLLOUTEMPTY");
+  assert.equal(result.failureStage, "turn-observation");
+  assert.equal(result.modelTurnStarted, true);
+  assert.match(result.rerouteGuidance, /do not retry or redelegate/i);
+  assert.doesNotMatch(JSON.stringify(result), /private\/runtime/);
 });
 
 test("standalone fallback remains a non-addressable Execution Thread", async () => {

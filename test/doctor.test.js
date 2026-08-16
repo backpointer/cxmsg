@@ -715,13 +715,27 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
       failureStage: "turn-start",
       modelTurnStarted: null,
     },
+    {
+      version: 1,
+      kind: "delegation",
+      jobId: "b2345678-1234-4234-8234-123456789abc",
+      status: "unknown",
+      failureCode: "EROLLOUTEMPTY",
+      failureStage: "turn-observation",
+      modelTurnStarted: true,
+      rerouteGuidance:
+        "Turn start is confirmed but completion is unknown; do not retry or redelegate automatically.",
+    },
   ]);
-  assert.equal(stagedFailures.length, 2);
+  assert.equal(stagedFailures.length, 3);
   assert.match(stagedFailures[0].summary, /before any model turn/);
   assert.equal(stagedFailures[0].verification, "record:turn-start");
   assert.match(stagedFailures[0].remediation, /Verify the App Server/);
   assert.match(stagedFailures[1].summary, /unverified model-turn acceptance/);
   assert.match(stagedFailures[1].remediation, /Do not retry/);
+  assert.match(stagedFailures[2].summary, /after positive model-turn/);
+  assert.equal(stagedFailures[2].errorCode, "EROLLOUTEMPTY");
+  assert.match(stagedFailures[2].remediation, /do not retry or redelegate/i);
 });
 
 test("Message Body Store Inspector reports private metadata, quarantine, and quota", async () => {

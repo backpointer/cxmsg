@@ -4,10 +4,24 @@ import {
   findClientUserMessage,
   findFinalTurnResult,
   findThreadTurn,
+  isEmptyRolloutReadError,
   readThreadForInput,
   readThreadMetadata,
   summarizeTurnLifecycle,
 } from "../src/thread-activity.js";
+
+test("empty rollout classification is narrow and does not expose a path", () => {
+  const error = new Error(
+    "thread/turns/list failed: thread-store internal error: rollout at /private/session.jsonl is empty",
+  );
+  assert.equal(isEmptyRolloutReadError(error), true);
+  assert.equal(
+    isEmptyRolloutReadError(
+      new Error("thread/turns/list failed: rollout is malformed"),
+    ),
+    false,
+  );
+});
 
 test("turn lifecycle summary exposes IDs and statuses without turn contents", () => {
   const summary = summarizeTurnLifecycle({
