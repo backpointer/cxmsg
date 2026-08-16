@@ -139,6 +139,7 @@ const EXECUTION_THREAD_FIELDS = new Set([
 ]);
 const EXECUTION_CREATION_MODES = new Set([
   "fork",
+  "explicit-fresh",
   "start-fallback",
   "legacy-observed",
 ]);
@@ -1670,12 +1671,13 @@ export async function classifyExecutionThread({
   if (
     !job ||
     (job.kind ?? "delegation") !== "delegation" ||
-    job.execution !== "fork" ||
+    !["fork", "fresh"].includes(job.execution) ||
+    (creationMode === "explicit-fresh") !== (job.execution === "fresh") ||
     job.targetThreadId !== sourceThreadId ||
     ![sourceThreadId, threadId].includes(job.threadId) ||
     (job.executionThreadId && job.executionThreadId !== threadId)
   ) {
-    throw new Error("Execution Thread does not match a retained fork Delegation");
+    throw new Error("Execution Thread does not match a retained isolated Delegation");
   }
   if (
     creationMode === "legacy-observed" &&

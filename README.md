@@ -402,6 +402,11 @@ currently registered sender thread. An unbound, missing, or replacement sender
 is quarantined rather than trusted. Use `--` after send options when an
 operator wants an explicit end-of-options delimiter.
 
+`--payload-type` belongs to the typed Route Envelope and therefore requires
+both `--project` and `--target-role`. It does not silently decorate an ordinary
+direct message. Omit it for an unscoped direct send; cxmsg reports this exact
+compatibility requirement before creating a Logical Message.
+
 Project, task, role, and payload-type identifiers are 1–128 ASCII safe
 characters and may contain letters, digits, `.`, `_`, `:`, or `-`. Codex
 session names remain the narrower 1–64 character namespace without `:`.
@@ -423,7 +428,11 @@ cxmsg directory sync --project hermes --claude-only
 Omit the runtime-only flag to synchronize both. Git repositories and their
 worktrees are matched by canonical Git common directory; non-Git projects use
 the explicitly declared canonical root. Equal basenames, remote URLs, or
-similar paths never cause an automatic merge.
+ancestor paths do not authorize cxmsg to choose a Project silently during
+`cxmsg create`. A scheduled Delegation to an unsynchronized target fails before
+Job creation with `ETARGETNODE`; when exactly one Project contains the target,
+the error includes the exact bounded `directory sync --project ... --codex-only`
+command. Similar paths never cause an automatic merge.
 
 An explicit Project move retains the stable Project UUID, appends an
 owner-private transition, preserves prior root aliases, and changes only the
@@ -493,7 +502,8 @@ thread is a predecessor, dispatch remains blocked with
 released with zero attempts. The operator must cancel the old schedule and
 enqueue a new Logical Message for the intended successor.
 
-Fork Delegations and their standalone `thread/start` fallback are classified as
+Fork Delegations, explicit fresh executions, and standalone `thread/start`
+fallbacks are classified as
 non-addressable Execution Threads before their first delegated turn starts.
 The record contains only the execution thread ID, Job ID, source thread/Node
 reference when available, creation mode, and classification time. It contains
@@ -1383,12 +1393,33 @@ Fork Delegation passes the stable source thread ID directly to the App Server's
 source thread first. Inline Delegation still uses a metadata-only Busy
 preflight. WebSocket size failures expose bounded `EAPPWSOUTBOUND`,
 `EAPPWSBUFFER`, `EAPPWSFRAME`, or `EAPPWSFRAGMENTS` evidence instead of an
-unstructured transport message.
+unstructured transport message. `EAPPWSNOTCONNECTED` identifies a request that
+could not be written to the App Server connection.
+
+If a long-history source cannot be forked within the bounded WebSocket frame,
+cxmsg does not silently replace its execution identity. After confirming that
+the failed Job has `modelTurnStarted: false`, an operator may use
+`--execution fresh` with a new Job ID. The Job still pins the named target and
+source thread, while the standalone Execution Thread records
+`creationMode: explicit-fresh`; no session role, grant, or Conversation identity
+is transferred to that thread.
+
+Delegation tasks up to 16 KiB remain directly embedded in the owner-private Job.
+Larger tasks up to the 256 KiB Message Body Store limit are retained under the
+Job UUID; the Job stores only byte count, SHA-256, and content reference. The
+execution turn receives a bounded preview and an instruction to read and verify
+the complete retained task in chunks. Retention protects a referenced task body
+for as long as its Job exists.
 
 The Job's terminal status and result are durable execution evidence. Optional
 mirror delivery and Claude response delivery remain separate `mirrorDelivery`
 or `reply` evidence. A failed peer delivery never rewrites a completed Job to
 failed; `cxmsg result` and Doctor report the coordination failure separately.
+Delegation failures also record `failureStage`, `turnStartAttemptedAt`, and a
+tri-state `modelTurnStarted`: `true` is positive turn evidence, `false` proves
+failure before model execution, and `null` means acceptance is ambiguous and
+must not be retried automatically. `rerouteGuidance` is bounded operational
+advice and never grants authority.
 
 Idle persisted threads remain addressable even when their original TUI is
 closed. A newly opened Codex session that has never received a first turn has no
@@ -1534,10 +1565,11 @@ fork Jobs; it classifies strong Execution Thread evidence without fabricating
 ordinary communication history. See
 [Scheduled Delegation v1](docs/SCHEDULED_DELEGATION_V1.md).
 
-Each delegated job runs in a persistent fork of the target worker thread. The
-fork retains the worker's conversation context while keeping job-specific
-permission changes and approval policy away from the original worker. Empty
-workers without a rollout use a fresh job thread in the same project instead.
+By default, each delegated job runs in a persistent fork of the target worker
+thread. The fork retains the worker's conversation context while keeping
+job-specific permission changes and approval policy away from the original
+worker. Empty workers without a rollout use a fresh job thread in the same
+project instead.
 
 ### Execution modes and TUI visibility
 
@@ -1545,6 +1577,12 @@ The default `--execution fork` keeps the isolation described above. The target
 thread remains idle while the fork works, so its ordinary Codex TUI does not
 show the delegated turn. `cxmsg status <target>` compensates by reporting
 `delegated-working` or `awaiting-approval`, plus active job counts.
+
+Use `--execution fresh` only when the operator explicitly chooses to omit a
+long or unavailable source history. It starts an isolated Execution Thread in
+the target Project while retaining the named target and source thread as Job
+provenance. It does not inherit the target's conversation context and never
+promotes the new thread to an addressable peer.
 
 Use `--execution inline` when the delegated request and response must appear in
 the target's original TUI and remain in that conversation context:

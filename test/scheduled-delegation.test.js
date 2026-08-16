@@ -12,6 +12,7 @@ process.env.CXMSG_STATE_DIR = stateDir;
 const directory = await import(`../src/node-directory.js?scheduled=${Date.now()}`);
 const registry = await import(`../src/registry.js?scheduled=${Date.now()}`);
 const jobs = await import(`../src/jobs.js?scheduled=${Date.now()}`);
+const bodies = await import(`../src/message-bodies.js?scheduled=${Date.now()}`);
 const authority = await import(`../src/delegation-authority.js?scheduled=${Date.now()}`);
 const scheduler = await import(`../src/scheduler.js?scheduled=${Date.now()}`);
 
@@ -29,6 +30,8 @@ const ids = {
   predecessor: "b2345678-3234-4234-8234-123456789abc",
   permission: "d2345678-3234-4234-8234-123456789abc",
   projectMismatch: "e2345678-3234-4234-8234-123456789abc",
+  fresh: "f2345678-3234-4234-8234-123456789abc",
+  large: "a3345678-3234-4234-8234-123456789abc",
 };
 
 await directory.ensureProject({
@@ -97,6 +100,29 @@ test("scheduled Delegation enqueue is durable and idempotent by one Job ID", asy
     jobs.createScheduledDelegationJob({ ...initialSpec, task: "changed task" }),
     /idempotency conflict/,
   );
+});
+
+test("scheduled Delegation retains large tasks and explicit fresh execution policy", async () => {
+  const task = `scheduled large review\n${"retained-line\n".repeat(1_400)}`;
+  const taskBody = await bodies.storeMessageBody({
+    messageId: ids.large,
+    body: task,
+  });
+  const large = (
+    await jobs.createScheduledDelegationJob(
+      spec(ids.large, { task: null, taskBody }),
+    )
+  ).job;
+  assert.equal(large.task, null);
+  assert.equal(large.taskBody.contentRef, `cxmsg-message:${ids.large}`);
+
+  const fresh = (
+    await jobs.createScheduledDelegationJob(
+      spec(ids.fresh, { execution: "fresh" }),
+    )
+  ).job;
+  assert.equal(fresh.execution, "fresh");
+  await authority.validateDelegationAuthority(fresh, client);
 });
 
 test("an expired claim can be recovered but the old dispatcher cannot activate", async () => {
@@ -310,4 +336,20 @@ test("authority capture binds the exact synchronized Node and Project", async ()
     targetNodeKey: `codex:${ids.target}`,
     targetProjectId: ids.project,
   });
+});
+
+test("an unsynchronized target reports the exact safe Directory sync command", () => {
+  assert.throws(
+    () =>
+      authority.captureScheduledDelegationTarget({
+        name: "new-reviewer",
+        threadId: "f2345678-3234-4234-8234-123456789abc",
+        cwd: projectRoot,
+      }),
+    (error) =>
+      error?.code === "ETARGETNODE" &&
+      error.message.includes(
+        "cxmsg directory sync --project scheduled-fixture --codex-only",
+      ),
+  );
 });

@@ -385,6 +385,16 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Surface stale bridge implementation state in the bridge status command.
 - [x] Keep terminal Job execution evidence independent from optional mirror or
       Claude-response delivery failure.
+- [x] Store Delegation tasks over 16 KiB by Job-bound Message Body reference,
+      retain only bounded metadata in the Job, and protect the body from purge.
+- [x] Record the worker failure stage and tri-state model-turn evidence; expose
+      safe guidance without automatically retrying ambiguous acceptance.
+- [x] Offer explicit `--execution fresh` with retained source provenance for a
+      long-history source that cannot be forked within the frame bound.
+- [x] Explain that `--payload-type` requires a typed Project/role route before
+      any Logical Message is created.
+- [x] Return an exact Directory sync command when one known Project contains an
+      unsynchronized scheduled Delegation target.
 
 ## Explicit non-goals for this sequence
 

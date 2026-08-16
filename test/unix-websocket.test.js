@@ -147,6 +147,10 @@ test("UnixWebSocket masks client frames and assembles split server fragments", {
   });
   const client = new UnixWebSocket(socketPath, { maxBufferBytes: 256 });
   try {
+    assert.throws(
+      () => client.sendText("before-connect"),
+      (error) => error?.code === "EAPPWSNOTCONNECTED",
+    );
     const message = new Promise((resolve) => client.once("message", resolve));
     await client.connect();
     assert.throws(

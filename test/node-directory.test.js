@@ -431,7 +431,7 @@ test("Execution Threads retain bounded Job provenance without becoming Nodes", a
       sourceThreadId: nodeId,
       creationMode: "fork",
     }),
-    /retained fork Delegation/,
+    /retained isolated Delegation/,
   );
 
   await assert.rejects(

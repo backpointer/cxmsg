@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { createApprovalHandler } from "./approvals.js";
 import {
@@ -24,6 +25,7 @@ import {
   truncateUtf8,
 } from "./messaging.js";
 import { classifyExecutionThread } from "./node-directory.js";
+import { readWholeMessageBody } from "./message-bodies.js";
 import {
   readSessionRecord,
   sessionAllowsAppServerResume,
@@ -32,6 +34,49 @@ import { readThreadMetadata } from "./thread-activity.js";
 
 export { APPROVAL_MODES, EXECUTION_MODES, MIRROR_MODES };
 
+function resolvedDelegationTask(job) {
+  if (!job.taskBody) return { task: job.task, taskBody: null };
+  let task;
+  try {
+    task = readWholeMessageBody(job.taskBody.contentRef);
+  } catch {
+    const error = new Error("stored Delegation task body is unavailable");
+    error.code = "EDELEGATIONTASKBODY";
+    throw error;
+  }
+  const bodyBytes = Buffer.byteLength(task, "utf8");
+  const bodySha256 = createHash("sha256").update(task).digest("hex");
+  if (
+    job.task !== null ||
+    job.taskBody.messageId !== job.jobId ||
+    job.taskBody.contentRef !== `cxmsg-message:${job.jobId}` ||
+    job.taskBody.bodyBytes !== bodyBytes ||
+    job.taskBody.bodySha256 !== bodySha256
+  ) {
+    const error = new Error("stored Delegation task reference does not match its body");
+    error.code = "EDELEGATIONTASKBODY";
+    throw error;
+  }
+  return { task, taskBody: job.taskBody };
+}
+
+function delegationFailureGuidance({ errorCode, failureStage, modelTurnStarted }) {
+  if (modelTurnStarted === null) {
+    return "Turn acceptance is unverified; do not retry or reroute automatically.";
+  }
+  if (errorCode === "EAPPWSNOTCONNECTED") {
+    return "No model turn started; verify cxmsg server connectivity before using a new Job ID.";
+  }
+  if (
+    errorCode === "EAPPWSFRAME" &&
+    failureStage === "execution-thread" &&
+    modelTurnStarted === false
+  ) {
+    return "The source thread could not be forked within the frame bound; retry only by explicit operator choice with --execution fresh and a new Job ID.";
+  }
+  return null;
+}
+
 async function executionThread(client, record, job) {
   if (job.execution === "inline") {
     const sourceThread = await readThreadMetadata(client, record.threadId);
@@ -39,6 +84,16 @@ async function executionThread(client, record, job) {
       throw new Error("target session already has an active turn");
     }
     return { thread: sourceThread, creationMode: null };
+  }
+  if (job.execution === "fresh") {
+    const startParams = {
+      cwd: record.cwd,
+      serviceName: "cxmsg-delegate-fresh",
+      approvalPolicy: job.approval === "never" ? "never" : "on-request",
+    };
+    if (job.permissions) startParams.permissions = job.permissions;
+    const started = await client.request("thread/start", startParams);
+    return { thread: started.thread, creationMode: "explicit-fresh" };
   }
   const forkParams = {
     threadId: record.threadId,
@@ -78,9 +133,12 @@ async function waitForTerminal(client, jobId) {
 function mirrorMessage(job) {
   const header =
     `Delegated cxmsg job ${job.jobId} from ${job.from} finished with status ${job.status}. ` +
-    "This is a synchronization record from an isolated execution fork.";
+    "This is a synchronization record from an isolated execution thread.";
   if (job.mirror === "full") {
-    return `${header}\n\nTask:\n${job.task}\n\nResult:\n${job.result || job.error || "No result."}`;
+    const task = job.taskBody
+      ? `Stored task: ${job.taskBody.contentRef} (${job.taskBody.bodyBytes} bytes)`
+      : `Task:\n${job.task}`;
+    return `${header}\n\n${task}\n\nResult:\n${job.result || job.error || "No result."}`;
   }
   const result = job.result || job.error || "No result.";
   const bounded = Buffer.byteLength(result, "utf8") > 2_048
@@ -132,6 +190,9 @@ export async function runDelegationWorker(
   { Client = AppServerClient, scheduleClaim = null } = {},
 ) {
   let job = readJob(jobId);
+  let failureStage = "worker-initialization";
+  let turnStartAttempted = false;
+  let modelTurnStarted = false;
   if (!job) throw new Error(`unknown job: ${jobId}`);
   if (scheduleClaim) {
     const activated = await activateScheduledDelegation(jobId, {
@@ -161,8 +222,11 @@ export async function runDelegationWorker(
 
   const client = new Client({ onServerRequest: createApprovalHandler(jobId) });
   try {
+    failureStage = "transport-connect";
     await client.connect();
+    failureStage = "authority-validation";
     const { record } = await validateDelegationAuthority(job, client);
+    failureStage = "execution-thread";
     const execution = await executionThread(client, record, job);
     if (execution.creationMode) {
       await classifyExecutionThread({
@@ -177,23 +241,42 @@ export async function runDelegationWorker(
         executionThreadId: execution.thread.id,
       }));
     }
+    failureStage = "task-body";
+    const delegatedTask = resolvedDelegationTask(job);
+    failureStage = "turn-preflight";
     const delivery = await deliverDelegatedTask(client, execution.thread, {
       from: job.from,
       target: job.target,
-      task: job.task,
+      ...delegatedTask,
       jobId: job.jobId,
       permissions: job.permissions,
       approvalPolicy: job.approval === "never" ? "never" : "on-request",
+    }, {
+      beforeStart: async () => {
+        failureStage = "turn-start-evidence";
+        job = await mutateJob(jobId, (current) => ({
+          ...current,
+          turnStartAttemptedAt:
+            current.turnStartAttemptedAt || new Date().toISOString(),
+          modelTurnStarted: null,
+        }));
+        turnStartAttempted = true;
+        failureStage = "turn-start";
+      },
     });
+    modelTurnStarted = true;
     job = await mutateJob(jobId, (current) => ({
       ...current,
       status: "running",
       threadId: delivery.threadId,
       executionThreadId:
-        current.execution === "fork" ? delivery.threadId : null,
+        current.execution === "inline" ? null : delivery.threadId,
       turnId: delivery.turnId,
       turnStartedAt: new Date().toISOString(),
+      modelTurnStarted: true,
+      failureStage: null,
     }));
+    failureStage = "turn-observation";
     job = await waitForTerminal(client, jobId);
     if (job) await mirrorResult(client, job);
   } catch (error) {
@@ -203,10 +286,28 @@ export async function runDelegationWorker(
         error,
         "EDELEGATIONWORKER",
       );
+      const failedBeforeModelTurn =
+        !turnStartAttempted ||
+        failureEvidence.errorCode === "EAPPWSNOTCONNECTED" ||
+        failureEvidence.errorCode === "EAPPWSOUTBOUND";
+      const modelTurnEvidence = modelTurnStarted
+        ? true
+        : failedBeforeModelTurn
+          ? false
+          : turnStartAttempted || job.turnStartAttemptedAt
+            ? null
+            : false;
       await updateJob(job, {
         status: "failed",
         failureCode: failureEvidence.errorCode,
         failureEvidence,
+        failureStage,
+        modelTurnStarted: modelTurnEvidence,
+        rerouteGuidance: delegationFailureGuidance({
+          errorCode: failureEvidence.errorCode,
+          failureStage,
+          modelTurnStarted: modelTurnEvidence,
+        }),
         error: error.message,
         completedAt: new Date().toISOString(),
       });

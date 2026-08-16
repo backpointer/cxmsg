@@ -12,10 +12,12 @@ import path from "node:path";
 import { withFileLock } from "./file-lock.js";
 import {
   finalTurnResult,
+  MAX_MESSAGE_BYTES,
   validateMessage,
   validateSessionName,
 } from "./messaging.js";
 import { processState } from "./process-state.js";
+import { MAX_STORED_MESSAGE_BYTES } from "./message-bodies.js";
 import {
   assertRetentionReadable,
   assertRetentionReadableNoCreate,
@@ -45,6 +47,34 @@ function jobPath(jobId) {
 
 function jobLockPath(jobId) {
   return path.join(JOBS_DIR, `${validateJobId(jobId)}.lock`);
+}
+
+function delegationTaskFields(jobId, task, taskBody) {
+  if (!taskBody) {
+    return { task: validateMessage(task), taskBody: null };
+  }
+  if (task !== null && task !== undefined) {
+    throw new Error("stored Delegation task must not be duplicated in the Job");
+  }
+  if (
+    taskBody.messageId !== jobId ||
+    taskBody.contentRef !== `cxmsg-message:${jobId}` ||
+    !Number.isSafeInteger(taskBody.bodyBytes) ||
+    taskBody.bodyBytes <= MAX_MESSAGE_BYTES ||
+    taskBody.bodyBytes > MAX_STORED_MESSAGE_BYTES ||
+    !/^[0-9a-f]{64}$/.test(taskBody.bodySha256 || "")
+  ) {
+    throw new Error("stored Delegation task reference is invalid");
+  }
+  return {
+    task: null,
+    taskBody: {
+      messageId: taskBody.messageId,
+      contentRef: taskBody.contentRef,
+      bodyBytes: taskBody.bodyBytes,
+      bodySha256: taskBody.bodySha256,
+    },
+  };
 }
 
 export function newJobId() {
@@ -112,6 +142,7 @@ function buildJob({
   targetThreadId = null,
   threadId,
   task,
+  taskBody = null,
   permissions = null,
   kind = "delegation",
   source = null,
@@ -123,6 +154,9 @@ function buildJob({
   schedule = null,
 }) {
   validateJobId(jobId);
+  const normalizedTask = kind === "delegation"
+    ? delegationTaskFields(jobId, task, taskBody)
+    : { task, taskBody: null };
   return {
     version: 1,
     jobId,
@@ -132,7 +166,7 @@ function buildJob({
     threadId,
     executionThreadId: null,
     turnId: null,
-    task,
+    ...normalizedTask,
     permissions,
     kind,
     source,
@@ -144,6 +178,14 @@ function buildJob({
     approvals: [],
     workerPid: null,
     mirrorDelivery: null,
+    ...(kind === "delegation"
+      ? {
+          turnStartAttemptedAt: null,
+          modelTurnStarted: false,
+          failureStage: null,
+          rerouteGuidance: null,
+        }
+      : {}),
     schedule,
     status: schedule ? "scheduled" : "dispatching",
     result: null,
@@ -162,6 +204,7 @@ function scheduledDelegationFingerprint(spec) {
         target: spec.target,
         targetThreadId: spec.targetThreadId,
         task: spec.task,
+        taskBody: spec.taskBody,
         permissions: spec.permissions || null,
         execution: spec.execution || "fork",
         approval: spec.approval || "never",
@@ -189,7 +232,7 @@ export async function createScheduledDelegationJob(spec) {
     target: validateSessionName(spec.target),
     targetThreadId,
     targetProjectId,
-    task: validateMessage(spec.task),
+    ...delegationTaskFields(jobId, spec.task, spec.taskBody),
     expiresAt,
   };
   if (

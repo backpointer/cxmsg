@@ -62,6 +62,25 @@ test("route binding commands expose explicit project and role metadata", () => {
   assert.equal(JSON.parse(listed.stdout).length, 1);
 });
 
+test("payload-type reports its routed-send requirement before message creation", () => {
+  const sent = cxmsg(
+    "send",
+    "--from",
+    "coordinator",
+    "--payload-type",
+    "artifact",
+    "--",
+    "terminal-worker",
+    "bounded artifact pointer",
+  );
+  assert.equal(sent.status, 1);
+  assert.match(
+    sent.stderr,
+    /--payload-type is a routed-send option.*--project.*--target-role/,
+  );
+  assert.equal(routes.listQuarantine().length, 0);
+});
+
 test("a bound target quarantines an unscoped CLI send before App Server access", () => {
   const sent = cxmsg("send", "--from", "coordinator", "worker", "unscoped body");
   assert.equal(sent.status, 1);

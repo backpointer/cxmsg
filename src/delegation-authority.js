@@ -1,12 +1,13 @@
 import {
   findNodeSuccessors,
+  listProjects,
   projectContainsPath,
   readNode,
   readProject,
 } from "./node-directory.js";
 import { readSessionRecord } from "./registry.js";
 
-export const EXECUTION_MODES = new Set(["fork", "inline"]);
+export const EXECUTION_MODES = new Set(["fork", "fresh", "inline"]);
 export const APPROVAL_MODES = new Set(["never", "relay", "auto"]);
 export const MIRROR_MODES = new Set(["none", "summary", "full"]);
 
@@ -27,9 +28,15 @@ export function captureScheduledDelegationTarget(record) {
   }
   const node = readNode("codex", record.threadId);
   if (!node) {
+    const projects = listProjects().filter((candidate) =>
+      projectContainsPath(candidate, record.cwd),
+    );
+    const guidance = projects.length === 1
+      ? `; run: cxmsg directory sync --project ${projects[0].routingId} --codex-only`
+      : "; run: cxmsg directory projects --paths, then cxmsg directory sync --project <routing-id> --codex-only";
     throw authorityError(
       "ETARGETNODE",
-      "scheduled Delegation requires a synchronized target Node",
+      `scheduled Delegation requires a synchronized target Node${guidance}`,
     );
   }
   const project = readProject(node.projectId);

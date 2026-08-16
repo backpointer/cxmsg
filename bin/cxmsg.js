@@ -158,6 +158,7 @@ import {
   activeTurnId,
   deliverPeerMessage,
   deliverPeerMessageWhenIdle,
+  MAX_MESSAGE_BYTES,
   storedSessionName,
   TargetBusyError,
   validateMessage,
@@ -167,6 +168,7 @@ import {
 import {
   messageBodyInfo,
   readMessageBody,
+  storeMessageBody,
 } from "../src/message-bodies.js";
 import {
   addClusterMember,
@@ -374,7 +376,7 @@ function usage(exitCode = 0) {
   cxmsg repair retention archive --before <ISO timestamp> --confirm <plan-digest> [--json]
   cxmsg repair retention restore <archive-id> --confirm <archive-id> [--json]
   cxmsg repair retention recover [--json]
-  cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|inline]
+  cxmsg delegate [--from <name>] [--permissions <profile>] [--execution fork|fresh|inline]
                  [--approval never|relay|auto] [--approval-timeout <seconds>]
                  [--mirror none|summary|full] [--when-idle --expiry <timestamp>]
                  [--job-id <uuid>] <target> <task...>
@@ -2260,7 +2262,7 @@ function parseDelegationArgs(args) {
     else throw new Error(`unknown delegate option: ${option}`);
   }
   if (!EXECUTION_MODES.has(execution)) {
-    throw new Error("execution must be fork or inline");
+    throw new Error("execution must be fork, fresh, or inline");
   }
   if (!APPROVAL_MODES.has(approval)) {
     throw new Error("approval must be never, relay, or auto");
@@ -2300,8 +2302,16 @@ function parseDelegationArgs(args) {
     expiry,
     jobId,
     target: validateSessionName(args.shift()),
-    task: validateMessage(args.join(" ")),
+    task: validateStoredMessage(args.join(" ")),
   };
+}
+
+async function delegationTaskFields(jobId, task) {
+  if (Buffer.byteLength(task, "utf8") <= MAX_MESSAGE_BYTES) {
+    return { task, taskBody: null };
+  }
+  const taskBody = await storeMessageBody({ messageId: jobId, body: task });
+  return { task: null, taskBody };
 }
 
 async function commandDelegate(args) {
@@ -2331,12 +2341,13 @@ async function commandDelegate(args) {
   if (whenIdle) {
     const identity = captureScheduledDelegationTarget(record);
     const jobId = requestedJobId || newJobId();
-    const spec = {
+    const authoritySpec = {
       jobId,
       from,
       target,
       targetThreadId: record.threadId,
       task,
+      taskBody: null,
       permissions,
       execution,
       approval,
@@ -2349,7 +2360,7 @@ async function commandDelegate(args) {
       await validateDelegationAuthority(
         {
           kind: "delegation",
-          ...spec,
+          ...authoritySpec,
           schedule: {
             version: 1,
             wakePolicy: "when-idle",
@@ -2361,6 +2372,10 @@ async function commandDelegate(args) {
       );
       await readThreadMetadata(client, record.threadId);
     });
+    const spec = {
+      ...authoritySpec,
+      ...(await delegationTaskFields(jobId, task)),
+    };
     const queued = await createScheduledDelegationJob(spec);
     await ensureScheduler();
     process.stdout.write(
@@ -2370,13 +2385,30 @@ async function commandDelegate(args) {
   }
 
   const jobId = requestedJobId || newJobId();
+  await withAppServer(async (client) => {
+    if (permissions) {
+      const profiles = await availablePermissionProfiles(client, record.cwd);
+      const selected = profiles.find((profile) => profile.id === permissions);
+      if (!selected) throw new Error(`unknown permission profile: ${permissions}`);
+      if (!selected.allowed) {
+        throw new Error(`permission profile is blocked: ${permissions}`);
+      }
+    }
+    if (execution === "inline") {
+      const thread = await readThreadMetadata(client, record.threadId);
+      if (thread.status?.type === "active") {
+        throw new Error("target session already has an active turn");
+      }
+    }
+  });
+  const taskFields = await delegationTaskFields(jobId, task);
   const job = createJob({
     jobId,
     from,
     target,
     targetThreadId: record.threadId,
     threadId: record.threadId,
-    task,
+    ...taskFields,
     permissions,
     execution,
     approval,
@@ -2385,22 +2417,6 @@ async function commandDelegate(args) {
   });
 
   try {
-    await withAppServer(async (client) => {
-      if (permissions) {
-        const profiles = await availablePermissionProfiles(client, record.cwd);
-        const selected = profiles.find((profile) => profile.id === permissions);
-        if (!selected) throw new Error(`unknown permission profile: ${permissions}`);
-        if (!selected.allowed) {
-          throw new Error(`permission profile is blocked: ${permissions}`);
-        }
-      }
-      if (execution === "inline") {
-        const thread = await readThreadMetadata(client, record.threadId);
-        if (thread.status?.type === "active") {
-          throw new Error("target session already has an active turn");
-        }
-      }
-    });
     await updateJob(job, { status: "queued" });
     const child = spawn(process.execPath, [delegationWorker, jobId], {
       detached: true,
@@ -2614,6 +2630,14 @@ async function commandSend(args) {
   if (!targetRecord) throw new Error(`unknown Codex session: ${target}`);
 
   const routed = Object.keys(routeOptions).length > 0;
+  if (
+    routeOptions.payload_type &&
+    (!routeOptions.project_id || !routeOptions.target_role)
+  ) {
+    throw new Error(
+      "--payload-type is a routed-send option and requires both --project and --target-role; omit --payload-type for an ordinary direct send",
+    );
+  }
   if (routed && (!routeOptions.project_id || !routeOptions.target_role)) {
     throw new Error("routed send requires both --project and --target-role");
   }

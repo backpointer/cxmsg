@@ -18,6 +18,7 @@ const ids = {
   orphanBody: "71345678-1234-4234-8234-123456789abc",
   quarantine: "81345678-1234-4234-8234-123456789abc",
   conversation: "a1345678-1234-4234-8234-123456789abc",
+  delegatedTask: "b1345678-1234-4234-8234-123456789abc",
 };
 
 function delivery(messageId, state, updatedAt = OLD, replyToMessageId = null) {
@@ -74,6 +75,7 @@ test("retention planning protects live, ambiguous, reply, and Job-correlated evi
         body(ids.recent, RECENT),
         body(ids.orphanBody, OLD, 300),
         body(ids.conversation),
+        body(ids.delegatedTask),
       ],
       quarantine: [
         {
@@ -97,6 +99,12 @@ test("retention planning protects live, ambiguous, reply, and Job-correlated evi
             replyToMessageId: ids.replyTarget,
           },
         },
+        {
+          taskBody: {
+            messageId: ids.delegatedTask,
+            contentRef: `cxmsg-message:${ids.delegatedTask}`,
+          },
+        },
       ],
       conversationMessageIds: [ids.conversation],
     },
@@ -111,7 +119,7 @@ test("retention planning protects live, ambiguous, reply, and Job-correlated evi
   );
   assert.match(
     JSON.stringify(plan.categories.ledger.blocked),
-    /nonterminal_unknown|reply_chain|job_correlation|conversation_history/,
+    /nonterminal_unknown|reply_chain|job_correlation|conversation_history|delegation_task/,
   );
   assert.equal(plan.categories.ledger.retainedByAge, 1);
   assert.deepEqual(

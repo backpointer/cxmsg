@@ -7,6 +7,7 @@ import test from "node:test";
 const stateDir = mkdtempSync(path.join(os.tmpdir(), "cxmsg-execution-worker-"));
 process.env.CXMSG_STATE_DIR = stateDir;
 const jobs = await import(`../src/jobs.js?execution-worker=${Date.now()}`);
+const bodies = await import(`../src/message-bodies.js?execution-worker=${Date.now()}`);
 const registry = await import(`../src/registry.js?execution-worker=${Date.now()}`);
 const directory = await import(`../src/node-directory.js?execution-worker=${Date.now()}`);
 const { runDelegationWorker } = await import(
@@ -112,6 +113,55 @@ class FallbackClient extends FixtureClient {
 class ScheduledClient extends FixtureClient {
   static executionThreadId = "92345678-1234-4234-8234-123456789abc";
   static turnId = "a2345678-1234-4234-8234-123456789abc";
+}
+
+class LongTaskClient extends FixtureClient {
+  static executionThreadId = "b3345678-1234-4234-8234-123456789abc";
+  static turnId = "b4345678-1234-4234-8234-123456789abc";
+  static requests = [];
+}
+
+class ExplicitFreshClient extends FixtureClient {
+  static executionThreadId = "a3345678-1234-4234-8234-123456789abc";
+  static turnId = "a4345678-1234-4234-8234-123456789abc";
+  static requests = [];
+
+  async request(method, params) {
+    if (method === "thread/fork") {
+      throw new Error("explicit fresh execution must not fork source history");
+    }
+    if (method === "thread/start") {
+      this.constructor.requests.push({ method, params });
+      return {
+        thread: {
+          id: this.constructor.executionThreadId,
+          status: { type: "idle" },
+          canAcceptDirectInput: true,
+        },
+      };
+    }
+    return super.request(method, params);
+  }
+}
+
+class DisconnectedTurnClient extends FixtureClient {
+  static executionThreadId = "c3345678-1234-4234-8234-123456789abc";
+  static requests = [];
+
+  async request(method, params) {
+    if (method === "turn/start") {
+      this.constructor.requests.push({ method, params });
+      const error = new Error("app-server WebSocket is not connected");
+      error.code = "EAPPWSNOTCONNECTED";
+      throw error;
+    }
+    return super.request(method, params);
+  }
+}
+
+class MissingBodyClient extends FixtureClient {
+  static executionThreadId = "f5345678-1234-4234-8234-123456789abc";
+  static turnId = "f6345678-1234-4234-8234-123456789abc";
 }
 
 class FrameFailureClient extends FixtureClient {
@@ -227,6 +277,122 @@ test("Delegation persists a structured App Server frame failure", async () => {
     limitBytes: 1_048_576,
   });
   assert.equal(failed.turnId, null);
+  assert.equal(failed.failureStage, "execution-thread");
+  assert.equal(failed.modelTurnStarted, false);
+  assert.match(failed.rerouteGuidance, /--execution fresh/);
+});
+
+test("explicit fresh Delegation preserves source provenance without forking history", async () => {
+  const freshJobId = "9345678a-1234-4234-8234-123456789abc";
+  ExplicitFreshClient.requests = [];
+  jobs.createJob({
+    jobId: freshJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: sourceThreadId,
+    task: "fresh isolated fixture",
+    execution: "fresh",
+  });
+  const result = await runDelegationWorker(freshJobId, {
+    Client: ExplicitFreshClient,
+  });
+  const execution = directory.readExecutionThread(
+    ExplicitFreshClient.executionThreadId,
+  );
+  assert.equal(result.status, "completed");
+  assert.equal(result.targetThreadId, sourceThreadId);
+  assert.equal(result.executionThreadId, ExplicitFreshClient.executionThreadId);
+  assert.equal(execution.sourceThreadId, sourceThreadId);
+  assert.equal(execution.creationMode, "explicit-fresh");
+  assert.equal(
+    ExplicitFreshClient.requests.some((request) => request.method === "thread/fork"),
+    false,
+  );
+});
+
+test("large Delegation tasks use a retained body reference instead of Job plaintext", async () => {
+  const longJobId = "d3345678-1234-4234-8234-123456789abc";
+  const task = `review retained artifact\n${"bounded-context-line\n".repeat(900)}`;
+  const taskBody = await bodies.storeMessageBody({
+    messageId: longJobId,
+    body: task,
+  });
+  LongTaskClient.requests = [];
+  jobs.createJob({
+    jobId: longJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: sourceThreadId,
+    task: null,
+    taskBody,
+    execution: "fork",
+  });
+
+  const stored = jobs.readJob(longJobId);
+  assert.equal(stored.task, null);
+  assert.equal(stored.taskBody.contentRef, `cxmsg-message:${longJobId}`);
+  assert.doesNotMatch(JSON.stringify(stored), /bounded-context-line/);
+
+  const result = await runDelegationWorker(longJobId, { Client: LongTaskClient });
+  assert.equal(result.status, "completed");
+  assert.equal(result.modelTurnStarted, true);
+  const start = LongTaskClient.requests.find(
+    (request) => request.method === "turn/start",
+  );
+  const input = JSON.stringify(start.params.input);
+  assert.match(input, new RegExp(`cxmsg-message:${longJobId}`));
+  assert.match(input, /Preview only/);
+  assert.ok(Buffer.byteLength(input, "utf8") < 16 * 1024);
+});
+
+test("a missing retained Delegation task fails before model execution", async () => {
+  const missingBodyJobId = "f3345678-1234-4234-8234-123456789abc";
+  jobs.createJob({
+    jobId: missingBodyJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: sourceThreadId,
+    task: null,
+    taskBody: {
+      messageId: missingBodyJobId,
+      contentRef: `cxmsg-message:${missingBodyJobId}`,
+      bodyBytes: 20_000,
+      bodySha256: "a".repeat(64),
+    },
+    execution: "fork",
+  });
+  await assert.rejects(
+    runDelegationWorker(missingBodyJobId, { Client: MissingBodyClient }),
+    (error) => error?.code === "EDELEGATIONTASKBODY",
+  );
+  const failed = jobs.readJob(missingBodyJobId);
+  assert.equal(failed.failureStage, "task-body");
+  assert.equal(failed.modelTurnStarted, false);
+  assert.equal(failed.turnId, null);
+});
+
+test("a disconnected turn start records a proven zero-turn transport failure", async () => {
+  const disconnectedJobId = "e3345678-1234-4234-8234-123456789abc";
+  jobs.createJob({
+    jobId: disconnectedJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: sourceThreadId,
+    task: "short disconnected fixture",
+    execution: "fork",
+  });
+  await assert.rejects(
+    runDelegationWorker(disconnectedJobId, { Client: DisconnectedTurnClient }),
+    (error) => error?.code === "EAPPWSNOTCONNECTED",
+  );
+  const failed = jobs.readJob(disconnectedJobId);
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.failureCode, "EAPPWSNOTCONNECTED");
+  assert.equal(failed.failureStage, "turn-start");
+  assert.ok(failed.turnStartAttemptedAt);
+  assert.equal(failed.modelTurnStarted, false);
+  assert.equal(failed.turnId, null);
+  assert.match(failed.rerouteGuidance, /verify cxmsg server connectivity/);
 });
 
 test("durable Job completion is independent from peer mirror failure", async () => {

@@ -40,9 +40,13 @@ function protectedMessageIds(ledger, jobs, conversationMessageIds = []) {
     }
   }
   for (const job of jobs) {
-    if (job.correlation?.kind !== "peer-reply") continue;
-    protect(job.correlation.logicalMessageId, "job_correlation");
-    protect(job.correlation.replyToMessageId, "job_correlation");
+    if (job.taskBody?.messageId) {
+      protect(job.taskBody.messageId, "delegation_task");
+    }
+    if (job.correlation?.kind === "peer-reply") {
+      protect(job.correlation.logicalMessageId, "job_correlation");
+      protect(job.correlation.replyToMessageId, "job_correlation");
+    }
   }
   for (const messageId of conversationMessageIds) {
     protect(messageId, "conversation_history");

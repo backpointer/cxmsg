@@ -1455,7 +1455,7 @@ test("Node Directory Inspector validates private identity references without pat
       sourceThreadId: THREAD_ID,
       sourceNodeKey: `codex:${THREAD_ID}`,
       projectId,
-      creationMode: "fork",
+      creationMode: "explicit-fresh",
       classifiedAt: "2026-08-14T00:03:00.000Z",
     });
     await writeJson(path.join(clusters, `${clusterId}.json`), {
@@ -1511,7 +1511,7 @@ test("Node Directory Inspector validates private identity references without pat
           version: 1,
           jobId: executionJobId,
           kind: "delegation",
-          execution: "fork",
+          execution: "fresh",
           targetThreadId: THREAD_ID,
           threadId: executionThreadId,
           executionThreadId,

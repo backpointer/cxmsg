@@ -119,7 +119,9 @@ send.
   stable key is the composite `(runtime kind, native ID)`. Display names,
   process IDs, sockets, and terminal attachments are not Node identity.
 - **Execution Thread**: a thread created to execute a Job, such as a
-  Delegation fork. It is not a Node. Any future conversion to an addressable
+  Delegation fork or an explicitly fresh isolated execution. It is not a Node.
+  Its provenance retains the source thread even when source history is not
+  copied. Any future conversion to an addressable
   Node requires a separate explicit promotion lifecycle; ordinary registration
   or Directory synchronization is not promotion.
 - **Endpoint**: volatile evidence describing how a Node can currently be
@@ -151,7 +153,9 @@ send.
 ## Work and authority
 
 - **Delegation**: a user-authorized, correlated job bounded by a stored grant,
-  permission profile, execution mode, and approval policy.
+  permission profile, execution mode, and approval policy. A large task may be
+  held by a Job-bound owner-private Message Body reference; the reference does
+  not change its authority.
 - **Scheduled Delegation**: a durable Delegation Job held by the Scheduler until
   its pinned target is Idle. Its timing policy is not approval; cxmsg validates
   the grant, permission profile, approval mode, Node, and Project again before

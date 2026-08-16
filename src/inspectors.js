@@ -834,6 +834,38 @@ function validJob(record, stem) {
   const schedule = record?.schedule;
   const claim = schedule?.claim;
   const failureEvidence = record?.failureEvidence;
+  const kind = record?.kind ?? "delegation";
+  const taskBody = record?.taskBody;
+  const validDelegationTask =
+    kind !== "delegation" ||
+    (taskBody === undefined || taskBody === null
+      ? typeof record.task === "string" &&
+        Buffer.byteLength(record.task, "utf8") <= 16 * 1024
+      : record.task === null &&
+        taskBody.messageId === record.jobId &&
+        taskBody.contentRef === `cxmsg-message:${record.jobId}` &&
+        Number.isSafeInteger(taskBody.bodyBytes) &&
+        taskBody.bodyBytes > 16 * 1024 &&
+        taskBody.bodyBytes <= 256 * 1024 &&
+        /^[0-9a-f]{64}$/.test(taskBody.bodySha256 || "") &&
+        Object.keys(taskBody).every((field) =>
+          ["messageId", "contentRef", "bodyBytes", "bodySha256"].includes(field),
+        ));
+  const validDelegationEvidence =
+    kind !== "delegation" ||
+    ((record.turnStartAttemptedAt === undefined ||
+      record.turnStartAttemptedAt === null ||
+      Number.isFinite(Date.parse(record.turnStartAttemptedAt))) &&
+      (record.modelTurnStarted === undefined ||
+        record.modelTurnStarted === null ||
+        typeof record.modelTurnStarted === "boolean") &&
+      (record.failureStage === undefined ||
+        record.failureStage === null ||
+        /^[a-z][a-z-]{0,63}$/.test(record.failureStage)) &&
+      (record.rerouteGuidance === undefined ||
+        record.rerouteGuidance === null ||
+        (typeof record.rerouteGuidance === "string" &&
+          Buffer.byteLength(record.rerouteGuidance, "utf8") <= 512)));
   const validFailureEvidence =
     failureEvidence === undefined ||
     failureEvidence === null ||
@@ -876,6 +908,8 @@ function validJob(record, stem) {
           record.executionThreadId === null ||
           UUID_PATTERN.test(record.executionThreadId)) &&
         typeof record.status === "string" &&
+        validDelegationTask &&
+        validDelegationEvidence &&
         validFailureEvidence &&
         validSchedule &&
         (record.status !== "scheduled" ||
@@ -1189,7 +1223,7 @@ function validDirectoryExecutionThread(record, stem) {
           record.sourceNodeKey === `codex:${record.sourceThreadId}`) &&
         (record.projectId === undefined || UUID_PATTERN.test(record.projectId)) &&
         Boolean(record.sourceNodeKey) === Boolean(record.projectId) &&
-        ["fork", "start-fallback", "legacy-observed"].includes(
+        ["fork", "explicit-fresh", "start-fallback", "legacy-observed"].includes(
           record.creationMode,
         ) &&
         Number.isFinite(Date.parse(record.classifiedAt || "")) &&
@@ -1955,7 +1989,9 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
     const jobMatches = Boolean(
       job &&
         (job.kind ?? "delegation") === "delegation" &&
-        job.execution === "fork" &&
+        ["fork", "fresh"].includes(job.execution) &&
+        (execution.creationMode === "explicit-fresh") ===
+          (job.execution === "fresh") &&
         job.targetThreadId === execution.sourceThreadId &&
         job.threadId === execution.threadId &&
         (job.executionThreadId === undefined ||
@@ -1968,8 +2004,8 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
         scope: "directory-execution-threads",
         status: jobMatches ? "pass" : "fail",
         summary: jobMatches
-          ? "Execution Thread matches its retained fork Delegation evidence"
-          : "Execution Thread does not match a retained fork Delegation",
+          ? "Execution Thread matches its retained isolated Delegation evidence"
+          : "Execution Thread does not match a retained isolated Delegation",
         verification: "jobs",
         errorCode: jobMatches ? null : "EEXECUTIONJOB",
       }),

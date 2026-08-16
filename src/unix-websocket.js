@@ -169,7 +169,9 @@ export class UnixWebSocket extends EventEmitter {
 
   sendText(text) {
     if (!this.upgraded || !this.socket?.writable) {
-      throw new Error("app-server WebSocket is not connected");
+      const error = new Error("app-server WebSocket is not connected");
+      error.code = "EAPPWSNOTCONNECTED";
+      throw error;
     }
     const bytes = Buffer.byteLength(text, "utf8");
     if (bytes > this.maxBufferBytes) {

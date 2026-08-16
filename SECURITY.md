@@ -354,7 +354,11 @@ worker activation leaves an expiring claim that may be reclaimed; a stale
 worker cannot consume its old claim. After activation the Job is never
 automatically re-enqueued, so ambiguous worker startup cannot duplicate model
 work. Scheduled Jobs retain the same owner-only task and result protections as
-immediate Delegations and never write an ordinary Delivery Ledger record.
+immediate Delegations and never write an ordinary Delivery Ledger record. A
+Delegation task larger than 16 KiB is stored once in the owner-private Message
+Body Store and referenced by exact Job UUID, byte count, and SHA-256; the Job
+does not duplicate its plaintext. The retained task reference is protected
+from Retention purge while the Job exists.
 
 Direct Conversation records are owner-private metadata projections. They retain
 stable Node keys, Logical Message IDs, ordering, reply references, source kind,

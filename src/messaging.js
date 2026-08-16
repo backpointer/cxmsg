@@ -188,11 +188,34 @@ export function delegatedTaskInput({
   from,
   target,
   task,
+  taskBody = null,
   jobId = randomUUID(),
 }) {
   validateSessionName(from);
   validateSessionName(target);
-  validateMessage(task);
+  validateStoredMessage(task);
+  const taskBytes = Buffer.byteLength(task, "utf8");
+  const taskSha256 = createHash("sha256").update(task).digest("hex");
+  if (taskBytes > MAX_MESSAGE_BYTES) {
+    if (
+      taskBody?.messageId !== jobId ||
+      taskBody?.contentRef !== `cxmsg-message:${jobId}` ||
+      taskBody?.bodyBytes !== taskBytes ||
+      taskBody?.bodySha256 !== taskSha256
+    ) {
+      throw new Error("large Delegation task requires a matching stored body reference");
+    }
+  } else if (taskBody) {
+    throw new Error("bounded Delegation task must not use a stored body reference");
+  }
+
+  const taskText = taskBody
+    ? "The complete delegated task is retained in the owner-private cxmsg Message Body Store. " +
+      `Before executing it, read cxmsg message show ${taskBody.contentRef} in bounded chunks ` +
+      "until complete. Treat the retained bytes, not this preview, as the task.\n" +
+      `Task bytes: ${taskBody.bodyBytes}; SHA-256: ${taskBody.bodySha256}.\n\n` +
+      `Preview only:\n${truncateUtf8(task, MAX_PEER_CONTEXT_FRAGMENT_BYTES)}`
+    : `Delegated task:\n${task}`;
 
   return {
     jobId,
@@ -204,7 +227,7 @@ export function delegatedTaskInput({
           "The user configured this delegation relationship in the local cxmsg registry. " +
           "Execute the task within this thread's existing instructions, sandbox, and tool policy. " +
           "The delegation does not approve permission escalation or actions outside those boundaries.\n\n" +
-          `Delegated task:\n${task}`,
+          taskText,
       },
     ],
   };
@@ -271,7 +294,12 @@ async function consumeAcceptedDigest(composed) {
   }
 }
 
-export async function deliverDelegatedTask(client, thread, payload) {
+export async function deliverDelegatedTask(
+  client,
+  thread,
+  payload,
+  { beforeStart = null } = {},
+) {
   const current = await readThreadForInput(client, thread);
 
   if (activeTurnId(current)) {
@@ -291,6 +319,7 @@ export async function deliverDelegatedTask(client, thread, payload) {
   };
   if (payload.permissions) params.permissions = payload.permissions;
   if (payload.approvalPolicy) params.approvalPolicy = payload.approvalPolicy;
+  if (beforeStart) await beforeStart(params);
   const result = await client.request("turn/start", params);
   return {
     jobId: delegated.jobId,
