@@ -388,7 +388,15 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap maintenance — long-session Delegation diagnostics
 
-- Status: IMPLEMENTED; audit pending
+- Status: COMPLETE; implementation audit PASS
+
+- Audit evidence: focused regression tests cover server-reference fork without
+  history hydration, bounded WebSocket failure evidence, explicit fresh
+  provenance, retained long-task references, zero-turn versus unverified turn
+  state, target-scoped Doctor findings, stale bridge warnings, exact Directory
+  synchronization guidance, routed-send diagnostics, and durable completion
+  independent from optional mirror failure. The complete suite passes with no
+  non-opt-in failure.
 
 - [x] Fork by stable server-side thread reference without a source
       `thread/read` hydration step; preserve metadata preflight for inline work.
