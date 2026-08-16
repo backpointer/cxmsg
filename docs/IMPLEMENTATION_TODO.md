@@ -346,15 +346,17 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap extension — Inbound Peer Message Policy
 
-- Status: CONTRACT REVIEW; implementation not started
+- Status: REVIEW FINDINGS INCORPORATED; implementation not started
 
-- [ ] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
+- [x] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
       privacy, authority, deduplication, fan-out, scheduling, and retention
       invariants.
-- [ ] Implement the owner-private policy Adapter, evaluator, CLI, and Doctor.
+- [ ] Implement the internal owner-private policy Adapter, evaluator, schema
+      inspection, and Doctor foundation without public activation.
 - [ ] Integrate direct Codex and Claude ordinary ingress with metadata-only
       terminal denial.
-- [ ] Revalidate scheduled recipients and integrate Group and Team fan-out.
+- [ ] Revalidate scheduled recipients, integrate Group and Team fan-out, then
+      activate the public CLI only after the cross-path gate passes.
 - [ ] Add redacted trace, graph, and web projections only after core evidence
       is stable.
 

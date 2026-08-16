@@ -43,8 +43,10 @@ they carry different authority and delivery semantics.
   explicit unknown-sender rule, and grants no authority.
 - **Inbound Denial**: terminal metadata-only evidence that an ordinary Peer
   Message was rejected by Inbound Peer Message Policy before transport. It is
-  distinct from Quarantine, retains no Message Body, and creates no retry,
-  replay, reroute, wake, grant, approval, or task authority.
+  distinct from Quarantine. Initial denial retains no Message Body; a later
+  Scheduled or Explicit Retry denial never deletes a body retained by the
+  earlier admission. It creates no retry, replay, reroute, wake, grant,
+  approval, or task authority.
 - **Quarantine**: owner-private durable storage for a Peer Message rejected by
   Route Admission. Quarantine creates no context injection, retry, reroute,
   wake, grant, approval, or task authority.

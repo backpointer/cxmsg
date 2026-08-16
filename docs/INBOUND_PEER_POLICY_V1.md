@@ -1,6 +1,6 @@
 # Inbound Peer Message Policy v1
 
-Status: design contract; implementation requires independent review
+Status: independently reviewed contract; implementation not started
 
 ## Purpose
 
@@ -29,9 +29,20 @@ Sender rules use either:
 
 A typed envelope's claimed Project or sender role is not proof for a Project
 rule. Project matching requires a valid live sender Node whose Directory
-record carries that Project UUID. An absent or invalid sender identity is
-`unknown`; it matches only an explicit unknown-sender rule. Names are never
-deny selectors.
+record carries that Project UUID. Unknown identity has two closed reason
+classes:
+
+- `sender_unidentified`: no stable sender identity was supplied or associated
+  with the legacy input; and
+- `sender_unverifiable`: a stable identity was supplied but its Directory
+  record is missing, unsafe, invalid, unreadable, or tombstoned.
+
+Both classes match the v1 unknown-sender selector, but evidence and Doctor keep
+their reasons distinct. If a recipient has any sender-Project rule, an unsafe,
+invalid, unreadable, missing, or tombstoned claimed sender identity is denied
+fail-closed as `identity_unverifiable`; it cannot bypass Project policy by
+becoming ordinary unknown. A valid sender Node in a different Project simply
+does not match that Project rule. Names are never deny selectors.
 
 Node successors do not inherit sender or recipient policy. Project Transition
 retains the same stable Project UUID and therefore retains Project matching.
@@ -48,8 +59,10 @@ For every ordinary recipient Delivery, evaluation is deterministic:
    `policy_invalid`.
 4. Apply exact sender-Node deny.
 5. Apply verified sender-Project deny.
-6. Apply the unknown-sender deny when sender identity is not provable.
-7. If no deny matches, continue the existing Route Admission decision.
+6. When sender identity is claimed but unverifiable and a sender-Project rule
+   exists, deny fail-closed as `identity_unverifiable`.
+7. Apply the unknown-sender deny when sender identity is not provable.
+8. If no deny matches, continue the existing Route Admission decision.
 
 Thus `deny > Route Admission binding match > legacy-unbound`. v1 has no allow
 rule, wildcard name, role selector, path selector, regex, precedence override,
@@ -62,15 +75,31 @@ The policy applies to ordinary Peer Message content regardless of transport:
 - direct Codex send and reply;
 - Claude-to-Codex ordinary ingress;
 - immediate, steering, when-idle, after-turn, and after-job delivery;
+- the one operator-requested Explicit Retry after proven Negative Acceptance;
 - Direct Conversation messages;
 - Group Conversation store-only recipients; and
 - Team Cast recipient Deliveries.
 
 Transport fallback, host relay, MCP, or UDS does not bypass destination-side
 evaluation. Scheduled work is evaluated when created and revalidated under its
-pinned recipient identity immediately before dispatch. A newly added deny may
-terminally deny queued work; a removed deny never revives an existing denied
-Delivery.
+pinned recipient identity after Scheduler lease renewal and before an attempt
+is created. The atomic policy-record read is the dispatch policy linearization
+point; its exact revision and digest are retained with the decision. A deny
+committed after that snapshot is not retroactive to the already-linearized
+attempt and applies to later Logical Messages or later eligible attempts. A
+removed deny never revives an existing denied Delivery.
+
+Explicit Retry evaluates policy inside the existing Route mutation critical
+section immediately before `beginRetryDelivery`. A matching deny terminally
+ends the admitted Delivery without consuming the retry attempt or starting a
+turn. This is not deduplication to an earlier denial; it is an explicit
+`admitted -> policy_denied` evidence transition.
+
+A crash after policy snapshot but before attempt creation leaves no attempt;
+the next claim must renew its lease and evaluate the then-current policy again.
+A crash after attempt creation follows the existing unknown-evidence rule and
+is never automatically replayed. Reconciliation may strengthen evidence but
+cannot dispatch or bypass a new eligible-path policy evaluation.
 
 The following are not ordinary Peer Message admission and remain governed by
 their existing separate contracts:
@@ -87,9 +116,10 @@ grant or permission profile.
 
 ## Denial evidence and privacy
 
-A matched rule creates one recipient-specific terminal Inbound Denial before
-transport, steering, scheduling claim, or model wake. It records only bounded
-metadata required for diagnosis and deduplication:
+A rule matched during initial admission creates one recipient-specific
+terminal Inbound Denial before transport, steering, scheduling claim, or model
+wake. It records only bounded metadata required for diagnosis and
+deduplication:
 
 - Logical Message ID and immutable route/fingerprint digest;
 - sender and recipient stable Node keys when verified;
@@ -100,20 +130,32 @@ metadata required for diagnosis and deduplication:
 - bounded reason code and timestamps.
 
 Inbound Denial is not Route Admission Quarantine. No quarantine file or Message
-Body is written solely for a denied recipient. If one Group or Team Logical
-Message has both admitted and denied recipients, a shared body may exist for
-the admitted recipients, while denied recipient evidence exposes no content
-reference and cannot read it.
+Body is written solely for an initially denied recipient. If one Group or Team
+Logical Message has both admitted and denied recipients, a shared body may
+exist for the admitted recipients, while initially denied recipient evidence
+exposes no content reference and cannot project it into that recipient's model
+context. This isolation is against recipient model context, not against the
+owner of the owner-private state.
+
+Policy may also deny an already admitted Scheduled Delivery or Explicit Retry.
+That transition preserves the original `admissionState=admitted`, Logical
+Message content reference, retained Message Body, and earlier attempt evidence.
+It appends terminal `status=policy_denied` evidence containing no new content
+reference, consumes no new attempt, and performs no deletion. Existing content
+remains governed only by Retention; policy evaluation never removes it.
 
 The exact same Logical Message retry is deduplicated to the prior denial with
 zero wake. A changed fingerprint under the same ID is an idempotency conflict.
 Removing a rule does not release, retry, replay, reroute, or wake old denials;
 a sender must create a new Logical Message ID after policy removal.
 
-Owner-private coordination events may expose the bounded rule ID, selector
-kind, `EINBOUNDDENIED`, and `denialOrigin=inbound-policy`. They expose no body,
-full path, endpoint, grant token, or environment. Claude native status remains
-the compatible reason-free `denied` frame; local evidence carries the cause.
+Codex sender-visible output is indistinguishable from the existing generic
+Route Admission rejection; it does not reveal whether a rule, identity error,
+or Project selector matched. Owner-private coordination events may expose the
+bounded rule ID, selector kind, `EINBOUNDDENIED`, and
+`denialOrigin=inbound-policy`. They expose no body, full path, endpoint, grant
+token, or environment. Claude native status remains the compatible reason-free
+`denied` frame; local evidence carries the cause.
 
 ## Storage and mutation contract
 
@@ -122,6 +164,7 @@ contains a schema version, exact target Node key, monotonically increasing
 revision, bounded rule set, and created/updated timestamps. Limits:
 
 - at most 256 rules per recipient Node;
+- at most 1,024 recipient policy records and 4,096 total rules;
 - exact selector kinds only: `sender-node`, `sender-project`, `unknown-sender`;
 - one generated UUID rule ID per rule;
 - duplicate selector addition is idempotent and returns the existing rule;
@@ -129,6 +172,9 @@ revision, bounded rule set, and created/updated timestamps. Limits:
 
 Writers use an owner-only lock, no-follow/type/owner/link/mode validation, an
 O_EXCL temporary file, file fsync, atomic rename, and parent-directory fsync.
+They re-read the current revision under the lock and compare the exact previous
+record digest immediately before replacement; a changed record fails stale
+instead of overwriting it.
 Mutation is unavailable through Peer Message, ordinary reply, Claude frame,
 host relay, or the cxmsg messaging MCP surface. A peer request to change policy
 is coordination text only and supplies no authority.
@@ -141,7 +187,7 @@ cxmsg inbound deny add <target-session> --sender-project <project-id-or-label> [
 cxmsg inbound deny add <target-session> --unknown-sender [--json]
 cxmsg inbound deny remove <target-session> <rule-id> [--json]
 cxmsg inbound deny list [<target-session>] [--json]
-cxmsg inbound denied list [--target <target-session>] [--json]
+cxmsg inbound denials list [--target <target-session>] [--json]
 ```
 
 Project labels are resolved once to a stable UUID. Default output is redacted
@@ -158,6 +204,8 @@ and bounded. No command displays a Message Body.
 - Policy revalidation cannot change the pinned recipient or Trigger.
 - A queued Delivery denied before dispatch releases no attempt and consumes no
   model turn.
+- After its recorded policy snapshot, a concurrent rule addition is not
+  retroactive to that already-linearized attempt.
 - A policy read error is not permission to deliver.
 - No denial can be converted into Store-only, scheduled, retryable, or unknown.
 
@@ -168,9 +216,14 @@ Doctor is read-only and reports:
 - unsafe, invalid, duplicate, over-quota, or target-mismatched policy records;
 - rules referencing missing or tombstoned Node or Project identity;
 - admitted or attempted Deliveries that contradict durable denial evidence;
-- denied Deliveries with a body content reference, attempt, claim, turn, wake,
-  or quarantine body;
-- pending scheduled work now blocked by current policy, without dispatching it.
+- initially denied Deliveries with a body content reference, attempt, claim,
+  turn, wake, or quarantine body;
+- post-admission denials that add an attempt, delete prior content, or carry a
+  content reference inside the denial evidence;
+- pending scheduled work now blocked by current policy, without dispatching it;
+- policy-bearing recipient Nodes that have a Successor while the Successor has
+  no explicit policy, without transferring the policy;
+- global policy-record or total-rule quota violations.
 
 Doctor never repairs policy, removes a rule, reads Message Body text, retries a
 Delivery, or starts a model turn. Any future Repair remains explicitly
@@ -188,16 +241,24 @@ unsafe policy fails closed only for its pinned recipient. No route binding,
 grant, Conversation membership, Cluster membership, or Project identity is
 migrated or inferred.
 
-Implementation should proceed in independently verifiable slices:
+Implementation should proceed in independently verifiable slices. The public
+mutation CLI and feature activation remain unavailable until every ordinary
+path in slices 2 through 4 is integrated, so an intermediate release cannot
+create a policy that only some paths enforce:
 
-1. owner-private policy Adapter, pure evaluator, CLI mutation, and Doctor;
-2. direct Codex and Claude ordinary Route Admission integration plus terminal
-   metadata-only Ledger denial;
-3. Scheduler revalidation and crash/idempotency tests;
-4. Group store-only and Team Cast per-recipient integration;
+1. internal owner-private policy Adapter, pure evaluator, schema inspection,
+   and Doctor foundations, without public mutation or activation;
+2. direct Codex and Claude ordinary Route Admission integration, Explicit
+   Retry evaluation, and both initial and post-admission denial evidence;
+3. Scheduler revalidation, policy snapshot evidence, and crash/idempotency
+   tests;
+4. Group store-only and Team Cast per-recipient integration, then public CLI
+   mutation and feature activation only after the cross-path gate passes;
 5. trace, graph, and web redacted projections.
 
-No slice may claim completion while an ordinary delivery path can bypass the
+Intermediate slices are internal foundations, not partial feature completion.
+Doctor must report any integration gap. No release may expose policy mutation
+or claim feature completion while an ordinary delivery path can bypass the
 policy silently.
 
 ## Acceptance tests
@@ -208,7 +269,8 @@ policy silently.
 4. Unknown sender is admitted by default and denied only by the explicit rule.
 5. Unsafe or malformed policy fails closed without retaining the body.
 6. Deny takes precedence for a legacy-unbound recipient.
-7. Exact retry deduplicates to terminal denied; changed fingerprint conflicts.
+7. Exact resend of an initially denied Logical Message deduplicates to terminal
+   denied; a changed fingerprint conflicts.
 8. Rule removal never revives or replays an old denied Logical Message.
 9. A rule added after scheduling prevents dispatch with attempt count zero.
 10. Direct reply and Claude ingress cannot bypass policy.
@@ -220,5 +282,33 @@ policy silently.
     environment data.
 16. Peer and MCP messaging cannot mutate policy.
 17. Node successor creation does not transfer a rule.
-18. Doctor detects denial evidence carrying any attempt, wake, or content ref
-    and performs zero mutation.
+18. Doctor detects invalid initial or post-admission denial evidence and
+    performs zero mutation.
+19. Initial admit followed by a new deny makes Explicit Retry terminally
+    `policy_denied` without consuming its retry attempt or starting a turn.
+20. Retry or Scheduled denial preserves an existing retained body, while the
+    new denial evidence carries no content reference and performs no deletion.
+21. With a sender-Project rule, sender Directory failure denies fail-closed;
+    a valid sender in a different Project continues admission evaluation.
+22. Unidentified and unverifiable sender evidence use distinct reason codes.
+23. A crash after policy snapshot cannot recover by dispatching without a new
+    claim and policy evaluation; reconciliation never dispatches.
+24. Steering is tested independently from direct start, reply, and Claude
+    ingress.
+25. Group partial denial does not alter admitted recipients' content or timing.
+26. Fan-out policy changes do not alter the frozen recipient set and produce
+    recipient-specific decisions at their defined linearization points.
+27. A 257th per-recipient rule, 1,025th policy record, or 4,097th global rule
+    is rejected; duplicate selector addition returns the same rule ID.
+28. Codex sender-visible rejection does not reveal policy match details.
+29. Doctor reports recipient Successor policy gaps and never transfers policy.
+30. A tombstoned claimed sender does not match sender-Node policy and is
+    classified as `sender_unverifiable`.
+
+## Explicit v1 non-goals
+
+- allow rules or allow-over-deny precedence;
+- deny-everyone-except selectors;
+- wildcard, regex, display-name, role, path, PID, or Endpoint selectors;
+- automatic rule transfer, expiry, replay, release, or deletion; and
+- recipient-model privacy against the owner of the local cxmsg state.
