@@ -17,6 +17,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { withFileLock } from "./file-lock.js";
+import { readNode, readNodeTombstone } from "./node-directory.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const INBOUND_POLICIES_DIR = path.join(
@@ -597,6 +598,26 @@ function normalizeSenderIdentity(identity) {
         ? null
         : normalizeInboundNodeKey(identity.nodeKey),
     projectId: null,
+  };
+}
+
+export function resolveInboundSenderIdentity(
+  senderNodeKey,
+  { node = readNode, tombstone = readNodeTombstone } = {},
+) {
+  if (!senderNodeKey) return { state: "unidentified" };
+  const normalized = normalizeInboundNodeKey(senderNodeKey);
+  const match = NODE_KEY_PATTERN.exec(normalized);
+  const runtimeKind = match[1].toLowerCase();
+  const nativeId = match[2].toLowerCase();
+  const live = node(runtimeKind, nativeId);
+  if (!live || tombstone(runtimeKind, nativeId)) {
+    return { state: "unverifiable", nodeKey: normalized };
+  }
+  return {
+    state: "verified",
+    nodeKey: live.nodeKey,
+    projectId: live.projectId,
   };
 }
 

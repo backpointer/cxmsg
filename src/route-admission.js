@@ -40,6 +40,7 @@ import {
 import {
   evaluateInboundPolicy,
   INBOUND_POLICY_FEATURE_ACTIVE,
+  resolveInboundSenderIdentity,
 } from "./inbound-policy.js";
 import {
   findProjectByRoutingId,
@@ -698,29 +699,11 @@ function senderIdentityDigest(senderNodeKey) {
     .digest("hex");
 }
 
-function inboundSenderIdentity(senderNodeKey) {
-  if (!senderNodeKey) return { state: "unidentified" };
-  const match = /^(codex|claude):([0-9a-f-]{36})$/i.exec(senderNodeKey);
-  if (!match) throw new Error("Inbound sender Node identity is invalid");
-  const runtimeKind = match[1].toLowerCase();
-  const nativeId = match[2].toLowerCase();
-  const live = readNode(runtimeKind, nativeId);
-  const tombstone = readNodeTombstone(runtimeKind, nativeId);
-  if (!live || tombstone) {
-    return { state: "unverifiable", nodeKey: senderNodeKey };
-  }
-  return {
-    state: "verified",
-    nodeKey: live.nodeKey,
-    projectId: live.projectId,
-  };
-}
-
 function inboundDecision(targetRecord, senderNodeKey, evaluator) {
   if (!targetRecord?.threadId || typeof evaluator !== "function") return null;
   return evaluator({
     targetNodeKey: directoryNodeKey("codex", targetRecord.threadId),
-    senderIdentity: inboundSenderIdentity(senderNodeKey),
+    senderIdentity: resolveInboundSenderIdentity(senderNodeKey),
   });
 }
 

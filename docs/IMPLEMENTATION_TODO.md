@@ -353,7 +353,7 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap extension — Inbound Peer Message Policy
 
-- Status: SLICES 1-2 IMPLEMENTED; Slice 1 independent focused audit PASS;
+- Status: SLICES 1-3 IMPLEMENTED; Slice 1 independent focused audit PASS;
   public activation disabled
 
 - [x] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
@@ -371,8 +371,11 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
       procedure without automatic repair.
 - [x] Integrate direct Codex and Claude ordinary ingress plus Explicit Retry
       with metadata-only terminal denial behind the inactive cross-path gate.
-- [ ] Revalidate scheduled recipients, integrate Group and Team fan-out, then
-      activate the public CLI only after the cross-path gate passes.
+- [x] Revalidate scheduled recipients after lease renewal, persist the exact
+      continuing-policy snapshot on the attempt, and deny with zero attempts
+      after claim recovery when current policy changed.
+- [ ] Integrate Group and Team fan-out, then activate the public CLI only after
+      the cross-path gate passes.
 - [ ] Add redacted trace, graph, and web projections only after core evidence
       is stable.
 

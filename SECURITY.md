@@ -155,9 +155,14 @@ after an attempt is durably marked, including when the first outcome is
 uncertain.
 
 Inbound Peer Message Policy remains internally staged and inactive. Its
-owner-private Adapter, evaluator, and direct/Explicit-Retry integration create
-no public mutation or routing authority. Integration tests inject the evaluator
-explicitly; production routing keeps the single cross-path feature gate off.
+owner-private Adapter, evaluator, and direct/Explicit-Retry/Scheduler
+integration create no public mutation or routing authority. Integration tests
+inject the evaluator explicitly; production routing keeps the single cross-path
+feature gate off. Scheduler evaluation occurs after lease renewal and before
+attempt creation or `turn/start`. A deny clears the claim and preserves the
+already retained body with zero attempts; a continuing decision is stored as a
+closed metadata-only attempt snapshot. Reclaimed pre-attempt work re-evaluates
+current policy instead of inheriting an earlier worker's decision.
 Doctor fails with `EINBOUNDPOLICYINACTIVE` if a policy record exists before
 every ordinary Peer Message path is integrated. A staged policy record must
 never be represented as effective enforcement.

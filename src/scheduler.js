@@ -64,6 +64,11 @@ import {
   readNodeTombstone,
 } from "./node-directory.js";
 import {
+  evaluateInboundPolicy,
+  INBOUND_POLICY_FEATURE_ACTIVE,
+  resolveInboundSenderIdentity,
+} from "./inbound-policy.js";
+import {
   beginTurnLifecycleConnection,
   endTurnLifecycleConnection,
   observeTurnLifecycleCatchUp,
@@ -572,6 +577,23 @@ async function markUnknown(record, error, now) {
   return appendScheduledEvidence(record, evidence);
 }
 
+function scheduledInboundDecision(record, evaluator) {
+  if (record.teamRecipientNodeKey || typeof evaluator !== "function") {
+    return null;
+  }
+  const targetThreadId = record.delivery?.targetThreadId;
+  if (!UUID_PATTERN.test(targetThreadId || "")) return null;
+  const senderNodeKey =
+    record.logicalMessage?.senderNodeKey ||
+    (record.logicalMessage?.senderThreadId
+      ? `codex:${record.logicalMessage.senderThreadId.toLowerCase()}`
+      : null);
+  return evaluator({
+    targetNodeKey: `codex:${targetThreadId.toLowerCase()}`,
+    senderIdentity: resolveInboundSenderIdentity(senderNodeKey),
+  });
+}
+
 export function scheduledTargetIdentity(
   record,
   {
@@ -616,6 +638,9 @@ export async function dispatchScheduledDelivery(
     renewClaim = renewScheduledDeliveryClaim,
     targetIdentity = scheduledTargetIdentity,
     log = writeCoordinationEvent,
+    policyEvaluator = INBOUND_POLICY_FEATURE_ACTIVE
+      ? evaluateInboundPolicy
+      : null,
   } = {},
 ) {
   const messageId = record.logicalMessage.messageId;
@@ -742,6 +767,7 @@ export async function dispatchScheduledDelivery(
   });
 
   let attempt = null;
+  let policyDenied = null;
   try {
     const currentTarget = resolveTarget()?.target || null;
     if (!currentTarget || currentTarget.threadId !== delivery.targetThreadId) {
@@ -838,10 +864,31 @@ export async function dispatchScheduledDelivery(
             leaseMs: SCHEDULER_CLAIM_LEASE_MS,
             now: new Date(now()).toISOString(),
           });
+          const inbound = scheduledInboundDecision(record, policyEvaluator);
+          if (inbound?.decision === "deny") {
+            policyDenied = await appendScheduledEvidence(record, {
+              attemptId: null,
+              state: "policy_denied",
+              evidenceKind: "inbound-policy",
+              turnId: null,
+              transportResult: null,
+              errorCode: "EINBOUNDDENIED",
+              inboundPolicy: inbound,
+              observedAt: new Date(now()).toISOString(),
+            });
+            const error = new Error(
+              "scheduled Delivery denied by current Inbound Policy",
+            );
+            error.code = "EINBOUNDDENIED";
+            throw error;
+          }
           attempt = await beginScheduledDelivery(messageId, {
             claimId: claimResult.claim.claimId,
             workerId,
             targetNodeKey,
+            ...(inbound?.decision === "continue"
+              ? { inboundPolicySnapshot: inbound }
+              : {}),
             now: new Date(now()).toISOString(),
           });
         },
@@ -865,6 +912,22 @@ export async function dispatchScheduledDelivery(
     });
     return { state: "turn_started", messageId, turnId: result.turnId };
   } catch (error) {
+    if (!attempt && error?.code === "EINBOUNDDENIED" && policyDenied) {
+      await log({
+        kind: "inbound-policy",
+        phase: "scheduled-decision",
+        correlationId: messageId,
+        target: delivery.target,
+        outcome: "denied",
+        errorCode: "EINBOUNDDENIED",
+        denialOrigin: "inbound-policy",
+      });
+      return {
+        state: "policy_denied",
+        messageId,
+        errorCode: "EINBOUNDDENIED",
+      };
+    }
     if (!attempt && error?.code === "ECLAIMLOST") {
       await log({
         kind: "scheduled-delivery",

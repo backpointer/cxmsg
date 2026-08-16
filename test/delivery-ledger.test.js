@@ -353,11 +353,47 @@ test("when-idle Delivery uses an expiring claim before one dispatch attempt", as
     leaseMs: 30_000,
     now: "2026-08-14T01:00:04.000Z",
   });
+  const inboundPolicySnapshot = {
+    decision: "continue",
+    reason: "no_match",
+    targetNodeKey: `codex:${ids.targetThread}`,
+    senderIdentityState: "verified",
+    senderNodeKey: `codex:${ids.sourceThread}`,
+    senderProjectId: "71345678-2234-4234-8234-123456789abc",
+    policyRevision: 1,
+    policySha256: "a".repeat(64),
+    ruleId: null,
+    selectorKind: null,
+    failClosed: false,
+  };
   const attempt = await ledger.beginScheduledDelivery(ids.scheduledMessage, {
     claimId: second.claim.claimId,
     workerId: ids.worker,
+    inboundPolicySnapshot,
     now: "2026-08-14T01:00:05.000Z",
   });
+  assert.deepEqual(attempt.inboundPolicySnapshot, inboundPolicySnapshot);
+  assert.equal(ledger.validDeliveryLedgerRecord(attempt), true);
+  assert.equal(
+    ledger.validDeliveryLedgerRecord({
+      ...attempt,
+      inboundPolicySnapshot: {
+        ...inboundPolicySnapshot,
+        senderIdentityState: "unverifiable",
+      },
+    }),
+    false,
+  );
+  assert.equal(
+    ledger.validDeliveryLedgerRecord({
+      ...attempt,
+      inboundPolicySnapshot: {
+        ...inboundPolicySnapshot,
+        unexpected: "field",
+      },
+    }),
+    false,
+  );
   await ledger.appendDeliveryEvidence(ids.scheduledMessage, {
     attemptId: attempt.attemptId,
     state: "turn_started",

@@ -77,10 +77,29 @@ const INBOUND_POLICY_REASONS = new Set([
   "sender_unidentified",
   "sender_unverifiable",
 ]);
+const INBOUND_POLICY_CONTINUE_REASONS = new Set([
+  "no_policy",
+  "no_match",
+  "sender_unidentified",
+  "sender_unverifiable",
+]);
 const INBOUND_POLICY_SELECTOR_KINDS = new Set([
   "sender-node",
   "sender-project",
   "unknown-sender",
+]);
+const INBOUND_POLICY_FIELDS = new Set([
+  "decision",
+  "reason",
+  "targetNodeKey",
+  "senderIdentityState",
+  "senderNodeKey",
+  "senderProjectId",
+  "policyRevision",
+  "policySha256",
+  "ruleId",
+  "selectorKind",
+  "failClosed",
 ]);
 const REPLY_HANDLE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 export const REPLY_HANDLE_PATTERN = /^m:[0-9A-HJKMNP-TV-Z]{10}$/;
@@ -170,44 +189,34 @@ function validBody(body, messageId) {
   );
 }
 
+function validInboundPolicyMetadata(evidence, decision, reasons) {
+  return Boolean(
+    evidence &&
+      evidence.decision === decision &&
+      reasons.has(evidence.reason) &&
+      NODE_KEY_PATTERN.test(evidence.targetNodeKey || "") &&
+      ["verified", "unidentified", "unverifiable"].includes(
+        evidence.senderIdentityState,
+      ) &&
+      (evidence.senderNodeKey === null ||
+        NODE_KEY_PATTERN.test(evidence.senderNodeKey || "")) &&
+      (evidence.senderProjectId === null ||
+        UUID_PATTERN.test(evidence.senderProjectId || "")) &&
+      (evidence.policyRevision === null ||
+        (Number.isSafeInteger(evidence.policyRevision) &&
+          evidence.policyRevision >= 1)) &&
+      (evidence.policySha256 === null ||
+        SHA256_PATTERN.test(evidence.policySha256 || "")) &&
+      (evidence.ruleId === null || UUID_PATTERN.test(evidence.ruleId || "")) &&
+      (evidence.selectorKind === null ||
+        INBOUND_POLICY_SELECTOR_KINDS.has(evidence.selectorKind)) &&
+      typeof evidence.failClosed === "boolean" &&
+      Object.keys(evidence).every((field) => INBOUND_POLICY_FIELDS.has(field))
+  );
+}
+
 function validInboundPolicyDenial(evidence) {
-  if (
-    !evidence ||
-    evidence.decision !== "deny" ||
-    !INBOUND_POLICY_REASONS.has(evidence.reason) ||
-    !NODE_KEY_PATTERN.test(evidence.targetNodeKey || "") ||
-    !["verified", "unidentified", "unverifiable"].includes(
-      evidence.senderIdentityState,
-    ) ||
-    (evidence.senderNodeKey !== null &&
-      !NODE_KEY_PATTERN.test(evidence.senderNodeKey || "")) ||
-    (evidence.senderProjectId !== null &&
-      !UUID_PATTERN.test(evidence.senderProjectId || "")) ||
-    (evidence.policyRevision !== null &&
-      (!Number.isSafeInteger(evidence.policyRevision) ||
-        evidence.policyRevision < 1)) ||
-    (evidence.policySha256 !== null &&
-      !SHA256_PATTERN.test(evidence.policySha256 || "")) ||
-    (evidence.ruleId !== null && !UUID_PATTERN.test(evidence.ruleId || "")) ||
-    (evidence.selectorKind !== null &&
-      !INBOUND_POLICY_SELECTOR_KINDS.has(evidence.selectorKind)) ||
-    typeof evidence.failClosed !== "boolean" ||
-    !Object.keys(evidence).every((field) =>
-      [
-        "decision",
-        "reason",
-        "targetNodeKey",
-        "senderIdentityState",
-        "senderNodeKey",
-        "senderProjectId",
-        "policyRevision",
-        "policySha256",
-        "ruleId",
-        "selectorKind",
-        "failClosed",
-      ].includes(field),
-    )
-  ) {
+  if (!validInboundPolicyMetadata(evidence, "deny", INBOUND_POLICY_REASONS)) {
     return false;
   }
   const verifiedIdentity = Boolean(
@@ -258,6 +267,45 @@ function validInboundPolicyDenial(evidence) {
     ) &&
       evidence.senderIdentityState !== "verified" &&
       evidence.selectorKind === "unknown-sender",
+  );
+}
+
+function validInboundPolicyContinue(evidence) {
+  if (
+    !validInboundPolicyMetadata(
+      evidence,
+      "continue",
+      INBOUND_POLICY_CONTINUE_REASONS,
+    ) ||
+    evidence.failClosed ||
+    evidence.ruleId !== null ||
+    evidence.selectorKind !== null
+  ) {
+    return false;
+  }
+  const verifiedIdentity = Boolean(
+    evidence.senderNodeKey && evidence.senderProjectId,
+  );
+  if ((evidence.senderIdentityState === "verified") !== verifiedIdentity) {
+    return false;
+  }
+  if (evidence.reason === "no_policy") {
+    return evidence.policyRevision === null && evidence.policySha256 === null;
+  }
+  if (
+    !Number.isSafeInteger(evidence.policyRevision) ||
+    !SHA256_PATTERN.test(evidence.policySha256 || "")
+  ) {
+    return false;
+  }
+  if (evidence.reason === "no_match") {
+    return evidence.senderIdentityState === "verified";
+  }
+  return (
+    (evidence.reason === "sender_unidentified" &&
+      evidence.senderIdentityState === "unidentified") ||
+    (evidence.reason === "sender_unverifiable" &&
+      evidence.senderIdentityState === "unverifiable")
   );
 }
 
@@ -598,6 +646,8 @@ function validAttempt(record) {
       (record.claimId === undefined ||
         record.claimId === null ||
         UUID_PATTERN.test(record.claimId || "")) &&
+      (record.inboundPolicySnapshot === undefined ||
+        validInboundPolicyContinue(record.inboundPolicySnapshot)) &&
       ["codex-app-server", "claude-uds"].includes(record.transport) &&
       validTimestamp(record.startedAt),
   );
@@ -1580,7 +1630,17 @@ function reservedEvidenceBytes(messages) {
     }
     const delivery = message.delivery;
     if (delivery.admissionState !== "admitted") continue;
-    if (["turn_started", "failed", "expired", "cancelled"].includes(delivery.state)) continue;
+    if (
+      [
+        "turn_started",
+        "failed",
+        "expired",
+        "cancelled",
+        "policy_denied",
+      ].includes(delivery.state)
+    ) {
+      continue;
+    }
     if (delivery.state === "unknown") {
       records += 1;
       continue;
@@ -1911,7 +1971,8 @@ function applyDeliveryEvent(projected, record) {
           "expired",
           "policy_denied",
         ].includes(record.state)) ||
-      (current === "scheduled" && ["expired", "cancelled"].includes(record.state)) ||
+      (current === "scheduled" &&
+        ["expired", "cancelled", "policy_denied"].includes(record.state)) ||
       (current === "unknown" && ["turn_started", "unknown"].includes(record.state)) ||
       (current === "turn_started" && record.state === "turn_started") ||
       (["expired", "cancelled"].includes(current) && record.state === current)
@@ -1923,7 +1984,14 @@ function applyDeliveryEvent(projected, record) {
       (record.state === "retryable" && projected.delivery.attempts.length !== 1) ||
       (record.state === "failed" && projected.delivery.attempts.length !== 2) ||
       (record.state === "policy_denied" &&
-        projected.delivery.attempts.length !== 1) ||
+        !(
+          (current === "retryable" &&
+            projected.delivery.attempts.length === 1) ||
+          (current === "scheduled" &&
+            SCHEDULED_WAKE_POLICIES.includes(projected.delivery.wakePolicy) &&
+            projected.delivery.attempts.length === 0 &&
+            projected.delivery.claim)
+        )) ||
     (record.evidenceKind === "retry-policy" &&
       projected.delivery.attempts.length !== 1)
   ) {
@@ -1935,6 +2003,7 @@ function applyDeliveryEvent(projected, record) {
   projected.delivery.errorCode = record.errorCode;
   projected.delivery.updatedAt = record.observedAt;
   projected.delivery.evidence.push(structuredClone(record));
+  if (record.state === "policy_denied") projected.delivery.claim = null;
   return projected;
 }
 
@@ -3124,6 +3193,7 @@ export async function beginScheduledDelivery(
     claimId,
     workerId,
     targetNodeKey = null,
+    inboundPolicySnapshot = undefined,
     now = new Date().toISOString(),
     quotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
     segmentBytes = DELIVERY_LEDGER_SEGMENT_BYTES,
@@ -3156,6 +3226,9 @@ export async function beginScheduledDelivery(
       deliveryId: delivery.deliveryId,
       attemptId: randomUUID(),
       claimId,
+      ...(inboundPolicySnapshot
+        ? { inboundPolicySnapshot: structuredClone(inboundPolicySnapshot) }
+        : {}),
       transport: "codex-app-server",
       startedAt: now,
     };

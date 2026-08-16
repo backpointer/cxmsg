@@ -1,7 +1,7 @@
 # Inbound Peer Message Policy v1
 
-Status: Slices 1 and 2 implemented behind the inactive cross-path feature
-gate; Scheduler, Group, Team, and public mutation remain unavailable
+Status: Slices 1 through 3 implemented behind the inactive cross-path feature
+gate; Group, Team, and public mutation remain unavailable
 
 ## Purpose
 
@@ -101,6 +101,13 @@ the next claim must renew its lease and evaluate the then-current policy again.
 A crash after attempt creation follows the existing unknown-evidence rule and
 is never automatically replayed. Reconciliation may strengthen evidence but
 cannot dispatch or bypass a new eligible-path policy evaluation.
+
+The Scheduler stores a closed, metadata-only snapshot only when a continuing
+decision becomes an actual attempt. A matching deny instead records terminal
+`policy_denied` evidence, clears the current claim, preserves the already
+retained body, and consumes zero attempts. Expired pre-attempt claims do not
+carry policy authority: a replacement worker must evaluate current policy
+again.
 
 The following are not ordinary Peer Message admission and remain governed by
 their existing separate contracts:

@@ -11,6 +11,8 @@ const ledger = await import(`../src/delivery-ledger.js?scheduler-test=${Date.now
 const bodies = await import(`../src/message-bodies.js?scheduler-test=${Date.now()}`);
 const scheduler = await import(`../src/scheduler.js?test=${Date.now()}`);
 const messaging = await import(`../src/messaging.js?scheduler-test=${Date.now()}`);
+const directory = await import(`../src/node-directory.js?scheduler-test=${Date.now()}`);
+const inbound = await import(`../src/inbound-policy.js?scheduler-test=${Date.now()}`);
 
 test.after(() => {
   rmSync(stateDir, { recursive: true, force: true });
@@ -35,9 +37,43 @@ const ids = {
   claimLoss: "e2345678-2234-4234-8234-123456789abc",
   predecessor: "f2345678-2234-4234-8234-123456789abc",
   successorRace: "02345678-2234-4234-8234-123456789abc",
+  policyInactive: "13345678-2234-4234-8234-123456789abc",
+  policyDenied: "23345678-2234-4234-8234-123456789abc",
+  policyContinued: "93345678-2234-4234-8234-123456789abc",
+  policyReclaim: "73345678-2234-4234-8234-123456789abc",
+  policyTargetThread: "43345678-2234-4234-8234-123456789abc",
+  policySourceThread: "53345678-2234-4234-8234-123456789abc",
+  policyOtherSourceThread: "a3345678-3234-4234-8234-123456789abc",
+  policyProject: "63345678-2234-4234-8234-123456789abc",
+  policyOldWorker: "83345678-2234-4234-8234-123456789abc",
 };
 
-async function scheduledRecord(messageId, body, wakePolicy = "when-idle", trigger = {}) {
+await directory.ensureProject({
+  routingId: "scheduler-policy",
+  root: path.resolve("."),
+  projectId: ids.policyProject,
+});
+for (const [nativeId, displayName] of [
+  [ids.policySourceThread, "scheduler-policy-source"],
+  [ids.policyOtherSourceThread, "scheduler-policy-other-source"],
+  [ids.policyTargetThread, "scheduler-policy-target"],
+]) {
+  await directory.upsertNode({
+    runtimeKind: "codex",
+    nativeId,
+    displayName,
+    projectId: ids.policyProject,
+  });
+}
+
+async function scheduledRecord(
+  messageId,
+  body,
+  wakePolicy = "when-idle",
+  trigger = {},
+  logicalMessageFields = {},
+  deliveryFields = {},
+) {
   const route = {
     schema_version: 1,
     project_id: "hermes",
@@ -65,12 +101,14 @@ async function scheduledRecord(messageId, body, wakePolicy = "when-idle", trigge
           .update(JSON.stringify(route))
           .digest("hex"),
         createdAt: "2026-08-15T00:00:00.000Z",
+        ...logicalMessageFields,
       },
       target: "auditor",
       targetThreadId: ids.targetThread,
       admissionState: "admitted",
       admissionReason: "binding_match",
       wakePolicy,
+      ...deliveryFields,
       now: "2026-08-15T00:00:00.000Z",
     })
   ).record;
@@ -241,6 +279,226 @@ test("a terminal trigger is rechecked after claim and starts exactly one turn", 
     ledger.readDeliveryLedger(ids.triggerDispatch).delivery.state,
     "turn_started",
   );
+});
+
+async function ensureScheduledSenderDeny() {
+  return inbound.upsertInboundDenyRule({
+    targetNodeKey: directory.nodeKey("codex", ids.policyTargetThread),
+    selectorKind: "sender-node",
+    selectorValue: directory.nodeKey("codex", ids.policySourceThread),
+  });
+}
+
+function scheduledPolicyDependencies(overrides = {}) {
+  return {
+    now: () => Date.parse("2026-08-15T00:02:30.000Z"),
+    session: () => ({
+      name: "scheduler-policy-target",
+      threadId: ids.policyTargetThread,
+    }),
+    readThread: async () => ({
+      id: ids.policyTargetThread,
+      status: { type: "idle" },
+    }),
+    log: async () => {},
+    ...overrides,
+  };
+}
+
+test("scheduled Inbound Policy integration remains inactive behind the cross-path gate", async () => {
+  await ensureScheduledSenderDeny();
+  const record = await scheduledRecord(
+    ids.policyInactive,
+    "inactive scheduled policy body",
+    "when-idle",
+    {},
+    {
+      senderThreadId: ids.policySourceThread,
+      senderNodeKey: directory.nodeKey("codex", ids.policySourceThread),
+    },
+    {
+      target: "scheduler-policy-target",
+      targetThreadId: ids.policyTargetThread,
+    },
+  );
+  let turnStarts = 0;
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    scheduledPolicyDependencies({
+      deliver: async (_client, _thread, _payload, options) => {
+        await options.beforeStart();
+        turnStarts += 1;
+        return { delivery: "started", turnId: ids.turn };
+      },
+    }),
+  );
+
+  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, false);
+  assert.equal(outcome.state, "turn_started");
+  assert.equal(turnStarts, 1);
+});
+
+test("a scheduled attempt retains the exact continuing policy snapshot", async () => {
+  await ensureScheduledSenderDeny();
+  const otherSenderNodeKey = directory.nodeKey(
+    "codex",
+    ids.policyOtherSourceThread,
+  );
+  const record = await scheduledRecord(
+    ids.policyContinued,
+    "scheduled snapshot body",
+    "when-idle",
+    {},
+    {
+      senderThreadId: ids.policyOtherSourceThread,
+      senderNodeKey: otherSenderNodeKey,
+    },
+    {
+      target: "scheduler-policy-target",
+      targetThreadId: ids.policyTargetThread,
+    },
+  );
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    scheduledPolicyDependencies({
+      policyEvaluator: inbound.evaluateInboundPolicy,
+      deliver: async (_client, _thread, _payload, options) => {
+        await options.beforeStart();
+        return { delivery: "started", turnId: ids.turn };
+      },
+    }),
+  );
+
+  assert.equal(outcome.state, "turn_started");
+  const snapshot = ledger.readDeliveryLedger(ids.policyContinued).delivery
+    .attempts[0].inboundPolicySnapshot;
+  assert.equal(snapshot.decision, "continue");
+  assert.equal(snapshot.reason, "no_match");
+  assert.equal(snapshot.senderNodeKey, otherSenderNodeKey);
+  assert.equal(snapshot.senderProjectId, ids.policyProject);
+  assert.equal(snapshot.policyRevision, 1);
+  assert.match(snapshot.policySha256, /^[0-9a-f]{64}$/);
+  assert.doesNotMatch(JSON.stringify(snapshot), /scheduled snapshot body/);
+});
+
+test("a renewed scheduled claim revalidates Inbound Policy before creating an attempt", async () => {
+  const record = await scheduledRecord(
+    ids.policyDenied,
+    "retained scheduled policy body",
+    "when-idle",
+    {},
+    {
+      senderThreadId: ids.policySourceThread,
+      senderNodeKey: directory.nodeKey("codex", ids.policySourceThread),
+    },
+    {
+      target: "scheduler-policy-target",
+      targetThreadId: ids.policyTargetThread,
+    },
+  );
+  await ensureScheduledSenderDeny();
+  const events = [];
+  let deliveryCalls = 0;
+  let turnStarts = 0;
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    scheduledPolicyDependencies({
+      policyEvaluator: inbound.evaluateInboundPolicy,
+      deliver: async (_client, _thread, _payload, options) => {
+        deliveryCalls += 1;
+        await options.beforeStart();
+        turnStarts += 1;
+        return { delivery: "started", turnId: ids.turn };
+      },
+      log: async (event) => events.push(event),
+    }),
+  );
+
+  assert.deepEqual(outcome, {
+    state: "policy_denied",
+    messageId: ids.policyDenied,
+    errorCode: "EINBOUNDDENIED",
+  });
+  assert.equal(deliveryCalls, 1);
+  assert.equal(turnStarts, 0);
+  const retained = ledger.readDeliveryLedger(ids.policyDenied);
+  assert.equal(retained.delivery.state, "policy_denied");
+  assert.equal(retained.delivery.claim, null);
+  assert.equal(retained.delivery.claimCount, 1);
+  assert.equal(retained.delivery.attempts.length, 0);
+  assert.equal(retained.delivery.evidence.length, 1);
+  assert.equal(
+    retained.delivery.evidence[0].inboundPolicy.reason,
+    "sender_denied",
+  );
+  assert.equal(
+    retained.logicalMessage.body.contentRef,
+    `cxmsg-message:${ids.policyDenied}`,
+  );
+  assert.deepEqual(
+    events.map(({ phase, outcome: eventOutcome }) => ({
+      phase,
+      outcome: eventOutcome,
+    })),
+    [
+      { phase: "claim", outcome: "acquired" },
+      { phase: "scheduled-decision", outcome: "denied" },
+    ],
+  );
+  assert.doesNotMatch(JSON.stringify(events), /retained scheduled policy body/);
+});
+
+test("an expired pre-attempt claim cannot bypass policy revalidation after recovery", async () => {
+  const record = await scheduledRecord(
+    ids.policyReclaim,
+    "crash recovery scheduled body",
+    "when-idle",
+    {},
+    {
+      senderThreadId: ids.policySourceThread,
+      senderNodeKey: directory.nodeKey("codex", ids.policySourceThread),
+    },
+    {
+      target: "scheduler-policy-target",
+      targetThreadId: ids.policyTargetThread,
+    },
+  );
+  await ensureScheduledSenderDeny();
+  const abandoned = await ledger.claimScheduledDelivery(ids.policyReclaim, {
+    workerId: ids.policyOldWorker,
+    leaseMs: 1_000,
+    now: "2026-08-15T00:08:00.000Z",
+  });
+  assert.equal(abandoned.acquired, true);
+  let turnStarts = 0;
+  const outcome = await scheduler.dispatchScheduledDelivery(
+    record,
+    {},
+    ids.worker,
+    scheduledPolicyDependencies({
+      now: () => Date.parse("2026-08-15T00:08:02.000Z"),
+      policyEvaluator: inbound.evaluateInboundPolicy,
+      deliver: async (_client, _thread, _payload, options) => {
+        await options.beforeStart();
+        turnStarts += 1;
+        return { delivery: "started", turnId: ids.turn };
+      },
+    }),
+  );
+
+  assert.equal(outcome.state, "policy_denied");
+  assert.equal(turnStarts, 0);
+  const retained = ledger.readDeliveryLedger(ids.policyReclaim).delivery;
+  assert.equal(retained.state, "policy_denied");
+  assert.equal(retained.claimCount, 2);
+  assert.equal(retained.claim, null);
+  assert.equal(retained.attempts.length, 0);
 });
 
 test("a trigger that becomes unverifiable after claim releases without an attempt", async () => {
