@@ -346,12 +346,12 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap extension — Inbound Peer Message Policy
 
-- Status: REVIEW FINDINGS INCORPORATED; implementation not started
+- Status: SLICE 1 IMPLEMENTED; public activation disabled; audit pending
 
 - [x] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
       privacy, authority, deduplication, fan-out, scheduling, and retention
       invariants.
-- [ ] Implement the internal owner-private policy Adapter, evaluator, schema
+- [x] Implement the internal owner-private policy Adapter, evaluator, schema
       inspection, and Doctor foundation without public activation.
 - [ ] Integrate direct Codex and Claude ordinary ingress with metadata-only
       terminal denial.

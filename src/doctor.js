@@ -4,6 +4,7 @@ import {
   inspectAttachments,
   inspectBridges,
   inspectConversationState,
+  inspectInboundPolicies,
   inspectJobs,
   inspectMessageBodies,
   inspectNodeDirectory,
@@ -62,6 +63,9 @@ export async function runDoctor({
       stateDir,
       sessions: state.allSessions || state.sessions,
     }),
+  );
+  checks.push(
+    ...(adapters.inspectInboundPolicies || inspectInboundPolicies)({ stateDir }),
   );
   checks.push(
     ...(adapters.inspectConversationState || inspectConversationState)({

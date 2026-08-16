@@ -170,6 +170,13 @@ reusing it with different content fails as an idempotency conflict. Targets
 without an explicit binding retain legacy unscoped-send compatibility during
 migration.
 
+Inbound Peer Message Policy v1 currently has an internal owner-private record
+Adapter, pure evaluator, schema inspection, and Doctor foundation only. Public
+policy mutation and message enforcement are deliberately unavailable until
+direct, Explicit Retry, Scheduler, Group, and Team paths pass the cross-path
+integration gate. If policy records appear before activation, Doctor reports
+`EINBOUNDPOLICYINACTIVE`; do not treat those records as enforced blocking.
+
 After a scan records no positive evidence, Doctor reports
 `EROUTERECONCILEDUNKNOWN` instead of requesting the same scan again. The
 Delivery remains retained and non-replayable.

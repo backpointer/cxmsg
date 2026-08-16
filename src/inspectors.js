@@ -29,6 +29,12 @@ import {
 import { validGroupConversationRecord } from "./group-conversations.js";
 import { hostRelayRequest } from "./host-relay.js";
 import {
+  INBOUND_POLICY_MAX_RECORD_BYTES,
+  INBOUND_POLICY_MAX_RECORDS,
+  INBOUND_POLICY_MAX_RULES,
+  validInboundPolicyRecord,
+} from "./inbound-policy.js";
+import {
   MESSAGE_BODY_SEGMENT_BYTES,
   MESSAGE_BODY_STORE_QUOTA_BYTES,
   MAX_STORED_MESSAGE_BYTES,
@@ -894,6 +900,13 @@ function validRouteBinding(record, stem) {
         /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(record.role || ""),
     ),
     errorCode: "EROUTEBINDINGSCHEMA",
+  };
+}
+
+function validInboundPolicy(record, stem) {
+  return {
+    valid: validInboundPolicyRecord(record, stem),
+    errorCode: "EINBOUNDPOLICYSCHEMA",
   };
 }
 
@@ -3435,6 +3448,223 @@ export function inspectRouteState({
         }),
       );
     }
+  }
+  return checks;
+}
+
+export function inspectInboundPolicies({
+  stateDir,
+  featureActive = false,
+} = {}) {
+  const scope = "inbound-policies";
+  const policies = scanJsonDirectory({
+    stateDir,
+    directoryName: "inbound-policies",
+    scope,
+    validate: validInboundPolicy,
+    maxRecordBytes: INBOUND_POLICY_MAX_RECORD_BYTES,
+  });
+  const nodes = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/nodes",
+    scope: "inbound-policy-nodes",
+    validate: validDirectoryNode,
+  });
+  const tombstones = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/tombstones/nodes",
+    scope: "inbound-policy-node-tombstones",
+    validate: validDirectoryNodeTombstone,
+  });
+  const projects = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/projects",
+    scope: "inbound-policy-projects",
+    validate: validDirectoryProject,
+  });
+  const successors = scanJsonDirectory({
+    stateDir,
+    directoryName: "directory/successors",
+    scope: "inbound-policy-successors",
+    validate: validDirectorySuccessor,
+  });
+  const checks = [...policies.checks];
+  const policyDirectory = path.join(stateDir, "inbound-policies");
+  const policyDirectoryEvidence = secureMetadata(policyDirectory, "directory");
+  if (policyDirectoryEvidence.status === "secure") {
+    try {
+      const unexpected = readdirSync(policyDirectory).filter(
+        (name) =>
+          name !== "mutation.lock" && !/^[0-9a-f]{64}\.json$/.test(name),
+      );
+      checks.push(
+        diagnosticCheck({
+          id: `${scope}.entries`,
+          scope,
+          status: unexpected.length === 0 ? "pass" : "fail",
+          summary:
+            unexpected.length === 0
+              ? "Inbound policy directory contains only bounded policy records"
+              : "Inbound policy directory contains unexpected or incomplete entries",
+          verification: "metadata",
+          errorCode:
+            unexpected.length === 0 ? null : "EINBOUNDPOLICYUNEXPECTED",
+        }),
+      );
+    } catch (error) {
+      checks.push(
+        diagnosticCheck({
+          id: `${scope}.entries`,
+          scope,
+          status: "unknown",
+          summary: "Inbound policy directory entries could not be inspected",
+          verification: "unavailable",
+          errorCode: errorCode(error),
+        }),
+      );
+    }
+    const lockEvidence = secureMetadata(
+      path.join(policyDirectory, "mutation.lock"),
+      "file",
+    );
+    if (lockEvidence.status !== "missing") {
+      checks.push(
+        metadataFinding(
+          `${scope}.lock`,
+          scope,
+          "Inbound policy mutation lock",
+          lockEvidence,
+          { required: false },
+        ),
+      );
+    }
+  }
+  const policyByTarget = new Map(
+    policies.records.map((record) => [record.targetNodeKey, record]),
+  );
+  const nodeKeys = new Set(nodes.records.map((record) => record.nodeKey));
+  const tombstoneKeys = new Set(
+    tombstones.records.map((record) => record.nodeKey),
+  );
+  const projectIds = new Set(
+    projects.records.map((record) => record.projectId),
+  );
+  const totalRules = policies.records.reduce(
+    (total, record) => total + record.rules.length,
+    0,
+  );
+  const quotaValid =
+    policies.records.length <= INBOUND_POLICY_MAX_RECORDS &&
+    totalRules <= INBOUND_POLICY_MAX_RULES;
+  checks.push(
+    diagnosticCheck({
+      id: `${scope}.quota`,
+      scope,
+      status: quotaValid ? "pass" : "fail",
+      summary: quotaValid
+        ? "Inbound policy records and rules remain within global quotas"
+        : "Inbound policy records or rules exceed global quotas",
+      verification: "bounded",
+      errorCode: quotaValid ? null : "EINBOUNDPOLICYQUOTA",
+    }),
+  );
+  const activationValid = featureActive || policies.records.length === 0;
+  checks.push(
+    diagnosticCheck({
+      id: `${scope}.activation`,
+      scope,
+      status: activationValid ? "pass" : "fail",
+      summary: activationValid
+        ? "No inactive Inbound Peer Message Policy can imply partial enforcement"
+        : "Inbound policy records exist before every ordinary path is integrated",
+      verification: "configuration",
+      errorCode: activationValid ? null : "EINBOUNDPOLICYINACTIVE",
+      remediation: activationValid
+        ? null
+        : "Do not rely on or expose policy mutation until the cross-path integration gate passes",
+    }),
+  );
+  for (const policy of policies.records) {
+    const label = createHash("sha256")
+      .update(policy.targetNodeKey)
+      .digest("hex")
+      .slice(0, 8);
+    const targetLive = nodeKeys.has(policy.targetNodeKey);
+    const targetTombstoned = tombstoneKeys.has(policy.targetNodeKey);
+    checks.push(
+      diagnosticCheck({
+        id: `${scope}.target.${label}`,
+        scope,
+        status: targetLive && !targetTombstoned ? "pass" : "warn",
+        summary:
+          targetLive && !targetTombstoned
+            ? "Inbound policy target is a live stable Node"
+            : "Inbound policy target is missing or tombstoned",
+        verification: "records",
+        errorCode:
+          targetLive && !targetTombstoned ? null : "EINBOUNDPOLICYTARGET",
+        required: false,
+      }),
+    );
+    for (const rule of policy.rules) {
+      const ruleLabel = rule.ruleId.slice(0, 8);
+      if (rule.selectorKind === "sender-node") {
+        const live = nodeKeys.has(rule.selectorNodeKey);
+        const tombstoned = tombstoneKeys.has(rule.selectorNodeKey);
+        checks.push(
+          diagnosticCheck({
+            id: `${scope}.rule.${ruleLabel}.node`,
+            scope,
+            status: live && !tombstoned ? "pass" : "warn",
+            summary:
+              live && !tombstoned
+                ? "Inbound sender-Node selector references a live Node"
+                : "Inbound sender-Node selector references a missing or tombstoned Node",
+            verification: "records",
+            errorCode: live && !tombstoned ? null : "EINBOUNDPOLICYSENDERNODE",
+            required: false,
+          }),
+        );
+      } else if (rule.selectorKind === "sender-project") {
+        const exists = projectIds.has(rule.projectId);
+        checks.push(
+          diagnosticCheck({
+            id: `${scope}.rule.${ruleLabel}.project`,
+            scope,
+            status: exists ? "pass" : "warn",
+            summary: exists
+              ? "Inbound sender-Project selector references a stable Project"
+              : "Inbound sender-Project selector references a missing Project",
+            verification: "records",
+            errorCode: exists ? null : "EINBOUNDPOLICYSENDERPROJECT",
+            required: false,
+          }),
+        );
+      }
+    }
+  }
+  for (const relation of successors.records) {
+    if (
+      !policyByTarget.has(relation.predecessorNodeKey) ||
+      policyByTarget.has(relation.successorNodeKey)
+    ) {
+      continue;
+    }
+    checks.push(
+      diagnosticCheck({
+        id: `${scope}.successor.${createHash("sha256")
+          .update(relation.successorNodeKey)
+          .digest("hex")
+          .slice(0, 8)}`,
+        scope,
+        status: "warn",
+        summary: "A policy-bearing predecessor has a Successor with no explicit policy",
+        verification: "records",
+        errorCode: "EINBOUNDPOLICYSUCCESSORGAP",
+        remediation: "Review the Successor independently; policy is never transferred automatically",
+        required: false,
+      }),
+    );
   }
   return checks;
 }

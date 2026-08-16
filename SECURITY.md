@@ -154,6 +154,12 @@ authority path. Logical-message deduplication prevents a second automatic wake
 after an attempt is durably marked, including when the first outcome is
 uncertain.
 
+Inbound Peer Message Policy remains internally staged and inactive. Its
+owner-private Adapter and pure evaluator create no public mutation or routing
+authority. Doctor fails with `EINBOUNDPOLICYINACTIVE` if a policy record exists
+before every ordinary Peer Message path is integrated. A staged policy record
+must never be represented as effective enforcement.
+
 New ordinary Codex deliveries use an owner-only append-only Delivery Ledger.
 The atomic batch contains redacted Logical Message metadata and one recipient
 Delivery before transport; it does not contain the raw Message Body. Attempt
