@@ -415,7 +415,7 @@ test("deep App Server inspection compares the external Codex service version", a
       server.listen(socket, resolve);
     });
     await fs.chmod(socket, 0o600);
-    const inspect = async (cliVersion) =>
+    const inspect = async (cliVersion, serverVersion = "0.147.0") =>
       (await inspectAppServer({
         pidPath,
         socketPath: socket,
@@ -426,7 +426,7 @@ test("deep App Server inspection compares the external Codex service version", a
           state: "healthy",
           errorCode: null,
           error: null,
-          appServerVersion: "0.147.0",
+          appServerVersion: serverVersion,
         }),
         run: () => ({ status: 0, stdout: `codex-cli ${cliVersion}\n` }),
       })).find((check) => check.id === "app-server.version.compatibility");
@@ -435,6 +435,10 @@ test("deep App Server inspection compares the external Codex service version", a
     assert.equal(
       (await inspect("0.148.0")).errorCode,
       "EAPPSERVERVERSIONMISMATCH",
+    );
+    assert.equal(
+      (await inspect("0.147.0", null)).errorCode,
+      "EAPPSERVERVERSIONUNKNOWN",
     );
   } finally {
     await new Promise((resolve) => server.close(resolve));
@@ -1002,6 +1006,30 @@ test("Route Inspector distinguishes healthy, stalled, and legacy scheduler recor
     );
     await writeJson(schedulerPath, {
       ...base,
+      cxmsgVersion: "x".repeat(65),
+    });
+    assert.equal(
+      inspectRouteState({
+        stateDir: root,
+        now: Date.parse("2026-08-14T00:00:20.000Z"),
+        processStateFn: () => "alive",
+      }).find((check) => check.id === "schedules.worker.schema").errorCode,
+      "ESCHEDULERSCHEMA",
+    );
+    await writeJson(schedulerPath, {
+      ...base,
+      implementationRevision: 0,
+    });
+    assert.equal(
+      inspectRouteState({
+        stateDir: root,
+        now: Date.parse("2026-08-14T00:00:20.000Z"),
+        processStateFn: () => "alive",
+      }).find((check) => check.id === "schedules.worker.schema").errorCode,
+      "ESCHEDULERSCHEMA",
+    );
+    await writeJson(schedulerPath, {
+      ...base,
       heartbeatAt: "2026-08-14T00:00:00.000Z",
     });
     assert.equal(inspect().errorCode, "ESCHEDULERSTALLED");
@@ -1051,12 +1079,14 @@ test("Relay Inspector distinguishes current, unknown, and stale implementations"
       token: "12345678-2234-4234-8234-123456789abc",
       startedAt: 1,
     };
-    const inspect = async () =>
-      (await inspectRelay({
+    const inspectChecks = async () =>
+      inspectRelay({
         recordPath,
         processStateFn: () => "alive",
         processIdentityFn: () => ({ state: "matched", command: "relay" }),
-      })).find((check) => check.id === "relay.implementation");
+      });
+    const inspect = async () =>
+      (await inspectChecks()).find((check) => check.id === "relay.implementation");
 
     await writeJson(recordPath, base);
     assert.equal((await inspect()).status, "pass");
@@ -1068,6 +1098,18 @@ test("Relay Inspector distinguishes current, unknown, and stale implementations"
     const { implementationRevision, ...legacyImplementation } = base;
     await writeJson(recordPath, legacyImplementation);
     assert.equal((await inspect()).errorCode, "ERELAYVERSIONUNKNOWN");
+    await writeJson(recordPath, { ...base, cxmsgVersion: "x".repeat(65) });
+    assert.equal(
+      (await inspectChecks()).find((check) => check.id === "relay.record.schema")
+        .errorCode,
+      "ERELAYSCHEMA",
+    );
+    await writeJson(recordPath, { ...base, implementationRevision: 0 });
+    assert.equal(
+      (await inspectChecks()).find((check) => check.id === "relay.record.schema")
+        .errorCode,
+      "ERELAYSCHEMA",
+    );
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }

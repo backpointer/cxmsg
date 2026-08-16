@@ -114,6 +114,7 @@ test("negative acceptance is recognized only for pinned App Server contracts", (
   });
   mismatch.appServerUserAgent = "codex_cli_rs/0.147.0 (macOS; arm64)";
   assert.equal(appServerVersion(mismatch.appServerUserAgent), "0.147.0");
+  assert.equal(appServerVersion("malformed user agent"), null);
   assert.deepEqual(classifyAppServerNegativeAcceptance(mismatch), {
     reason: "expected_turn_mismatch",
     errorCode: "EEXPECTEDTURNMISMATCH",
