@@ -670,6 +670,31 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   assert.equal(terminalWithDeliveryFailure[0].errorCode, "EAPPWSFRAME");
   assert.match(terminalWithDeliveryFailure[0].summary, /terminal/);
 
+  const terminalWithResultObservationFailure = inspectJobs([
+    {
+      version: 1,
+      kind: "delegation",
+      jobId: "83345678-1234-4234-8234-123456789abc",
+      status: "completed",
+      completedAt: "2026-08-14T00:00:30.000Z",
+      resultObservation: {
+        status: "failed",
+        source: "thread-items",
+        observedAt: "2026-08-14T00:00:30.000Z",
+        errorCode: "EAPPWSFRAME",
+        observedBytes: 1_097_173,
+        limitBytes: 1_048_576,
+      },
+    },
+  ]);
+  assert.equal(terminalWithResultObservationFailure.length, 1);
+  assert.equal(terminalWithResultObservationFailure[0].status, "warn");
+  assert.equal(terminalWithResultObservationFailure[0].errorCode, "EAPPWSFRAME");
+  assert.match(
+    terminalWithResultObservationFailure[0].remediation,
+    /do not rerun automatically/i,
+  );
+
   const stagedFailures = inspectJobs([
     {
       version: 1,

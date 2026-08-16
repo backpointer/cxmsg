@@ -88,13 +88,25 @@ test("authorized Claude requests run in a fork and return one correlated reply",
               {
                 id: "request-turn",
                 status: "completed",
-                items: [
-                  {
-                    type: "agentMessage",
-                    phase: "final_answer",
-                    text: "report accepted",
-                  },
-                ],
+                items: [],
+              },
+            ],
+            nextCursor: null,
+          };
+        }
+        if (
+          method === "thread/items/list" &&
+          params.threadId === "execution-thread"
+        ) {
+          return {
+            data: [
+              {
+                turnId: "request-turn",
+                item: {
+                  type: "agentMessage",
+                  phase: "final_answer",
+                  text: "report accepted",
+                },
               },
             ],
             nextCursor: null,
@@ -131,7 +143,7 @@ test("authorized Claude requests run in a fork and return one correlated reply",
     );
     assert.equal(
       calls.find((call) => call.method === "thread/turns/list").params.itemsView,
-      "summary",
+      "notLoaded",
     );
     const frame = JSON.parse(received.trim());
     assert.match(

@@ -14,6 +14,7 @@ import {
 import {
   activateScheduledDelegation,
   isPendingJob,
+  JOB_OBSERVATION_NOTIFICATION_OPT_OUT,
   mutateJob,
   readJob,
   refreshJob,
@@ -220,7 +221,10 @@ export async function runDelegationWorker(
     }));
   }
 
-  const client = new Client({ onServerRequest: createApprovalHandler(jobId) });
+  const client = new Client({
+    onServerRequest: createApprovalHandler(jobId),
+    optOutNotificationMethods: JOB_OBSERVATION_NOTIFICATION_OPT_OUT,
+  });
   try {
     failureStage = "transport-connect";
     await client.connect();

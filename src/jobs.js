@@ -11,11 +11,11 @@ import {
 import path from "node:path";
 import { withFileLock } from "./file-lock.js";
 import {
-  finalTurnResult,
   MAX_MESSAGE_BYTES,
   validateMessage,
   validateSessionName,
 } from "./messaging.js";
+import { appServerFailureEvidence } from "./app-server-client.js";
 import { processState } from "./process-state.js";
 import { MAX_STORED_MESSAGE_BYTES } from "./message-bodies.js";
 import {
@@ -24,10 +24,18 @@ import {
   withRetentionWriter,
 } from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
-import { findThreadTurn } from "./thread-activity.js";
+import {
+  findFinalTurnResult,
+  findThreadTurn,
+} from "./thread-activity.js";
 
 const JOBS_DIR = path.join(CXMSG_STATE_DIR, "jobs");
 const WORKER_REGISTRATION_GRACE_MS = 10_000;
+
+export const JOB_OBSERVATION_NOTIFICATION_OPT_OUT = Object.freeze([
+  "item/completed",
+  "turn/completed",
+]);
 
 function ensureJobsDirectory() {
   mkdirSync(JOBS_DIR, { recursive: true, mode: 0o700 });
@@ -178,6 +186,7 @@ function buildJob({
     approvals: [],
     workerPid: null,
     mirrorDelivery: null,
+    resultObservation: null,
     ...(kind === "delegation"
       ? {
           turnStartAttemptedAt: null,
@@ -516,7 +525,9 @@ export async function failJobIfWorkerExited(
 
 export async function refreshJob(client, job) {
   if (!job.turnId) return job;
-  const turn = await findThreadTurn(client, job.threadId, job.turnId);
+  const turn = await findThreadTurn(client, job.threadId, job.turnId, {
+    itemsView: "notLoaded",
+  });
   if (!turn) {
     const startedAt = Date.parse(job.turnStartedAt || job.updatedAt || job.createdAt);
     if (Number.isFinite(startedAt) && Date.now() - startedAt < 10_000) {
@@ -546,9 +557,37 @@ export async function refreshJob(client, job) {
   }
   const terminal = status !== "running";
   if (!terminal && job.status === "running") return readJob(job.jobId) || job;
+  let result = null;
+  let resultObservation = null;
+  if (status === "completed") {
+    const observedAt = new Date().toISOString();
+    try {
+      const final = await findFinalTurnResult(client, job.threadId, job.turnId);
+      result = final.result;
+      resultObservation = final.state === "available"
+        ? { status: "available", source: "thread-items", observedAt }
+        : {
+            status: "missing",
+            source: "thread-items",
+            observedAt,
+            errorCode:
+              final.state === "incomplete"
+                ? "ERESULTWINDOW"
+                : "ERESULTNOTFOUND",
+          };
+    } catch (error) {
+      resultObservation = {
+        status: "failed",
+        source: "thread-items",
+        observedAt,
+        ...appServerFailureEvidence(error, "ERESULTOBSERVATION"),
+      };
+    }
+  }
   return updateJob(job, {
     status,
-    result: terminal ? finalTurnResult(turn) : null,
+    result,
+    resultObservation,
     error: turn.error?.message || turn.error || null,
     completedAt: terminal ? job.completedAt || new Date().toISOString() : null,
   });

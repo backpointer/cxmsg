@@ -41,6 +41,11 @@ class FixtureClient {
   static executionThreadId = executionThreadId;
   static turnId = turnId;
   static requests = [];
+  static options = null;
+
+  constructor(options = {}) {
+    this.constructor.options = options;
+  }
 
   async connect() {}
   async close() {}
@@ -79,9 +84,22 @@ class FixtureClient {
           {
             id: this.constructor.turnId,
             status: "completed",
-            items: [
-              { type: "agentMessage", phase: "final_answer", text: "done" },
-            ],
+            items: [],
+          },
+        ],
+        nextCursor: null,
+      };
+    }
+    if (method === "thread/items/list") {
+      return {
+        data: [
+          {
+            turnId: this.constructor.turnId,
+            item: {
+              type: "agentMessage",
+              phase: "final_answer",
+              text: "done",
+            },
           },
         ],
         nextCursor: null,
@@ -195,6 +213,24 @@ class MirrorFailureClient extends FixtureClient {
   }
 }
 
+class ResultFrameFailureClient extends FixtureClient {
+  static executionThreadId = "d6345678-1234-4234-8234-123456789abc";
+  static turnId = "d7345678-1234-4234-8234-123456789abc";
+  static requests = [];
+
+  async request(method, params) {
+    if (method === "thread/items/list") {
+      this.constructor.requests.push({ method, params });
+      const error = new Error("app-server WebSocket frame exceeds the buffer limit");
+      error.code = "EAPPWSFRAME";
+      error.observedBytes = 1_097_173;
+      error.limitBytes = 1_048_576;
+      throw error;
+    }
+    return super.request(method, params);
+  }
+}
+
 test("fork Delegation classifies its Execution Thread before completion", async () => {
   FixtureClient.requests = [];
   registry.writeSessionRecord({
@@ -218,10 +254,15 @@ test("fork Delegation classifies its Execution Thread before completion", async 
   assert.equal(result.threadId, executionThreadId);
   assert.equal(result.executionThreadId, executionThreadId);
   assert.equal(result.result, "done");
+  assert.equal(result.resultObservation.status, "available");
   assert.equal(execution.jobId, jobId);
   assert.equal(execution.sourceThreadId, sourceThreadId);
   assert.equal(execution.creationMode, "fork");
   assert.equal(directory.readNode("codex", executionThreadId), null);
+  assert.deepEqual(FixtureClient.options.optOutNotificationMethods, [
+    "item/completed",
+    "turn/completed",
+  ]);
   assert.equal(
     FixtureClient.requests.some((request) => request.method === "thread/read"),
     false,
@@ -230,6 +271,28 @@ test("fork Delegation classifies its Execution Thread before completion", async 
     FixtureClient.requests.find((request) => request.method === "thread/fork")
       .params.threadId,
     sourceThreadId,
+  );
+  assert.deepEqual(
+    FixtureClient.requests.find(
+      (request) => request.method === "thread/turns/list",
+    ).params,
+    {
+      threadId: executionThreadId,
+      limit: 8,
+      sortDirection: "desc",
+      itemsView: "notLoaded",
+    },
+  );
+  assert.deepEqual(
+    FixtureClient.requests.find(
+      (request) => request.method === "thread/items/list",
+    ).params,
+    {
+      threadId: executionThreadId,
+      turnId,
+      limit: 1,
+      sortDirection: "desc",
+    },
   );
 });
 
@@ -413,6 +476,47 @@ test("durable Job completion is independent from peer mirror failure", async () 
   assert.equal(result.result, "done");
   assert.equal(result.mirrorDelivery.status, "failed");
   assert.equal(result.mirrorDelivery.errorCode, "EAPPWSFRAME");
+});
+
+test("terminal turn evidence survives a bounded result observation failure", async () => {
+  const observationJobId = "d5345678-1234-4234-8234-123456789abc";
+  jobs.createJob({
+    jobId: observationJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: sourceThreadId,
+    task: "long-history result observation fixture",
+    execution: "fork",
+  });
+
+  const result = await runDelegationWorker(observationJobId, {
+    Client: ResultFrameFailureClient,
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(result.modelTurnStarted, true);
+  assert.equal(result.result, null);
+  assert.deepEqual(
+    {
+      status: result.resultObservation.status,
+      source: result.resultObservation.source,
+      errorCode: result.resultObservation.errorCode,
+      observedBytes: result.resultObservation.observedBytes,
+      limitBytes: result.resultObservation.limitBytes,
+    },
+    {
+      status: "failed",
+      source: "thread-items",
+      errorCode: "EAPPWSFRAME",
+      observedBytes: 1_097_173,
+      limitBytes: 1_048_576,
+    },
+  );
+  assert.equal(result.failureCode, undefined);
+  assert.equal(result.failureStage, null);
+  assert.deepEqual(
+    ResultFrameFailureClient.options.optOutNotificationMethods,
+    ["item/completed", "turn/completed"],
+  );
 });
 
 test("standalone fallback remains a non-addressable Execution Thread", async () => {

@@ -837,6 +837,7 @@ function validJob(record, stem) {
   const failureEvidence = record?.failureEvidence;
   const kind = record?.kind ?? "delegation";
   const taskBody = record?.taskBody;
+  const resultObservation = record?.resultObservation;
   const validDelegationTask =
     kind !== "delegation" ||
     (taskBody === undefined || taskBody === null
@@ -881,6 +882,34 @@ function validJob(record, stem) {
           failureEvidence.observedBytes >= 0 &&
           Number.isSafeInteger(failureEvidence.limitBytes) &&
           failureEvidence.limitBytes >= 0));
+  const validResultObservation =
+    resultObservation === undefined ||
+    resultObservation === null ||
+    (typeof resultObservation === "object" &&
+      ["available", "missing", "failed"].includes(resultObservation.status) &&
+      resultObservation.source === "thread-items" &&
+      Number.isFinite(Date.parse(resultObservation.observedAt || "")) &&
+      Object.keys(resultObservation).every((field) =>
+        [
+          "status",
+          "source",
+          "observedAt",
+          "errorCode",
+          "observedBytes",
+          "limitBytes",
+        ].includes(field),
+      ) &&
+      (resultObservation.status === "available"
+        ? resultObservation.errorCode === undefined &&
+          resultObservation.observedBytes === undefined &&
+          resultObservation.limitBytes === undefined
+        : /^[A-Z0-9_]{1,32}$/.test(resultObservation.errorCode || "") &&
+          (resultObservation.observedBytes === undefined
+            ? resultObservation.limitBytes === undefined
+            : Number.isSafeInteger(resultObservation.observedBytes) &&
+              resultObservation.observedBytes >= 0 &&
+              Number.isSafeInteger(resultObservation.limitBytes) &&
+              resultObservation.limitBytes >= 0)));
   const validSchedule =
     schedule === undefined ||
     schedule === null ||
@@ -912,6 +941,7 @@ function validJob(record, stem) {
         validDelegationTask &&
         validDelegationEvidence &&
         validFailureEvidence &&
+        validResultObservation &&
         validSchedule &&
         (record.status !== "scheduled" ||
           (record.kind === "delegation" && schedule)),
@@ -4316,6 +4346,19 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
     const kind = job.kind || "delegation";
     if (!job.kind) legacy += 1;
     const label = job.jobId.slice(0, 8);
+    if (["failed", "missing"].includes(job.resultObservation?.status)) {
+      checks.push(diagnosticCheck({
+        id: `jobs.execution.${label}.result-observation`,
+        scope: "jobs",
+        status: "warn",
+        summary: `Delegation ${label} completed but its final result could not be observed`,
+        verification: "record:thread-items",
+        errorCode: job.resultObservation.errorCode || "ERESULTOBSERVATION",
+        remediation:
+          "Treat the terminal turn as durable execution evidence; inspect the retained thread result separately and do not rerun automatically",
+        required: false,
+      }));
+    }
     if (job.mirrorDelivery?.status === "failed") {
       checks.push(diagnosticCheck({
         id: `jobs.delivery.${label}.mirror`,

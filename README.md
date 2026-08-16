@@ -1475,6 +1475,15 @@ The Job's terminal status and result are durable execution evidence. Optional
 mirror delivery and Claude response delivery remain separate `mirrorDelivery`
 or `reply` evidence. A failed peer delivery never rewrites a completed Job to
 failed; `cxmsg result` and Doctor report the coordination failure separately.
+Delegation observers opt out of payload-heavy `item/completed` and
+`turn/completed` notifications, poll turn status with `itemsView=notLoaded`,
+and retrieve the final answer through reverse, one-item
+`thread/items/list` pages. This keeps long-history command output and turn
+summaries outside the 1 MiB WebSocket observation bound. If the terminal turn
+is confirmed but its final answer still cannot be retrieved within that bound,
+the Job remains `completed` and records a separate owner-private
+`resultObservation` failure; Doctor and the text CLI surface it without
+authorizing retry or rerouting.
 Delegation failures also record `failureStage`, `turnStartAttemptedAt`, and a
 tri-state `modelTurnStarted`: `true` is positive turn evidence, `false` proves
 failure before model execution, and `null` means acceptance is ambiguous and

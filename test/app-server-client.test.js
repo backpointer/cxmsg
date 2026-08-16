@@ -106,6 +106,29 @@ test("App Server client exposes notifications without confusing them with respon
   await client.close();
 });
 
+test("App Server client negotiates an exact bounded notification opt-out", async () => {
+  const transport = new FakeTransport();
+  const client = new AppServerClient({
+    transportFactory: () => transport,
+    optOutNotificationMethods: [
+      "item/completed",
+      "turn/completed",
+      "item/completed",
+    ],
+  });
+  await client.connect();
+  assert.deepEqual(
+    transport.sent.find((message) => message.method === "initialize").params
+      .capabilities.optOutNotificationMethods,
+    ["item/completed", "turn/completed"],
+  );
+  await client.close();
+  assert.throws(
+    () => new AppServerClient({ optOutNotificationMethods: ["*"] }),
+    /notification opt-out methods are invalid/,
+  );
+});
+
 test("negative acceptance is recognized only for pinned App Server contracts", () => {
   const mismatch = new AppServerError("turn/steer failed", {
     code: -32600,

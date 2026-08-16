@@ -13,6 +13,7 @@ import {
 import {
   createJob,
   isPendingJob,
+  JOB_OBSERVATION_NOTIFICATION_OPT_OUT,
   readJob,
   refreshJob,
   updateJob,
@@ -234,7 +235,10 @@ export async function processClaudeRequest({
         }
         return waitForCompletion(client, active, deadline);
       },
-      { onServerRequest: createApprovalHandler(job.jobId) },
+      {
+        onServerRequest: createApprovalHandler(job.jobId),
+        optOutNotificationMethods: JOB_OBSERVATION_NOTIFICATION_OPT_OUT,
+      },
     );
   } catch (error) {
     current = readJob(job.jobId) || current;

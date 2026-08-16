@@ -4,6 +4,8 @@ export const RECENT_TURN_LIMIT = 8;
 export const MAX_TURN_SEARCH_PAGES = 8;
 export const CLIENT_MESSAGE_SEARCH_PAGE_SIZE = 64;
 export const MAX_CLIENT_MESSAGE_SEARCH_PAGES = 8;
+export const FINAL_RESULT_SEARCH_PAGE_SIZE = 1;
+export const MAX_FINAL_RESULT_SEARCH_PAGES = 16;
 const TURN_ID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 export const TERMINAL_TURN_STATUSES = Object.freeze([
   "completed",
@@ -141,6 +143,43 @@ export async function findThreadTurn(
     cursor = page.nextCursor;
   }
   return null;
+}
+
+export async function findFinalTurnResult(
+  client,
+  threadId,
+  turnId,
+  { maxPages = MAX_FINAL_RESULT_SEARCH_PAGES } = {},
+) {
+  const boundedMaxPages = boundedPositiveInteger(
+    maxPages,
+    MAX_FINAL_RESULT_SEARCH_PAGES,
+    64,
+  );
+  let cursor = null;
+  for (let pageIndex = 0; pageIndex < boundedMaxPages; pageIndex += 1) {
+    const params = {
+      threadId,
+      turnId,
+      limit: FINAL_RESULT_SEARCH_PAGE_SIZE,
+      sortDirection: "desc",
+    };
+    if (cursor) params.cursor = cursor;
+    const page = await client.request("thread/items/list", params);
+    for (const entry of page.data || []) {
+      const item = entry?.item;
+      if (
+        entry?.turnId === turnId &&
+        item?.type === "agentMessage" &&
+        item.phase === "final_answer"
+      ) {
+        return { state: "available", result: item.text || null };
+      }
+    }
+    if (!page.nextCursor) return { state: "missing", result: null };
+    cursor = page.nextCursor;
+  }
+  return { state: "incomplete", result: null };
 }
 
 export async function findClientUserMessage(

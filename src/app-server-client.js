@@ -9,6 +9,22 @@ const DEFAULT_TIMEOUT_MS = 10_000;
 const NEGATIVE_ACCEPTANCE_CONTRACTS = new Set(["0.147.0"]);
 const APP_SERVER_VERSION_PATTERN = /^[^/\s]+\/(\d+\.\d+\.\d+)(?:[-+\s]|$)/;
 
+function boundedNotificationOptOut(methods) {
+  if (methods === null || methods === undefined) return null;
+  if (
+    !Array.isArray(methods) ||
+    methods.length > 128 ||
+    methods.some(
+      (method) =>
+        typeof method !== "string" ||
+        !/^[A-Za-z][A-Za-z0-9/-]{0,127}$/.test(method),
+    )
+  ) {
+    throw new Error("App Server notification opt-out methods are invalid");
+  }
+  return [...new Set(methods)];
+}
+
 export function validateAppServerSocket(socketPath) {
   const metadata = lstatSync(socketPath);
   if (!metadata.isSocket()) throw new Error("not a Unix socket");
@@ -104,6 +120,7 @@ export class AppServerClient {
     onServerRequest = null,
     onNotification = null,
     onDisconnect = null,
+    optOutNotificationMethods = null,
     transportFactory = null,
   } = {}) {
     this.socketPath = socketPath;
@@ -115,6 +132,9 @@ export class AppServerClient {
     this.onServerRequest = onServerRequest;
     this.onNotification = onNotification;
     this.onDisconnect = onDisconnect;
+    this.optOutNotificationMethods = boundedNotificationOptOut(
+      optOutNotificationMethods,
+    );
     this.transportFactory = transportFactory;
     this.initializeResult = null;
   }
@@ -147,6 +167,9 @@ export class AppServerClient {
       },
       capabilities: {
         experimentalApi: true,
+        ...(this.optOutNotificationMethods
+          ? { optOutNotificationMethods: this.optOutNotificationMethods }
+          : {}),
       },
     });
     this.notify("initialized");

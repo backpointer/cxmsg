@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   findClientUserMessage,
+  findFinalTurnResult,
   findThreadTurn,
   readThreadForInput,
   readThreadMetadata,
@@ -132,6 +133,71 @@ test("turn lookup paginates bounded summary pages", async () => {
       },
     ],
   );
+});
+
+test("final result lookup reads one reverse-ordered item per bounded page", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      if (!params.cursor) {
+        return {
+          data: [
+            {
+              turnId: "target-turn",
+              item: { type: "reasoning", id: "reasoning-1" },
+            },
+          ],
+          nextCursor: "older-item",
+        };
+      }
+      return {
+        data: [
+          {
+            turnId: "target-turn",
+            item: {
+              type: "agentMessage",
+              phase: "final_answer",
+              text: "bounded final result",
+            },
+          },
+        ],
+        nextCursor: null,
+      };
+    },
+  };
+
+  const result = await findFinalTurnResult(
+    client,
+    "thread-1",
+    "target-turn",
+    { maxPages: 2 },
+  );
+  assert.deepEqual(result, {
+    state: "available",
+    result: "bounded final result",
+  });
+  assert.deepEqual(calls, [
+    {
+      method: "thread/items/list",
+      params: {
+        threadId: "thread-1",
+        turnId: "target-turn",
+        limit: 1,
+        sortDirection: "desc",
+      },
+    },
+    {
+      method: "thread/items/list",
+      params: {
+        threadId: "thread-1",
+        turnId: "target-turn",
+        limit: 1,
+        sortDirection: "desc",
+        cursor: "older-item",
+      },
+    },
+  ]);
 });
 
 test("client message reconciliation reports only positive bounded acceptance evidence", async () => {

@@ -133,6 +133,7 @@ import {
   createScheduledDelegationJob,
   failJobIfWorkerExited,
   isPendingJob,
+  JOB_OBSERVATION_NOTIFICATION_OPT_OUT,
   listJobs,
   newJobId,
   readJob,
@@ -2560,6 +2561,15 @@ function printJob(job, jsonOutput) {
     const suffix = job.error ? `\t${job.error}` : "";
     process.stdout.write(`${job.status}\t${job.jobId}${suffix}\n`);
   }
+  if (
+    job.status === "completed" &&
+    ["failed", "missing"].includes(job.resultObservation?.status)
+  ) {
+    process.stderr.write(
+      `cxmsg: job ${job.jobId} completed; result observation failed separately` +
+        `${job.resultObservation.errorCode ? ` (${job.resultObservation.errorCode})` : ""}\n`,
+    );
+  }
   const peerDelivery =
     job.kind === "claude-request" ? job.reply : job.mirrorDelivery;
   if (peerDelivery?.status === "failed") {
@@ -2575,7 +2585,10 @@ async function loadAndRefreshJob(jobId) {
   if (!job) throw new Error(`unknown job: ${jobId}`);
   if (job.status === "running") {
     await ensureServer();
-    job = await withAppServer((client) => refreshJob(client, job));
+    job = await withAppServer(
+      (client) => refreshJob(client, job),
+      { optOutNotificationMethods: JOB_OBSERVATION_NOTIFICATION_OPT_OUT },
+    );
   }
   return failJobIfWorkerExited(job);
 }
