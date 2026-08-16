@@ -13,6 +13,7 @@
   },
   "homepage": "https://github.com/backpointer/cxmsg#readme",
   "type": "module",
+  "exports": {},
   "bin": {
     "cxmsg": "./bin/cxmsg",
     "cxmsg-mcp": "./bin/mcp-server.js"

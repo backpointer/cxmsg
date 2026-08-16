@@ -12,6 +12,7 @@ import {
   readFileSync,
   readdirSync,
   renameSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
@@ -23,17 +24,20 @@ export const INBOUND_POLICIES_DIR = path.join(
   "inbound-policies",
 );
 export const INBOUND_POLICY_LOCK_PATH = path.join(
-  INBOUND_POLICIES_DIR,
-  "mutation.lock",
+  CXMSG_STATE_DIR,
+  "inbound-policies.lock",
 );
 export const INBOUND_POLICY_MAX_RECORD_BYTES = 128 * 1024;
 export const INBOUND_POLICY_MAX_RECORDS = 1024;
 export const INBOUND_POLICY_MAX_RULES = 4096;
 export const INBOUND_POLICY_MAX_RULES_PER_TARGET = 256;
+export const INBOUND_POLICY_TRANSIENT_GRACE_MS = 30_000;
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const NODE_KEY_PATTERN = /^(codex|claude):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
+const POLICY_RECORD_NAME_PATTERN = /^[0-9a-f]{64}\.json$/;
+const POLICY_TRANSIENT_NAME_PATTERN = /^[0-9a-f]{64}\.json\.[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}\.(?:tmp|deleting)$/i;
 const SELECTOR_KINDS = new Set([
   "sender-node",
   "sender-project",
@@ -83,8 +87,34 @@ function policyPath(targetNodeKey) {
   return path.join(INBOUND_POLICIES_DIR, inboundPolicyFilename(targetNodeKey));
 }
 
+function canonicalValue(value) {
+  if (Array.isArray(value)) return value.map(canonicalValue);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value)
+        .sort()
+        .map((key) => [key, canonicalValue(value[key])]),
+    );
+  }
+  return value;
+}
+
 function policyDigest(record) {
-  return createHash("sha256").update(JSON.stringify(record)).digest("hex");
+  return createHash("sha256")
+    .update(JSON.stringify(canonicalValue(record)))
+    .digest("hex");
+}
+
+export function classifyInboundPolicyEntry(
+  name,
+  mtimeMs,
+  now = Date.now(),
+) {
+  if (POLICY_RECORD_NAME_PATTERN.test(name)) return "record";
+  if (!POLICY_TRANSIENT_NAME_PATTERN.test(name)) return "unexpected";
+  return Number.isFinite(mtimeMs) && now - mtimeMs <= INBOUND_POLICY_TRANSIENT_GRACE_MS
+    ? "transient"
+    : "stale-transient";
 }
 
 function selectorIdentity(rule) {
@@ -186,9 +216,14 @@ function privateMetadata(filename, expectedType) {
 }
 
 function readPrivatePolicyFile(filename) {
+  if (!Number.isInteger(constants.O_NOFOLLOW)) {
+    const error = new Error("Inbound policy storage requires O_NOFOLLOW");
+    error.code = "EINBOUNDPOLICYNONOFOLLOW";
+    throw error;
+  }
   const descriptor = openSync(
     filename,
-    constants.O_RDONLY | (constants.O_NOFOLLOW || 0),
+    constants.O_RDONLY | constants.O_NOFOLLOW,
   );
   try {
     const metadata = assertPrivateMetadata(fstatSync(descriptor), "file");
@@ -197,7 +232,8 @@ function readPrivatePolicyFile(filename) {
       error.code = "EINBOUNDPOLICYSIZE";
       throw error;
     }
-    return { metadata, contents: readFileSync(descriptor, "utf8") };
+    const bytes = readFileSync(descriptor);
+    return { metadata, bytes, contents: bytes.toString("utf8") };
   } finally {
     closeSync(descriptor);
   }
@@ -239,12 +275,17 @@ function atomicWritePolicy(filename, record) {
     throw new Error("Inbound policy record exceeds its bounded size");
   }
   const temporary = `${filename}.${randomUUID()}.tmp`;
+  if (!Number.isInteger(constants.O_NOFOLLOW)) {
+    const error = new Error("Inbound policy storage requires O_NOFOLLOW");
+    error.code = "EINBOUNDPOLICYNONOFOLLOW";
+    throw error;
+  }
   const descriptor = openSync(
     temporary,
     constants.O_CREAT |
       constants.O_EXCL |
       constants.O_WRONLY |
-      (constants.O_NOFOLLOW || 0),
+      constants.O_NOFOLLOW,
     0o600,
   );
   try {
@@ -256,6 +297,15 @@ function atomicWritePolicy(filename, record) {
   renameSync(temporary, filename);
   fsyncDirectory(path.dirname(filename));
   return structuredClone(record);
+}
+
+function removePolicyFile(filename) {
+  privateMetadata(filename, "file");
+  const deleting = `${filename}.${randomUUID()}.deleting`;
+  renameSync(filename, deleting);
+  fsyncDirectory(path.dirname(filename));
+  unlinkSync(deleting);
+  fsyncDirectory(path.dirname(filename));
 }
 
 export function inboundPolicyState(targetNodeKey) {
@@ -296,17 +346,23 @@ export function inboundPolicyState(targetNodeKey) {
 export function listInboundPoliciesStrict() {
   if (!existsSync(INBOUND_POLICIES_DIR)) return [];
   privateMetadata(INBOUND_POLICIES_DIR, "directory");
-  const names = readdirSync(INBOUND_POLICIES_DIR)
-    .filter((name) => name !== path.basename(INBOUND_POLICY_LOCK_PATH))
-    .sort();
-  if (names.length > INBOUND_POLICY_MAX_RECORDS) {
+  const names = readdirSync(INBOUND_POLICIES_DIR).sort();
+  const recordNames = [];
+  for (const name of names) {
+    const filename = path.join(INBOUND_POLICIES_DIR, name);
+    const metadata = lstatSync(filename);
+    const classification = classifyInboundPolicyEntry(name, metadata.mtimeMs);
+    if (["transient", "stale-transient"].includes(classification)) continue;
+    if (classification !== "record") {
+      throw new Error("Inbound policy directory contains an unexpected entry");
+    }
+    recordNames.push(name);
+  }
+  if (recordNames.length > INBOUND_POLICY_MAX_RECORDS) {
     throw new Error("Inbound policy record quota exceeded");
   }
   const records = [];
-  for (const name of names) {
-    if (!/^[0-9a-f]{64}\.json$/.test(name)) {
-      throw new Error("Inbound policy directory contains an unexpected entry");
-    }
+  for (const name of recordNames) {
     const filename = path.join(INBOUND_POLICIES_DIR, name);
     const { contents } = readPrivatePolicyFile(filename);
     const record = JSON.parse(contents);
@@ -456,9 +512,59 @@ export async function removeInboundDenyRule({
       error.code = "EINBOUNDPOLICYSTALE";
       throw error;
     }
+    if (next.rules.length === 0) {
+      removePolicyFile(policyPath(targetNodeKey));
+      return {
+        policy: null,
+        removedRule: structuredClone(rule),
+        deleted: true,
+      };
+    }
     return {
       policy: atomicWritePolicy(policyPath(targetNodeKey), next),
       removedRule: structuredClone(rule),
+      deleted: false,
+    };
+  });
+}
+
+export async function purgeInboundPolicyRecord({
+  targetNodeKey,
+  confirmSha256,
+  now = new Date().toISOString(),
+}) {
+  targetNodeKey = normalizeInboundNodeKey(targetNodeKey);
+  if (!SHA256_PATTERN.test(confirmSha256 || "")) {
+    throw new Error("Inbound policy purge requires an exact SHA-256 confirmation");
+  }
+  if (!validTimestamp(now)) throw new Error("Inbound policy timestamp is invalid");
+  ensureStore();
+  return withInboundPolicyLock(async () => {
+    const filename = policyPath(targetNodeKey);
+    const { bytes, contents } = readPrivatePolicyFile(filename);
+    try {
+      const record = JSON.parse(contents);
+      if (validInboundPolicyRecord(record, path.basename(filename, ".json"))) {
+        const error = new Error(
+          "A valid inbound policy must be changed through rule removal",
+        );
+        error.code = "EINBOUNDPOLICYVALID";
+        throw error;
+      }
+    } catch (error) {
+      if (error?.code === "EINBOUNDPOLICYVALID") throw error;
+    }
+    const observedSha256 = createHash("sha256").update(bytes).digest("hex");
+    if (observedSha256 !== confirmSha256) {
+      const error = new Error("Inbound policy purge confirmation is stale");
+      error.code = "EINBOUNDPOLICYSTALE";
+      throw error;
+    }
+    removePolicyFile(filename);
+    return {
+      targetNodeKey,
+      recordSha256: observedSha256,
+      removedAt: now,
     };
   });
 }
@@ -500,6 +606,9 @@ export function evaluateInboundPolicyRecord({
 }) {
   targetNodeKey = normalizeInboundNodeKey(targetNodeKey);
   const sender = normalizeSenderIdentity(senderIdentity);
+  const verifiedSenderNodeKey = sender.state === "verified" ? sender.nodeKey : null;
+  const verifiedSenderProjectId =
+    sender.state === "verified" ? sender.projectId : null;
   if (!policyState || !["missing", "valid", "invalid"].includes(policyState.state)) {
     throw new Error("Inbound policy state evidence is invalid");
   }
@@ -509,10 +618,13 @@ export function evaluateInboundPolicyRecord({
       reason: "no_policy",
       targetNodeKey,
       senderIdentityState: sender.state,
+      senderNodeKey: verifiedSenderNodeKey,
+      senderProjectId: verifiedSenderProjectId,
       policyRevision: null,
       policySha256: null,
       ruleId: null,
       selectorKind: null,
+      failClosed: false,
     };
   }
   if (
@@ -525,10 +637,13 @@ export function evaluateInboundPolicyRecord({
       reason: "policy_invalid",
       targetNodeKey,
       senderIdentityState: sender.state,
+      senderNodeKey: verifiedSenderNodeKey,
+      senderProjectId: verifiedSenderProjectId,
       policyRevision: null,
       policySha256: null,
       ruleId: null,
       selectorKind: null,
+      failClosed: true,
     };
   }
   const policy = policyState.record;
@@ -564,7 +679,7 @@ export function evaluateInboundPolicyRecord({
   } else if (sender.state === "unverifiable" && hasProjectRule) {
     decision = "deny";
     reason = "identity_unverifiable";
-    rule = { ruleId: null, selectorKind: "sender-project" };
+    rule = null;
   } else if (sender.state !== "verified" && unknownRule) {
     decision = "deny";
     reason = sender.state === "unidentified"
@@ -577,12 +692,13 @@ export function evaluateInboundPolicyRecord({
     reason,
     targetNodeKey,
     senderIdentityState: sender.state,
-    senderNodeKey: sender.nodeKey,
-    senderProjectId: sender.projectId,
+    senderNodeKey: verifiedSenderNodeKey,
+    senderProjectId: verifiedSenderProjectId,
     policyRevision: policy.revision,
     policySha256: policyDigest(policy),
     ruleId: rule?.ruleId || null,
     selectorKind: rule?.selectorKind || null,
+    failClosed: reason === "identity_unverifiable",
   };
 }
 

@@ -29,6 +29,7 @@ import {
 import { validGroupConversationRecord } from "./group-conversations.js";
 import { hostRelayRequest } from "./host-relay.js";
 import {
+  classifyInboundPolicyEntry,
   INBOUND_POLICY_MAX_RECORD_BYTES,
   INBOUND_POLICY_MAX_RECORDS,
   INBOUND_POLICY_MAX_RULES,
@@ -3493,22 +3494,51 @@ export function inspectInboundPolicies({
   const policyDirectoryEvidence = secureMetadata(policyDirectory, "directory");
   if (policyDirectoryEvidence.status === "secure") {
     try {
-      const unexpected = readdirSync(policyDirectory).filter(
-        (name) =>
-          name !== "mutation.lock" && !/^[0-9a-f]{64}\.json$/.test(name),
-      );
+      let activeTransients = 0;
+      let staleTransients = 0;
+      let unexpectedEntries = 0;
+      for (const name of readdirSync(policyDirectory)) {
+        const evidence = secureMetadata(path.join(policyDirectory, name), "file");
+        if (evidence.status !== "secure") {
+          checks.push(
+            metadataFinding(
+              `${scope}.entry.${createHash("sha256").update(name).digest("hex").slice(0, 8)}`,
+              scope,
+              "Inbound policy directory entry",
+              evidence,
+            ),
+          );
+          unexpectedEntries += 1;
+          continue;
+        }
+        const classification = classifyInboundPolicyEntry(
+          name,
+          evidence.metadata.mtimeMs,
+        );
+        if (classification === "transient") activeTransients += 1;
+        else if (classification === "stale-transient") staleTransients += 1;
+        else if (classification === "unexpected") unexpectedEntries += 1;
+      }
+      const entriesValid = staleTransients === 0 && unexpectedEntries === 0;
       checks.push(
         diagnosticCheck({
           id: `${scope}.entries`,
           scope,
-          status: unexpected.length === 0 ? "pass" : "fail",
+          status: entriesValid ? "pass" : "fail",
           summary:
-            unexpected.length === 0
-              ? "Inbound policy directory contains only bounded policy records"
-              : "Inbound policy directory contains unexpected or incomplete entries",
+            entriesValid
+              ? activeTransients === 0
+                ? "Inbound policy directory contains only bounded policy records"
+                : "Inbound policy directory contains bounded records and an active mutation artifact"
+              : staleTransients > 0
+                ? "Inbound policy directory contains a stale mutation artifact"
+                : "Inbound policy directory contains an unexpected entry",
           verification: "metadata",
-          errorCode:
-            unexpected.length === 0 ? null : "EINBOUNDPOLICYUNEXPECTED",
+          errorCode: entriesValid
+            ? null
+            : staleTransients > 0
+              ? "EINBOUNDPOLICYTRANSIENTSTALE"
+              : "EINBOUNDPOLICYUNEXPECTED",
         }),
       );
     } catch (error) {
@@ -3524,7 +3554,7 @@ export function inspectInboundPolicies({
       );
     }
     const lockEvidence = secureMetadata(
-      path.join(policyDirectory, "mutation.lock"),
+      path.join(stateDir, "inbound-policies.lock"),
       "file",
     );
     if (lockEvidence.status !== "missing") {

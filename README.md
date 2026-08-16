@@ -176,6 +176,9 @@ policy mutation and message enforcement are deliberately unavailable until
 direct, Explicit Retry, Scheduler, Group, and Team paths pass the cross-path
 integration gate. If policy records appear before activation, Doctor reports
 `EINBOUNDPOLICYINACTIVE`; do not treat those records as enforced blocking.
+Removing the final internal rule removes its empty configuration record, while
+an invalid record requires exact file-digest confirmation to purge. Neither
+operation removes Delivery Ledger denial evidence or retained message data.
 
 After a scan records no positive evidence, Doctor reports
 `EROUTERECONCILEDUNKNOWN` instead of requesting the same scan again. The

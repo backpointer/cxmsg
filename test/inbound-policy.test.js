@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -11,10 +11,13 @@ process.env.CXMSG_STATE_DIR = root;
 const {
   INBOUND_POLICIES_DIR,
   INBOUND_POLICY_LOCK_PATH,
+  INBOUND_POLICY_TRANSIENT_GRACE_MS,
   evaluateInboundPolicyRecord,
+  evaluateInboundPolicy,
   inboundPolicyFilename,
   inboundPolicyState,
   listInboundPoliciesStrict,
+  purgeInboundPolicyRecord,
   removeInboundDenyRule,
   upsertInboundDenyRule,
   validInboundPolicyRecord,
@@ -81,6 +84,8 @@ test("Inbound policy Adapter persists private idempotent bounded rules", async (
     `${createHash("sha256").update(TARGET).digest("hex")}.json`,
   );
   assert.equal((await fs.stat(filename)).mode & 0o077, 0);
+  assert.equal(path.dirname(INBOUND_POLICY_LOCK_PATH), root);
+  assert.notEqual(path.dirname(INBOUND_POLICY_LOCK_PATH), INBOUND_POLICIES_DIR);
 
   const removed = await removeInboundDenyRule({
     targetNodeKey: TARGET,
@@ -144,7 +149,10 @@ test("Inbound policy evaluator separates verified and unknown sender evidence", 
   assert.equal(unverifiable.decision, "deny");
   assert.equal(unverifiable.reason, "identity_unverifiable");
   assert.equal(unverifiable.ruleId, null);
-  assert.equal(unverifiable.selectorKind, "sender-project");
+  assert.equal(unverifiable.selectorKind, null);
+  assert.equal(unverifiable.senderNodeKey, null);
+  assert.equal(unverifiable.senderProjectId, null);
+  assert.equal(unverifiable.failClosed, true);
 
   const unidentified = evaluateInboundPolicyRecord({
     targetNodeKey: SECOND_TARGET,
@@ -188,6 +196,25 @@ test("unknown-sender rule preserves distinct identity reason codes", async () =>
   );
 });
 
+test("runtime evaluator matches the pure record evaluator", () => {
+  const senderIdentity = {
+    state: "verified",
+    nodeKey: SENDER,
+    projectId: OTHER_PROJECT,
+  };
+  assert.deepEqual(
+    evaluateInboundPolicy({
+      targetNodeKey: SECOND_TARGET,
+      senderIdentity,
+    }),
+    evaluateInboundPolicyRecord({
+      targetNodeKey: SECOND_TARGET,
+      policyState: inboundPolicyState(SECOND_TARGET),
+      senderIdentity,
+    }),
+  );
+});
+
 test("invalid policy evidence denies fail-closed and missing policy continues", () => {
   const missing = evaluateInboundPolicyRecord({
     targetNodeKey: TARGET,
@@ -196,6 +223,9 @@ test("invalid policy evidence denies fail-closed and missing policy continues", 
   });
   assert.equal(missing.decision, "continue");
   assert.equal(missing.reason, "no_policy");
+  assert.equal(missing.senderNodeKey, null);
+  assert.equal(missing.senderProjectId, null);
+  assert.equal(missing.failClosed, false);
 
   const invalid = evaluateInboundPolicyRecord({
     targetNodeKey: TARGET,
@@ -204,6 +234,69 @@ test("invalid policy evidence denies fail-closed and missing policy continues", 
   });
   assert.equal(invalid.decision, "deny");
   assert.equal(invalid.reason, "policy_invalid");
+  assert.equal(invalid.senderNodeKey, SENDER);
+  assert.equal(invalid.senderProjectId, PROJECT);
+  assert.equal(invalid.failClosed, true);
+});
+
+test("removing the final rule removes the inactive policy record", async () => {
+  const target = "codex:a2345678-1234-4234-8234-123456789abc";
+  const added = await upsertInboundDenyRule({
+    targetNodeKey: target,
+    selectorKind: "unknown-sender",
+    now: "2026-08-16T02:30:00.000Z",
+  });
+  const removed = await removeInboundDenyRule({
+    targetNodeKey: target,
+    ruleId: added.rule.ruleId,
+    now: "2026-08-16T02:30:01.000Z",
+  });
+  assert.equal(removed.deleted, true);
+  assert.equal(removed.policy, null);
+  assert.equal(inboundPolicyState(target).state, "missing");
+  assert.equal(
+    listInboundPoliciesStrict().some((record) => record.targetNodeKey === target),
+    false,
+  );
+});
+
+test("invalid policy records require an exact digest for supported purge", async () => {
+  const validFilename = path.join(
+    INBOUND_POLICIES_DIR,
+    inboundPolicyFilename(TARGET),
+  );
+  const validDigest = createHash("sha256")
+    .update(await fs.readFile(validFilename))
+    .digest("hex");
+  await assert.rejects(
+    purgeInboundPolicyRecord({
+      targetNodeKey: TARGET,
+      confirmSha256: validDigest,
+    }),
+    (error) => error?.code === "EINBOUNDPOLICYVALID",
+  );
+
+  const target = "codex:b2345678-1234-4234-8234-123456789abc";
+  await fs.mkdir(INBOUND_POLICIES_DIR, { recursive: true, mode: 0o700 });
+  const filename = path.join(INBOUND_POLICIES_DIR, inboundPolicyFilename(target));
+  const bytes = Buffer.from('{"invalid":true}\n');
+  await fs.writeFile(filename, bytes, { mode: 0o600 });
+  const digest = createHash("sha256").update(bytes).digest("hex");
+  await assert.rejects(
+    purgeInboundPolicyRecord({
+      targetNodeKey: target,
+      confirmSha256: "0".repeat(64),
+    }),
+    (error) => error?.code === "EINBOUNDPOLICYSTALE",
+  );
+  assert.equal(inboundPolicyState(target).state, "invalid");
+  const purged = await purgeInboundPolicyRecord({
+    targetNodeKey: target,
+    confirmSha256: digest,
+    now: "2026-08-16T02:40:00.000Z",
+  });
+  assert.equal(purged.recordSha256, digest);
+  assert.equal(inboundPolicyState(target).state, "missing");
 });
 
 test("policy schema rejects duplicate selectors and a 257th rule", () => {
@@ -250,6 +343,21 @@ test("policy state rejects symlink replacement without reading its target", asyn
     const state = inboundPolicyState(TARGET);
     assert.equal(state.state, "invalid");
     assert.equal(await fs.readFile(outside, "utf8"), "not policy\n");
+  } finally {
+    await fs.rm(filename, { force: true });
+    await fs.rm(outside, { force: true });
+  }
+});
+
+test("policy state rejects hard-linked records", async () => {
+  const target = "codex:c2345678-1234-4234-8234-123456789abc";
+  const outside = path.join(os.tmpdir(), `cxmsg-inbound-hardlink-${process.pid}`);
+  const filename = path.join(INBOUND_POLICIES_DIR, inboundPolicyFilename(target));
+  await fs.writeFile(outside, '{"invalid":true}\n', { mode: 0o600 });
+  await fs.link(outside, filename);
+  try {
+    assert.equal(inboundPolicyState(target).state, "invalid");
+    assert.equal(await fs.readFile(outside, "utf8"), '{"invalid":true}\n');
   } finally {
     await fs.rm(filename, { force: true });
     await fs.rm(outside, { force: true });
@@ -322,5 +430,44 @@ test("Doctor foundation reports inactive policies and redacted identity gaps", a
     );
   } finally {
     await fs.rm(unexpected, { force: true });
+  }
+});
+
+test("policy scans tolerate active artifacts and Doctor reports stale artifacts", async () => {
+  const name = `${inboundPolicyFilename(TARGET)}.${randomUUID()}.tmp`;
+  const artifact = path.join(INBOUND_POLICIES_DIR, name);
+  await fs.writeFile(artifact, "partial\n", { mode: 0o600 });
+  try {
+    assert.doesNotThrow(() => listInboundPoliciesStrict());
+    assert.equal(
+      inspectInboundPolicies({ stateDir: root })
+        .find((check) => check.id === "inbound-policies.entries")
+        .status,
+      "pass",
+    );
+    const stale = new Date(Date.now() - INBOUND_POLICY_TRANSIENT_GRACE_MS - 1_000);
+    await fs.utimes(artifact, stale, stale);
+    assert.doesNotThrow(() => listInboundPoliciesStrict());
+    assert.equal(
+      inspectInboundPolicies({ stateDir: root })
+        .find((check) => check.id === "inbound-policies.entries")
+        .errorCode,
+      "EINBOUNDPOLICYTRANSIENTSTALE",
+    );
+  } finally {
+    await fs.rm(artifact, { force: true });
+  }
+});
+
+test("Doctor inspection honors an explicit stateDir instead of runtime state", async () => {
+  const isolated = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-inbound-inspect-"));
+  try {
+    const checks = inspectInboundPolicies({ stateDir: isolated });
+    assert.equal(
+      checks.find((check) => check.id === "inbound-policies.activation").status,
+      "pass",
+    );
+  } finally {
+    await fs.rm(isolated, { recursive: true, force: true });
   }
 });

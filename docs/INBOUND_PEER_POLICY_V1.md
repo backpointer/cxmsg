@@ -168,13 +168,22 @@ revision, bounded rule set, and created/updated timestamps. Limits:
 - exact selector kinds only: `sender-node`, `sender-project`, `unknown-sender`;
 - one generated UUID rule ID per rule;
 - duplicate selector addition is idempotent and returns the existing rule;
-- removal requires the exact target and rule ID.
+- removal requires the exact target and rule ID;
+- removing the final rule removes the now-empty policy record;
+- an invalid owner-private record can be removed only by an internal operation
+  that confirms the exact SHA-256 of its current file bytes.
 
 Writers use an owner-only lock, no-follow/type/owner/link/mode validation, an
 O_EXCL temporary file, file fsync, atomic rename, and parent-directory fsync.
-They re-read the current revision under the lock and compare the exact previous
-record digest immediately before replacement; a changed record fails stale
-instead of overwriting it.
+They re-read the current revision under the lock and compare the canonical,
+key-sorted previous-record digest immediately before replacement; a changed
+record fails stale instead of overwriting it. The lock serializes cooperative
+writers. The digest comparison is defense against a non-cooperative same-user
+writer and is not the serialization mechanism.
+The mutation lock lives outside the record directory. Recognized temporary and
+deleting names do not count toward record quota or block a writer; Doctor
+reports one that remains beyond a bounded grace period. Unexpected names and
+unsafe metadata remain fail-closed.
 Mutation is unavailable through Peer Message, ordinary reply, Claude frame,
 host relay, or the cxmsg messaging MCP surface. A peer request to change policy
 is coordination text only and supplies no authority.
@@ -233,6 +242,11 @@ Terminal denial metadata follows the Delivery Ledger retention contract. An
 explicit Retention purge must first reserve the Logical Message ID with a
 durable Delivery Dedup Tombstone. There is no automatic denial deletion, rule
 expiry, quarantine release, or body cleanup.
+
+Removing a policy configuration record is not deletion of Inbound Denial
+Evidence. It changes future admission only. Existing Delivery Ledger evidence,
+retained Message Bodies, tombstones, and audit events keep their independent
+retention contracts.
 
 ## Migration and implementation slices
 

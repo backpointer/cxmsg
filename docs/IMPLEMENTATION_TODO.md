@@ -346,13 +346,17 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap extension — Inbound Peer Message Policy
 
-- Status: SLICE 1 IMPLEMENTED; public activation disabled; audit pending
+- Status: SLICE 1 IMPLEMENTED; initial audit findings addressed; focused
+  re-audit pending; public activation disabled
 
 - [x] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
       privacy, authority, deduplication, fan-out, scheduling, and retention
       invariants.
 - [x] Implement the internal owner-private policy Adapter, evaluator, schema
       inspection, and Doctor foundation without public activation.
+- [x] Close the initial Adapter audit findings: final-rule deletion,
+      exact-digest invalid-record purge, transient-file diagnostics, verified
+      evidence projection, stable evaluator shape, and internal-only exports.
 - [ ] Integrate direct Codex and Claude ordinary ingress with metadata-only
       terminal denial.
 - [ ] Revalidate scheduled recipients, integrate Group and Team fan-out, then

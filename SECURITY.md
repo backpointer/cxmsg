@@ -159,6 +159,9 @@ owner-private Adapter and pure evaluator create no public mutation or routing
 authority. Doctor fails with `EINBOUNDPOLICYINACTIVE` if a policy record exists
 before every ordinary Peer Message path is integrated. A staged policy record
 must never be represented as effective enforcement.
+Policy configuration and denial evidence have separate lifetimes: removing an
+empty or exact-digest-confirmed invalid configuration record never removes
+Delivery Ledger evidence, retained bodies, tombstones, or audit events.
 
 New ordinary Codex deliveries use an owner-only append-only Delivery Ledger.
 The atomic batch contains redacted Logical Message metadata and one recipient
