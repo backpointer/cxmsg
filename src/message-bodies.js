@@ -17,6 +17,7 @@ import {
   writeSync,
 } from "node:fs";
 import path from "node:path";
+import { requireNoFollowFlag } from "./file-safety.js";
 import { withFileLock } from "./file-lock.js";
 import {
   assertRetentionReadable,
@@ -193,7 +194,7 @@ function appendRecord(filename, encoded) {
     constants.O_WRONLY |
     constants.O_CREAT |
     constants.O_APPEND |
-    (constants.O_NOFOLLOW || 0);
+    requireNoFollowFlag();
   const descriptor = openSync(filename, flags, 0o600);
   try {
     const metadata = fstatSync(descriptor);

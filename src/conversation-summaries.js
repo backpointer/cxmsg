@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { requireNoFollowFlag } from "./file-safety.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const CONVERSATION_SUMMARIES_DIR = path.join(
@@ -197,12 +198,9 @@ export function validConversationSummary(summary) {
 }
 
 function secureRead(filename) {
-  if (!constants.O_NOFOLLOW) {
-    throw new Error("Conversation summary storage requires O_NOFOLLOW");
-  }
   let descriptor;
   try {
-    descriptor = openSync(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
+    descriptor = openSync(filename, constants.O_RDONLY | requireNoFollowFlag());
     const metadata = fstatSync(descriptor);
     if (
       !metadata.isFile() ||
@@ -229,9 +227,6 @@ export function writeConversationSummary(summary) {
   if (!validConversationSummary(stored)) {
     throw new Error("invalid Conversation summary record");
   }
-  if (!constants.O_NOFOLLOW) {
-    throw new Error("Conversation summary storage requires O_NOFOLLOW");
-  }
   ensureDirectory();
   const filename = summaryPath(stored.kind, stored.conversationId);
   const temporary = `${filename}.${randomUUID()}.tmp`;
@@ -242,7 +237,7 @@ export function writeConversationSummary(summary) {
       constants.O_CREAT |
         constants.O_EXCL |
         constants.O_WRONLY |
-        constants.O_NOFOLLOW,
+        requireNoFollowFlag(),
       0o600,
     );
     writeFileSync(descriptor, `${JSON.stringify(stored, null, 2)}\n`);

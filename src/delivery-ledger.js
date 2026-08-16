@@ -25,6 +25,7 @@ import {
   SCHEDULED_WAKE_POLICIES,
 } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
+import { requireNoFollowFlag } from "./file-safety.js";
 import {
   assertRetentionReadable,
   assertRetentionReadableNoCreate,
@@ -1123,7 +1124,7 @@ function atomicWriteIndex(filename, value) {
   writeFileSync(temporary, `${JSON.stringify(value)}\n`, { mode: 0o600 });
   const fileDescriptor = openSync(
     temporary,
-    constants.O_RDONLY | (constants.O_NOFOLLOW || 0),
+    constants.O_RDONLY | requireNoFollowFlag(),
   );
   try {
     fsyncSync(fileDescriptor);
@@ -1676,7 +1677,7 @@ function appendRecord(filename, encoded) {
     constants.O_WRONLY |
     constants.O_CREAT |
     constants.O_APPEND |
-    (constants.O_NOFOLLOW || 0);
+    requireNoFollowFlag();
   const descriptor = openSync(filename, flags, 0o600);
   try {
     const metadata = fstatSync(descriptor);

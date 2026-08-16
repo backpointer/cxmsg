@@ -15,6 +15,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { requireNoFollowFlag } from "./file-safety.js";
 import {
   commitStoreOnlyGroupDelivery,
   listDeliveryLedger,
@@ -385,7 +386,7 @@ function atomicWrite(directory, filename, record, maxBytes = RECORD_MAX_BYTES) {
     constants.O_CREAT |
       constants.O_EXCL |
       constants.O_WRONLY |
-      constants.O_NOFOLLOW,
+      requireNoFollowFlag(),
     0o600,
   );
   try {

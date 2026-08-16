@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { requireNoFollowFlag } from "./file-safety.js";
 import { withFileLock } from "./file-lock.js";
 import { readNode, readNodeTombstone } from "./node-directory.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
@@ -218,14 +219,9 @@ function privateMetadata(filename, expectedType) {
 }
 
 function readPrivatePolicyFile(filename) {
-  if (!Number.isInteger(constants.O_NOFOLLOW)) {
-    const error = new Error("Inbound policy storage requires O_NOFOLLOW");
-    error.code = "EINBOUNDPOLICYNONOFOLLOW";
-    throw error;
-  }
   const descriptor = openSync(
     filename,
-    constants.O_RDONLY | constants.O_NOFOLLOW,
+    constants.O_RDONLY | requireNoFollowFlag(),
   );
   try {
     const metadata = assertPrivateMetadata(fstatSync(descriptor), "file");
@@ -277,17 +273,12 @@ function atomicWritePolicy(filename, record) {
     throw new Error("Inbound policy record exceeds its bounded size");
   }
   const temporary = `${filename}.${randomUUID()}.tmp`;
-  if (!Number.isInteger(constants.O_NOFOLLOW)) {
-    const error = new Error("Inbound policy storage requires O_NOFOLLOW");
-    error.code = "EINBOUNDPOLICYNONOFOLLOW";
-    throw error;
-  }
   const descriptor = openSync(
     temporary,
     constants.O_CREAT |
       constants.O_EXCL |
       constants.O_WRONLY |
-      constants.O_NOFOLLOW,
+      requireNoFollowFlag(),
     0o600,
   );
   try {

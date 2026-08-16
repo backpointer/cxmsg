@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { requireNoFollowFlag } from "./file-safety.js";
 import {
   createDeliveryDedupTombstones,
   DELIVERY_LEDGER_MAX_SCAN_BYTES,
@@ -112,7 +113,7 @@ function fsyncDirectory(directory) {
 function fsyncFile(filename) {
   const descriptor = openSync(
     filename,
-    constants.O_RDONLY | (constants.O_NOFOLLOW || 0),
+    constants.O_RDONLY | requireNoFollowFlag(),
   );
   try {
     fsyncSync(descriptor);

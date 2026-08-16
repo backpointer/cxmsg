@@ -366,9 +366,10 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
       evidence projection, stable evaluator shape, and internal-only exports.
 - [x] Keep stable Node and Project identities out of ordinary denial events;
       retain only bounded error code and denial origin in that projection.
-- [ ] Align legacy storage Modules with the new fail-closed `O_NOFOLLOW`
-      portability rule and define an explicit stale-policy-artifact cleanup
-      procedure without automatic repair.
+- [x] Align every owner-private storage Module with one fail-closed
+      `O_NOFOLLOW` portability guard; no writer silently substitutes zero.
+- [ ] Define an explicit stale-policy-artifact cleanup procedure without
+      automatic repair.
 - [x] Integrate direct Codex and Claude ordinary ingress plus Explicit Retry
       with metadata-only terminal denial behind the shared cross-path gate.
 - [x] Revalidate scheduled recipients after lease renewal, persist the exact

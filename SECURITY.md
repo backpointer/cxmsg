@@ -183,6 +183,10 @@ They may appear in owner-private Ledger evidence and explicit owner-local
 Delivery or Graph detail commands. Doctor summaries and coordination events
 use bounded codes or shortened digests and do not expose Message Bodies, full
 paths, endpoints, capability tokens, or credentials.
+Every owner-private file Adapter now requires a real platform
+`O_NOFOLLOW` value through one shared guard. An unavailable or invalid flag
+fails closed with `ESTORAGENONOFOLLOW`; no Adapter silently substitutes zero
+and relies on a pre-open pathname check alone.
 
 New ordinary Codex deliveries use an owner-only append-only Delivery Ledger.
 The atomic batch contains redacted Logical Message metadata and one recipient

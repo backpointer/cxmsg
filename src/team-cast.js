@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { requireNoFollowFlag } from "./file-safety.js";
 import { readDirectConversation } from "./conversations.js";
 import {
   appendTeamCastRecipientEvidence,
@@ -291,7 +292,7 @@ function writePlan(plan) {
     constants.O_CREAT |
       constants.O_EXCL |
       constants.O_WRONLY |
-      constants.O_NOFOLLOW,
+      requireNoFollowFlag(),
     0o600,
   );
   try {
@@ -352,7 +353,7 @@ function writeSelection(selection) {
     constants.O_CREAT |
       constants.O_EXCL |
       constants.O_WRONLY |
-      constants.O_NOFOLLOW,
+      requireNoFollowFlag(),
     0o600,
   );
   try {

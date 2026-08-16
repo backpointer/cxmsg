@@ -16,6 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { requireNoFollowFlag } from "./file-safety.js";
 import { withFileLock } from "./file-lock.js";
 import { readJob } from "./jobs.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
@@ -218,7 +219,7 @@ function atomicWrite(directory, filename, value) {
   writeFileSync(temporary, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   const fileDescriptor = openSync(
     temporary,
-    constants.O_RDONLY | (constants.O_NOFOLLOW || 0),
+    constants.O_RDONLY | requireNoFollowFlag(),
   );
   try {
     fsyncSync(fileDescriptor);

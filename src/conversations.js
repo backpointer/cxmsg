@@ -14,6 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import path from "node:path";
+import { requireNoFollowFlag } from "./file-safety.js";
 import { withFileLock } from "./file-lock.js";
 import { writeConversationSummary } from "./conversation-summaries.js";
 import { readDeliveryLedger } from "./delivery-ledger.js";
@@ -335,7 +336,10 @@ function writeConversation(record) {
   }
   const fd = openSync(
     temporary,
-    constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW,
+    constants.O_CREAT |
+      constants.O_EXCL |
+      constants.O_WRONLY |
+      requireNoFollowFlag(),
     0o600,
   );
   try {
