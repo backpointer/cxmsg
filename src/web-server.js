@@ -14,6 +14,12 @@ import {
 } from "./claude-grants.js";
 import { listClaudePeers } from "./claude-messaging.js";
 import { listJobs } from "./jobs.js";
+import { listDeliveryLedgerIndexed } from "./delivery-ledger.js";
+import { listInboundPoliciesStrict } from "./inbound-policy.js";
+import {
+  summarizeInboundPolicyEvidence,
+  unavailableInboundPolicySummary,
+} from "./inbound-policy-projection.js";
 import { processIdentity, processState } from "./process-state.js";
 import { listSessionRecords } from "./registry.js";
 import { DEFAULT_SOCKET_PATH, PID_PATH, socketPath } from "./runtime.js";
@@ -168,6 +174,8 @@ export async function buildWebSnapshot({
   claudePeers = listClaudePeers,
   jobs = listJobs,
   appServerProbe = probeAppServerSocket,
+  deliveries = listDeliveryLedgerIndexed,
+  inboundPolicies = listInboundPoliciesStrict,
 } = {}) {
   const records = sessions();
   const [codexSessions, liveClaudePeers] = await Promise.all([
@@ -184,6 +192,15 @@ export async function buildWebSnapshot({
   const pid = managedServer ? readServerPid() : null;
   const socketPresent = existsSync(currentSocketPath);
   const socketProbe = await appServerProbe(currentSocketPath);
+  let inboundPolicy;
+  try {
+    inboundPolicy = summarizeInboundPolicyEvidence(
+      await deliveries(),
+      inboundPolicies(),
+    );
+  } catch {
+    inboundPolicy = unavailableInboundPolicySummary();
+  }
 
   return {
     generatedAt: new Date().toISOString(),
@@ -214,6 +231,7 @@ export async function buildWebSnapshot({
     jobs: jobs()
       .map(publicJob)
       .sort((left, right) => String(right.createdAt).localeCompare(String(left.createdAt))),
+    inboundPolicy,
   };
 }
 

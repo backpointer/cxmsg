@@ -298,6 +298,51 @@ test("Graph Delivery detail separates recipient evidence and omits private attem
   assert.doesNotMatch(serialized, /sha256|contentRef|privateText|attemptId|turnId|replyHandle/);
 });
 
+test("Graph Delivery detail redacts Inbound Policy identity and rule evidence", () => {
+  const source = dependencies();
+  const records = source.deliveries();
+  records[0].delivery.inboundPolicy = {
+    decision: "continue",
+    reason: "no_match",
+    targetNodeKey: keys.b,
+    senderIdentityState: "verified",
+    senderNodeKey: keys.a,
+    senderProjectId: ids.project,
+    policyRevision: 4,
+    policySha256: "b".repeat(64),
+    ruleId: null,
+    selectorKind: null,
+    failClosed: false,
+  };
+  records[0].delivery.evidence.push({
+    state: "policy_denied",
+    inboundPolicy: {
+      decision: "deny",
+      reason: "sender_denied",
+      targetNodeKey: keys.b,
+      senderIdentityState: "verified",
+      senderNodeKey: keys.a,
+      senderProjectId: ids.project,
+      policyRevision: 5,
+      policySha256: "c".repeat(64),
+      ruleId: ids.cluster,
+      selectorKind: "sender-node",
+      failClosed: false,
+    },
+  });
+  const detail = graphDeliveryDetail(ids.recentMessage, {
+    ...source,
+    deliveries: () => records,
+  });
+  assert.equal(detail.recipients[0].inboundPolicy.observationCount, 2);
+  assert.equal(detail.recipients[0].inboundPolicy.latest.reason, "sender_denied");
+  assert.equal(detail.recipients[0].inboundPolicy.latest.matchedRule, true);
+  const policy = JSON.stringify(detail.recipients[0].inboundPolicy);
+  assert.doesNotMatch(policy, new RegExp(ids.project.slice(0, 8)));
+  assert.doesNotMatch(policy, new RegExp(ids.cluster.slice(0, 8)));
+  assert.doesNotMatch(policy, /policySha256|senderNodeKey|senderProjectId|targetNodeKey|ruleId/);
+});
+
 test("graph CLI exposes the bounded read-only projection", () => {
   const stateDir = mkdtempSync(path.join(os.tmpdir(), "cxmsg-graph-cli-"));
   try {

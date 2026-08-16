@@ -569,6 +569,16 @@ and turn identifiers. Stable Node, Project, Conversation, and Logical Message
 IDs remain visible because they are the correlation keys the diagnostic view
 exists to explain.
 
+Inbound Peer Message Policy evidence is a narrower subprojection. Exact
+Delivery detail exposes only closed, bounded decision, reason, identity-state,
+selector, fail-closed, revision, and matched-rule metadata. It omits the stable
+identity values embedded in policy evidence, Project and rule IDs, policy
+digests, body metadata, paths, Endpoints, and capabilities. The web snapshot
+exposes aggregate counts only. An invalid retained value is reduced to an
+invalid-evidence marker; arbitrary strings are never copied to either surface.
+Neither projection affects admission, retry, wake, scheduling, permission,
+approval, grant, or Delegation behavior.
+
 Doctor also cross-checks Direct and Group Conversation identity against the
 Node Directory, their metadata-only message sources against retained Ledger or
 Job evidence, and Group or Team Cast recipient sets against per-recipient

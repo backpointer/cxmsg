@@ -294,7 +294,10 @@ create a policy that only some paths enforce:
 4. Group store-only and Team Cast per-recipient integration;
 5. independent cross-path review, then public CLI mutation and feature
    activation only after the gate passes;
-6. trace, graph, and web redacted projections.
+6. trace, graph, and web redacted projections. Exact Delivery trace retains at
+   most 16 closed-schema observations and web output contains aggregate counts
+   only; neither surface exposes stable identity values, Project or rule IDs,
+   policy digests, body metadata, paths, Endpoints, or capabilities.
 
 Intermediate slices are internal foundations, not partial feature completion.
 Doctor must report any integration gap. No release may expose policy mutation

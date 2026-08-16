@@ -86,6 +86,25 @@ test("web snapshot redacts Claude addresses, grant hints, and App Server errors"
       },
     ],
     jobs: () => [],
+    deliveries: async () => [{
+      logicalMessage: { messageId: "11345678-1234-4123-8123-123456789abc" },
+      delivery: {
+        inboundPolicy: {
+          decision: "deny",
+          reason: "sender_denied",
+          targetNodeKey: "codex:21345678-1234-4123-8123-123456789abc",
+          senderIdentityState: "verified",
+          senderNodeKey: "claude:31345678-1234-4123-8123-123456789abc",
+          senderProjectId: "41345678-1234-4123-8123-123456789abc",
+          policyRevision: 2,
+          policySha256: "d".repeat(64),
+          ruleId: "51345678-1234-4123-8123-123456789abc",
+          selectorKind: "sender-node",
+          failClosed: false,
+        },
+      },
+    }],
+    inboundPolicies: () => [{ rules: [{}] }],
     appServerProbe: async () => ({ state: "healthy", errorCode: null }),
   });
 
@@ -95,6 +114,34 @@ test("web snapshot redacts Claude addresses, grant hints, and App Server errors"
   assert.equal(snapshot.codexSessions[0].hasError, true);
   assert.equal("address" in snapshot.codexSessions[0].claudeGrants[0], false);
   assert.equal("tokenHint" in snapshot.codexSessions[0].claudeGrants[0], false);
+  assert.deepEqual(snapshot.inboundPolicy, {
+    status: "available",
+    configuredTargetCount: 1,
+    configuredRuleCount: 1,
+    evaluatedRecipientCount: 1,
+    deniedRecipientCount: 1,
+    continuedRecipientCount: 0,
+    invalidEvidenceCount: 0,
+    failClosedDenialCount: 0,
+    countsByReason: { sender_denied: 1 },
+  });
+  assert.doesNotMatch(encoded, /21345678|31345678|41345678|51345678|policySha256|ruleId/);
+});
+
+test("web snapshot contains a bounded unavailable policy projection on read failure", async () => {
+  const snapshot = await buildWebSnapshot({
+    connect: async (callback) => callback({ request: async () => ({ data: [] }) }),
+    sessions: () => [],
+    claudePeers: async () => [],
+    jobs: () => [],
+    deliveries: async () => {
+      throw new Error("private ledger path and token");
+    },
+    inboundPolicies: () => assert.fail("policy records are not read after ledger failure"),
+    appServerProbe: async () => ({ state: "missing", errorCode: "ENOENT" }),
+  });
+  assert.equal(snapshot.inboundPolicy.status, "unavailable");
+  assert.doesNotMatch(JSON.stringify(snapshot), /private ledger path|token/);
 });
 
 test("web attachment inspection is read-only and rejects stale identities", () => {

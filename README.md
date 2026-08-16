@@ -950,6 +950,15 @@ Endpoint and reply addresses, grant capabilities, Job content, and native
 attempt or turn identifiers. `--paths` remains the only explicit exception and
 applies to Project paths in Graph and Node views only.
 
+When an Inbound Peer Message Policy evaluated a recipient, Delivery detail also
+returns at most 16 ordered redacted policy observations. The projection keeps
+only the decision, bounded reason and identity-state enums, selector kind,
+fail-closed flag, revision number, and whether a rule matched. It never exposes
+the sender or recipient Node key from policy evidence, Project UUID, rule ID,
+policy digest, Endpoint, or Message Body metadata. Malformed retained evidence
+is reported only as an invalid projection and its untrusted fields are not
+passed through.
+
 Start the loopback-only web server:
 
 ```bash
@@ -972,7 +981,12 @@ start model turns, so refreshing either page consumes no model tokens.
 
 Task text, final result text, error bodies, Claude socket addresses, and grant
 tokens are omitted from the web snapshot. The browser receives only operational
-metadata. Keep using the CLI and agent-side tools for messaging and delegation.
+metadata. Its `inboundPolicy` section is an aggregate of configured target and
+rule counts plus latest per-recipient policy outcomes; it contains no session,
+Node, Project, Logical Message, Delivery, or rule identifiers. If owner-private
+Ledger or policy state cannot be validated, this section becomes the bounded
+`unavailable` state without copying an error message into the browser. Keep
+using the CLI and agent-side tools for messaging and delegation.
 
 ## Foreground and background TUI
 

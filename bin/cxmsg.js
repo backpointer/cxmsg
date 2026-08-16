@@ -4458,10 +4458,10 @@ function inboundDenialProjection(record) {
   const deliveries = record.teamDeliveries || record.groupDeliveries || [record.delivery];
   return deliveries.flatMap((delivery) => {
     const policyEvidence =
-      delivery.inboundPolicy ||
       [...(delivery.evidence || [])]
         .reverse()
         .find((evidence) => evidence.inboundPolicy)?.inboundPolicy ||
+      delivery.inboundPolicy ||
       null;
     if (
       !policyEvidence ||

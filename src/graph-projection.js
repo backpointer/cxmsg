@@ -11,6 +11,7 @@ import {
 } from "./node-directory.js";
 import { listSessionRecords } from "./registry.js";
 import { listClaudeRequestGrants } from "./claude-grants.js";
+import { traceInboundPolicyEvidence } from "./inbound-policy-projection.js";
 
 export const GRAPH_EDGE_KINDS = Object.freeze([
   "belongs-to-project",
@@ -539,6 +540,7 @@ export function graphConversationDetail(
 }
 
 function publicDelivery(delivery) {
+  const inboundPolicy = traceInboundPolicyEvidence(delivery);
   return {
     targetNodeKey: delivery.targetNodeKey ||
       (delivery.targetThreadId ? `codex:${String(delivery.targetThreadId).toLowerCase()}` : null),
@@ -550,6 +552,7 @@ function publicDelivery(delivery) {
     evidenceStates: [...new Set((delivery.evidence || []).map((item) => item.state))].sort(),
     errorCode: delivery.errorCode || null,
     updatedAt: delivery.updatedAt || null,
+    inboundPolicy: inboundPolicy.observationCount > 0 ? inboundPolicy : null,
   };
 }
 

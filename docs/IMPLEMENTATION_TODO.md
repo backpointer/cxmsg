@@ -353,8 +353,8 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap extension — Inbound Peer Message Policy
 
-- Status: CORE ACTIVE; independent cross-path review PASS; redacted graph and
-  web projections pending
+- Status: COMPLETE; independent cross-path review PASS; redacted trace, graph,
+  and web projections active
 
 - [x] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
       privacy, authority, deduplication, fan-out, scheduling, and retention
@@ -383,7 +383,7 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
       digest binding, privacy documentation, and adversarial regression tests.
 - [x] Expose owner-only public mutation CLI and activate the single shared
       enforcement gate. Keep Peer, Claude, relay, and MCP mutation unavailable.
-- [ ] Add redacted trace, graph, and web projections only after core evidence
+- [x] Add redacted trace, graph, and web projections only after core evidence
       is stable.
 
 ### Post-roadmap maintenance — long-session Delegation diagnostics
