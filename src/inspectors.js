@@ -4261,6 +4261,34 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
       }));
     }
     if (
+      kind === "delegation" &&
+      job.status === "failed" &&
+      typeof job.failureStage === "string"
+    ) {
+      const turnEvidence = job.modelTurnStarted;
+      checks.push(diagnosticCheck({
+        id: `jobs.execution.${label}.failure`,
+        scope: "jobs",
+        status: "warn",
+        summary:
+          turnEvidence === true
+            ? `Delegation ${label} failed after positive model-turn start evidence`
+            : turnEvidence === false
+              ? `Delegation ${label} failed before any model turn started`
+              : `Delegation ${label} failed with unverified model-turn acceptance`,
+        verification: `record:${job.failureStage}`,
+        errorCode: job.failureCode || "EDELEGATIONWORKER",
+        remediation:
+          job.rerouteGuidance ||
+          (turnEvidence === null
+            ? "Do not retry or reroute automatically while turn acceptance is unverified"
+            : turnEvidence === false
+              ? "Resolve the recorded transport or preflight failure before using a new Job ID"
+              : "Inspect the retained turn and Job result evidence before any follow-up"),
+        required: false,
+      }));
+    }
+    if (
       kind === "claude-request" &&
       !PENDING_JOB_STATES.has(job.status) &&
       ["pending", "failed"].includes(job.reply?.status)

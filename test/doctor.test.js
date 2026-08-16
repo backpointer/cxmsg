@@ -669,6 +669,34 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   assert.equal(terminalWithDeliveryFailure[0].status, "warn");
   assert.equal(terminalWithDeliveryFailure[0].errorCode, "EAPPWSFRAME");
   assert.match(terminalWithDeliveryFailure[0].summary, /terminal/);
+
+  const stagedFailures = inspectJobs([
+    {
+      version: 1,
+      kind: "delegation",
+      jobId: "92345678-1234-4234-8234-123456789abc",
+      status: "failed",
+      failureCode: "EAPPWSNOTCONNECTED",
+      failureStage: "turn-start",
+      modelTurnStarted: false,
+      rerouteGuidance: "Verify the App Server connection before using a new Job ID.",
+    },
+    {
+      version: 1,
+      kind: "delegation",
+      jobId: "a2345678-1234-4234-8234-123456789abc",
+      status: "failed",
+      failureCode: "EAPPWSFRAME",
+      failureStage: "turn-start",
+      modelTurnStarted: null,
+    },
+  ]);
+  assert.equal(stagedFailures.length, 2);
+  assert.match(stagedFailures[0].summary, /before any model turn/);
+  assert.equal(stagedFailures[0].verification, "record:turn-start");
+  assert.match(stagedFailures[0].remediation, /Verify the App Server/);
+  assert.match(stagedFailures[1].summary, /unverified model-turn acceptance/);
+  assert.match(stagedFailures[1].remediation, /Do not retry/);
 });
 
 test("Message Body Store Inspector reports private metadata, quarantine, and quota", async () => {

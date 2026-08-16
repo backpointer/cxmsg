@@ -339,6 +339,7 @@ test("authority capture binds the exact synchronized Node and Project", async ()
 });
 
 test("an unsynchronized target reports the exact safe Directory sync command", () => {
+  const before = jobs.listJobs().length;
   assert.throws(
     () =>
       authority.captureScheduledDelegationTarget({
@@ -352,4 +353,5 @@ test("an unsynchronized target reports the exact safe Directory sync command", (
         "cxmsg directory sync --project scheduled-fixture --codex-only",
       ),
   );
+  assert.equal(jobs.listJobs().length, before);
 });
