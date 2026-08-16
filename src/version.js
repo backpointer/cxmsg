@@ -8,5 +8,5 @@ export const CXMSG_IMPLEMENTATION_REVISIONS = Object.freeze({
   cli: 12,
   scheduler: 7,
   hostRelay: 1,
-  claudeBridge: 31,
+  claudeBridge: 32,
 });
