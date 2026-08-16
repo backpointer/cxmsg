@@ -22,7 +22,17 @@ import {
   rebuildDeliveryLedgerIndex,
 } from "./delivery-ledger.js";
 import { withFileLock } from "./file-lock.js";
-import { inspectNodeDirectory, inspectRouteState } from "./inspectors.js";
+import {
+  inspectInboundPolicies,
+  inspectNodeDirectory,
+  inspectRouteState,
+} from "./inspectors.js";
+import {
+  INBOUND_POLICY_STALE_FINDING_ID,
+  purgeStaleInboundPolicyArtifacts,
+  readStaleInboundPolicyArtifact,
+  staleInboundPolicyArtifactEvidence,
+} from "./inbound-policy.js";
 import {
   clusterMembershipRecoveryEvidence,
   listClusters,
@@ -41,6 +51,7 @@ const REPAIR_LOCK_PATH = path.join(REPAIR_STATE_DIR, "mutation.lock");
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const CLUSTER_FINDING_PREFIX = "directory-cluster-memberships.history.";
 const INDEX_FINDING_ID = "delivery-ledger.index.consistency";
+const INBOUND_POLICY_ARTIFACT_BACKUP_DIR = "inbound-policy-artifacts";
 const INDEX_BACKUP_MAX_BYTES = 128 * 1024 * 1024;
 const INDEX_BACKUP_MAX_FILES = 4_097;
 const REPAIR_STATE_QUOTA_BYTES = 256 * 1024 * 1024;
@@ -248,15 +259,46 @@ function indexRepairPlan(findingId) {
   });
 }
 
+function inboundPolicyArtifactRepairPlan(findingId) {
+  const finding = findingById(
+    inspectInboundPolicies({ stateDir: CXMSG_STATE_DIR }),
+    findingId,
+  );
+  if (finding.errorCode !== "EINBOUNDPOLICYTRANSIENTSTALE") {
+    throw new Error("Repair finding is not a current stale Inbound Policy artifact");
+  }
+  const evidence = staleInboundPolicyArtifactEvidence();
+  if (evidence.artifacts.length === 0 || evidence.unexpectedCount !== 0) {
+    throw new Error("Inbound Policy artifact Repair requires only recognized stale artifacts");
+  }
+  return finalizePlan({
+    schemaVersion: 1,
+    findingId,
+    errorCode: finding.errorCode,
+    repairKind: "inbound-policy-stale-artifact-purge",
+    mutationCategory: "owner-private-stale-artifact-removal",
+    target: { kind: "inbound-policy-artifacts" },
+    artifactCount: evidence.artifacts.length,
+    evidenceSha256: evidence.evidenceSha256,
+    recoverability: "owner-private-artifact-backup",
+    automatic: false,
+  });
+}
+
 export function buildRepairPlan({ findingId }) {
   if (typeof findingId !== "string" || findingId.length > 192) {
     throw new Error("Repair finding id is invalid");
   }
   if (findingId === INDEX_FINDING_ID) return indexRepairPlan(findingId);
+  if (findingId === INBOUND_POLICY_STALE_FINDING_ID) {
+    return inboundPolicyArtifactRepairPlan(findingId);
+  }
   if (findingId.startsWith(CLUSTER_FINDING_PREFIX)) {
     return clusterRepairPlan(findingId);
   }
-  throw new Error("Repair supports only Cluster membership redo and stale Ledger index findings");
+  throw new Error(
+    "Repair supports only Cluster membership redo, stale Ledger index, and stale Inbound Policy artifact findings",
+  );
 }
 
 function backupCluster(transactionDirectory, plan) {
@@ -334,10 +376,47 @@ function backupIndex(transactionDirectory, plan) {
   return { kind: "delivery-ledger-index", files, evidence };
 }
 
+function backupInboundPolicyArtifacts(transactionDirectory, plan) {
+  const evidence = staleInboundPolicyArtifactEvidence();
+  if (
+    evidence.unexpectedCount !== 0 ||
+    evidence.evidenceSha256 !== plan.evidenceSha256 ||
+    evidence.artifacts.length !== plan.artifactCount
+  ) {
+    const error = new Error("Inbound Policy artifact Repair evidence changed before backup");
+    error.code = "EREPAIRSTALE";
+    throw error;
+  }
+  const totalBytes = evidence.artifacts.reduce(
+    (total, artifact) => total + artifact.bytes,
+    0,
+  );
+  assertRepairCapacity(totalBytes + 512 * 1024);
+  const backupDirectory = path.join(
+    transactionDirectory,
+    INBOUND_POLICY_ARTIFACT_BACKUP_DIR,
+  );
+  ensurePrivateDirectory(backupDirectory);
+  const files = evidence.artifacts.map((artifact) => {
+    const contents = readStaleInboundPolicyArtifact(artifact);
+    writePrivateFile(path.join(backupDirectory, artifact.name), contents);
+    return {
+      name: artifact.name,
+      bytes: artifact.bytes,
+      sha256: artifact.sha256,
+    };
+  });
+  return { kind: "inbound-policy-artifacts", files, evidence };
+}
+
 function backupRepair(transactionDirectory, plan) {
-  return plan.repairKind === "cluster-membership-redo"
-    ? backupCluster(transactionDirectory, plan)
-    : backupIndex(transactionDirectory, plan);
+  if (plan.repairKind === "cluster-membership-redo") {
+    return backupCluster(transactionDirectory, plan);
+  }
+  if (plan.repairKind === "delivery-ledger-index-rebuild") {
+    return backupIndex(transactionDirectory, plan);
+  }
+  return backupInboundPolicyArtifacts(transactionDirectory, plan);
 }
 
 function boundedErrorCode(error) {
@@ -349,7 +428,9 @@ function boundedErrorCode(error) {
 function verifyRepair(plan) {
   const checks = plan.repairKind === "cluster-membership-redo"
     ? inspectNodeDirectory({ stateDir: CXMSG_STATE_DIR })
-    : inspectRouteState({ stateDir: CXMSG_STATE_DIR });
+    : plan.repairKind === "delivery-ledger-index-rebuild"
+      ? inspectRouteState({ stateDir: CXMSG_STATE_DIR })
+      : inspectInboundPolicies({ stateDir: CXMSG_STATE_DIR });
   const finding = findingById(checks, plan.findingId);
   if (finding.status !== "pass" || finding.errorCode) {
     const error = new Error("Repair did not resolve its exact finding");
@@ -370,9 +451,14 @@ async function executeRepair(plan, backup) {
       membershipVersion: result.record.membershipVersion,
     };
   }
-  return rebuildDeliveryLedgerIndex({
-    expectedLedgerManifestSha256: backup.evidence.ledgerManifestSha256,
-    expectedIndexGenerationSha256: backup.evidence.indexGenerationSha256,
+  if (plan.repairKind === "delivery-ledger-index-rebuild") {
+    return rebuildDeliveryLedgerIndex({
+      expectedLedgerManifestSha256: backup.evidence.ledgerManifestSha256,
+      expectedIndexGenerationSha256: backup.evidence.indexGenerationSha256,
+    });
+  }
+  return purgeStaleInboundPolicyArtifacts({
+    expectedEvidenceSha256: backup.evidence.evidenceSha256,
   });
 }
 

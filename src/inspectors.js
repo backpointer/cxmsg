@@ -2658,7 +2658,11 @@ export function inspectRepairState({ stateDir } = {}) {
         receipt?.schemaVersion === 1 &&
           receipt.transactionId === transactionId &&
           receipt.findingId &&
-          ["cluster-membership-redo", "delivery-ledger-index-rebuild"].includes(
+          [
+            "cluster-membership-redo",
+            "delivery-ledger-index-rebuild",
+            "inbound-policy-stale-artifact-purge",
+          ].includes(
             receipt.repairKind,
           ) &&
           /^[0-9a-f]{64}$/.test(receipt.planDigest || "") &&
@@ -2791,7 +2795,11 @@ export function inspectRepairState({ stateDir } = {}) {
     ].includes(phase);
     let backupValid = Boolean(
       (!manifest?.backup && !backupRequired) ||
-        (["cluster-head", "delivery-ledger-index"].includes(
+        ([
+          "cluster-head",
+          "delivery-ledger-index",
+          "inbound-policy-artifacts",
+        ].includes(
           manifest?.backup?.kind,
         ) &&
           Array.isArray(manifest.backup.files) &&
@@ -2808,7 +2816,9 @@ export function inspectRepairState({ stateDir } = {}) {
       }
       const subdirectory = manifest.backup.kind === "delivery-ledger-index"
         ? "index"
-        : "";
+        : manifest.backup.kind === "inbound-policy-artifacts"
+          ? "inbound-policy-artifacts"
+          : "";
       const filename = path.join(transactionDirectory, subdirectory, backup.name);
       const evidence = secureMetadata(filename, "file");
       if (
@@ -2829,6 +2839,8 @@ export function inspectRepairState({ stateDir } = {}) {
       }
     } else if (manifest?.backup?.kind === "delivery-ledger-index") {
       expectedRootEntries.add("index");
+    } else if (manifest?.backup?.kind === "inbound-policy-artifacts") {
+      expectedRootEntries.add("inbound-policy-artifacts");
     }
     if (
       readdirSync(transactionDirectory).some(
@@ -2849,6 +2861,26 @@ export function inspectRepairState({ stateDir } = {}) {
         secureMetadata(indexDirectory, "directory").status !== "secure" ||
         readdirSync(indexDirectory).some(
           (name) => !expectedIndexEntries.has(name),
+        )
+      ) {
+        backupValid = false;
+      }
+    }
+    if (
+      backupValid &&
+      manifest?.backup?.kind === "inbound-policy-artifacts"
+    ) {
+      const expectedArtifactEntries = new Set(
+        backupFiles.map((backup) => backup.name),
+      );
+      const artifactDirectory = path.join(
+        transactionDirectory,
+        "inbound-policy-artifacts",
+      );
+      if (
+        secureMetadata(artifactDirectory, "directory").status !== "secure" ||
+        readdirSync(artifactDirectory).some(
+          (name) => !expectedArtifactEntries.has(name),
         )
       ) {
         backupValid = false;

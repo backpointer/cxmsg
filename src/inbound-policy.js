@@ -35,6 +35,7 @@ export const INBOUND_POLICY_MAX_RULES = 4096;
 export const INBOUND_POLICY_MAX_RULES_PER_TARGET = 256;
 export const INBOUND_POLICY_TRANSIENT_GRACE_MS = 30_000;
 export const INBOUND_POLICY_FEATURE_ACTIVE = true;
+export const INBOUND_POLICY_STALE_FINDING_ID = "inbound-policies.entries";
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -371,6 +372,106 @@ export function listInboundPoliciesStrict() {
     throw new Error("Inbound policy global rule quota exceeded");
   }
   return records.map((record) => structuredClone(record));
+}
+
+export function staleInboundPolicyArtifactEvidence({ now = Date.now() } = {}) {
+  if (!existsSync(INBOUND_POLICIES_DIR)) {
+    const evidence = { schemaVersion: 1, artifacts: [] };
+    return {
+      ...evidence,
+      unexpectedCount: 0,
+      evidenceSha256: createHash("sha256")
+        .update(JSON.stringify(evidence))
+        .digest("hex"),
+    };
+  }
+  privateMetadata(INBOUND_POLICIES_DIR, "directory");
+  const artifacts = [];
+  let unexpectedCount = 0;
+  for (const name of readdirSync(INBOUND_POLICIES_DIR).sort()) {
+    const filename = path.join(INBOUND_POLICIES_DIR, name);
+    const metadata = privateMetadata(filename, "file");
+    const classification = classifyInboundPolicyEntry(name, metadata.mtimeMs, now);
+    if (classification === "unexpected") {
+      unexpectedCount += 1;
+      continue;
+    }
+    if (classification !== "stale-transient") continue;
+    const source = readPrivatePolicyFile(filename);
+    artifacts.push({
+      name,
+      bytes: source.bytes.length,
+      sha256: createHash("sha256").update(source.bytes).digest("hex"),
+    });
+    if (artifacts.length > INBOUND_POLICY_MAX_RECORDS) {
+      const error = new Error("Inbound policy stale artifact quota exceeded");
+      error.code = "EINBOUNDPOLICYARTIFACTQUOTA";
+      throw error;
+    }
+  }
+  const evidence = { schemaVersion: 1, artifacts };
+  return {
+    ...evidence,
+    unexpectedCount,
+    evidenceSha256: createHash("sha256")
+      .update(JSON.stringify(evidence))
+      .digest("hex"),
+  };
+}
+
+export function readStaleInboundPolicyArtifact(artifact, { now = Date.now() } = {}) {
+  if (
+    !artifact ||
+    typeof artifact.name !== "string" ||
+    !Number.isSafeInteger(artifact.bytes) ||
+    artifact.bytes < 0 ||
+    !SHA256_PATTERN.test(artifact.sha256 || "")
+  ) {
+    throw new Error("Inbound policy stale artifact evidence is invalid");
+  }
+  const filename = path.join(INBOUND_POLICIES_DIR, artifact.name);
+  const metadata = privateMetadata(filename, "file");
+  if (classifyInboundPolicyEntry(artifact.name, metadata.mtimeMs, now) !== "stale-transient") {
+    const error = new Error("Inbound policy artifact is no longer stale");
+    error.code = "EREPAIRSTALE";
+    throw error;
+  }
+  const source = readPrivatePolicyFile(filename);
+  const digest = createHash("sha256").update(source.bytes).digest("hex");
+  if (source.bytes.length !== artifact.bytes || digest !== artifact.sha256) {
+    const error = new Error("Inbound policy artifact changed before backup");
+    error.code = "EREPAIRSTALE";
+    throw error;
+  }
+  return source.bytes;
+}
+
+export async function purgeStaleInboundPolicyArtifacts({
+  expectedEvidenceSha256,
+}) {
+  if (!SHA256_PATTERN.test(expectedEvidenceSha256 || "")) {
+    throw new Error("Inbound policy stale artifact evidence digest is invalid");
+  }
+  return withInboundPolicyLock(() => {
+    const evidence = staleInboundPolicyArtifactEvidence();
+    if (
+      evidence.unexpectedCount !== 0 ||
+      evidence.artifacts.length === 0 ||
+      evidence.evidenceSha256 !== expectedEvidenceSha256
+    ) {
+      const error = new Error("Inbound policy stale artifact evidence changed");
+      error.code = "EREPAIRSTALE";
+      throw error;
+    }
+    for (const artifact of evidence.artifacts) {
+      readStaleInboundPolicyArtifact(artifact);
+    }
+    for (const artifact of evidence.artifacts) {
+      unlinkSync(path.join(INBOUND_POLICIES_DIR, artifact.name));
+      fsyncDirectory(INBOUND_POLICIES_DIR);
+    }
+    return { removed: evidence.artifacts.length };
+  });
 }
 
 function normalizeSelector(selectorKind, selectorValue) {

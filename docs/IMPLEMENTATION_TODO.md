@@ -368,8 +368,8 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
       retain only bounded error code and denial origin in that projection.
 - [x] Align every owner-private storage Module with one fail-closed
       `O_NOFOLLOW` portability guard; no writer silently substitutes zero.
-- [ ] Define an explicit stale-policy-artifact cleanup procedure without
-      automatic repair.
+- [x] Define an exact-digest Repair path for recognized stale policy mutation
+      artifacts, with private byte-for-byte backup and no automatic repair.
 - [x] Integrate direct Codex and Claude ordinary ingress plus Explicit Retry
       with metadata-only terminal denial behind the shared cross-path gate.
 - [x] Revalidate scheduled recipients after lease renewal, persist the exact

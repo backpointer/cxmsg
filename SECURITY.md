@@ -70,8 +70,11 @@ The Repair Transaction Module is separate from Doctor and has no broad
 `--fix` mode. Its read-only plan is deterministic and creates no files. Apply
 requires the exact plan digest, reacquires the finding and evidence under an
 owner-private Repair lease, then passes the same evidence digest into the
-existing owner lock before mutation. Only one recoverable Cluster head redo
-and rebuild of a stale Delivery Ledger cache index are allowlisted. Every
+existing owner lock before mutation. Only one recoverable Cluster head redo,
+rebuild of a stale Delivery Ledger cache index, and exact cleanup of recognized
+stale Inbound Policy mutation artifacts are allowlisted. Policy artifact cleanup
+backs up the exact private bytes before removal and cannot select policy records,
+active artifacts, or unexpected entries. Every
 attempt that reaches mutation preparation retains a bounded private backup and
 phase journal; every terminal attempt emits a private receipt. Doctor reports
 an incomplete phase without completing, retrying, or rolling it back.

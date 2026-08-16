@@ -306,7 +306,7 @@ cxmsg deliveries cancel <logical-message-id> --json
 cxmsg deliveries rebuild-index --json
 ```
 
-Two deterministic Doctor findings have an explicit Repair path. Planning is
+Three deterministic Doctor findings have an explicit Repair path. Planning is
 read-only and writes no Repair state. Apply requires the exact digest, repeats
 the finding and evidence checks under a private Repair lease, preserves an
 owner-only backup, calls the existing owner mutation once, verifies the same
@@ -321,6 +321,10 @@ cxmsg repair plan delivery-ledger.index.consistency --json
 cxmsg repair apply delivery-ledger.index.consistency \
   --confirm <plan-digest> --json
 
+cxmsg repair plan inbound-policies.entries --json
+cxmsg repair apply inbound-policies.entries \
+  --confirm <plan-digest> --json
+
 cxmsg repair retention plan --before <ISO-timestamp> --json
 cxmsg repair retention archive --before <same-ISO-timestamp> \
   --confirm <plan-digest> --json
@@ -329,8 +333,11 @@ cxmsg repair retention restore <archive-id> \
   --confirm <archive-id> --json
 ```
 
-Only `ECLUSTERMEMBERSHIPREDO` and `ELEDGERINDEXSTALE` are allowlisted. A stale
-digest, changed owner evidence, ambiguous Cluster prefix, unsafe backup,
+Only `ECLUSTERMEMBERSHIPREDO`, `ELEDGERINDEXSTALE`, and
+`EINBOUNDPOLICYTRANSIENTSTALE` are allowlisted. The last operation accepts only
+recognized, owner-private policy mutation artifacts older than the grace
+period, backs up their exact bytes, and never deletes a valid or invalid policy
+record. A stale digest, changed owner evidence, ambiguous Cluster prefix, unsafe backup,
 unverified result, or exhausted 256 MiB/1,024-transaction Repair retention
 bound fails closed. Repair Apply never resends a message, follows a successor,
 changes identity or membership intent, signals or restarts a process, grants

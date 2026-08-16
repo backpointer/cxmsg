@@ -10,6 +10,7 @@ import {
   rmSync,
   statSync,
   unlinkSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import os from "node:os";
@@ -184,6 +185,26 @@ function staleIndexFixture(root) {
   return {
     checkpointPath,
     findingId: "delivery-ledger.index.consistency",
+  };
+}
+
+function staleInboundPolicyArtifactFixture(root) {
+  const policies = path.join(root, "inbound-policies");
+  mkdirSync(policies, { recursive: true, mode: 0o700 });
+  const targetNodeKey = "codex:93345678-2234-4234-8234-123456789abc";
+  const prefix = createHash("sha256").update(targetNodeKey).digest("hex");
+  const artifactName =
+    `${prefix}.json.a3345678-2234-4234-8234-123456789abc.tmp`;
+  const artifactPath = path.join(policies, artifactName);
+  const contents = '{"partial":true}\n';
+  writeFileSync(artifactPath, contents, { mode: 0o600 });
+  const stale = new Date(Date.now() - 60_000);
+  utimesSync(artifactPath, stale, stale);
+  return {
+    artifactName,
+    artifactPath,
+    contents,
+    findingId: "inbound-policies.entries",
   };
 }
 
@@ -393,6 +414,115 @@ test("Repair apply rebuilds only a stale cache and backs up its prior generation
     ]);
     assert.equal(replay.status, 1);
     assert.match(replay.stderr, /not a current stale Delivery Ledger index/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Repair removes only exact stale Inbound Policy artifacts after durable backup", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "cxmsg-repair-policy-"));
+  try {
+    const fixture = staleInboundPolicyArtifactFixture(root);
+    const planResult = runCxmsg(root, [
+      "repair",
+      "plan",
+      fixture.findingId,
+      "--json",
+    ]);
+    assert.equal(planResult.status, 0, planResult.stderr);
+    const plan = JSON.parse(planResult.stdout);
+    assert.equal(plan.repairKind, "inbound-policy-stale-artifact-purge");
+    assert.equal(plan.artifactCount, 1);
+    assert.equal(readFileSync(fixture.artifactPath, "utf8"), fixture.contents);
+    assert.equal(existsSync(path.join(root, "repairs")), false);
+
+    writeFileSync(fixture.artifactPath, '{"partial":"changed"}\n', {
+      mode: 0o600,
+    });
+    const stale = new Date(Date.now() - 60_000);
+    utimesSync(fixture.artifactPath, stale, stale);
+    const rejected = runCxmsg(root, [
+      "repair",
+      "apply",
+      fixture.findingId,
+      "--confirm",
+      plan.planDigest,
+      "--json",
+    ]);
+    assert.equal(rejected.status, 1);
+    assert.match(rejected.stderr, /plan changed/);
+    assert.equal(existsSync(path.join(root, "repairs")), false);
+
+    writeFileSync(fixture.artifactPath, fixture.contents, { mode: 0o600 });
+    utimesSync(fixture.artifactPath, stale, stale);
+    const currentPlan = JSON.parse(
+      runCxmsg(root, ["repair", "plan", fixture.findingId, "--json"]).stdout,
+    );
+    const applied = runCxmsg(root, [
+      "repair",
+      "apply",
+      fixture.findingId,
+      "--confirm",
+      currentPlan.planDigest,
+      "--json",
+    ]);
+    assert.equal(applied.status, 0, applied.stderr);
+    const receipt = JSON.parse(applied.stdout);
+    assert.equal(receipt.status, "completed");
+    assert.equal(receipt.result.removed, 1);
+    assert.equal(existsSync(fixture.artifactPath), false);
+    const backup = path.join(
+      root,
+      "repairs",
+      "transactions",
+      receipt.transactionId,
+      "inbound-policy-artifacts",
+      fixture.artifactName,
+    );
+    assert.equal(readFileSync(backup, "utf8"), fixture.contents);
+    assert.equal(
+      inspectRepairState({ stateDir: root })
+        .find((check) =>
+          check.id ===
+            `repairs.transaction.${receipt.transactionId.slice(0, 8)}.consistency`
+        )?.status,
+      "pass",
+    );
+
+    const replay = runCxmsg(root, [
+      "repair",
+      "apply",
+      fixture.findingId,
+      "--confirm",
+      currentPlan.planDigest,
+      "--json",
+    ]);
+    assert.equal(replay.status, 1);
+    assert.match(replay.stderr, /not a current stale Inbound Policy artifact/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Repair refuses to hide an unexpected Inbound Policy entry behind stale cleanup", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "cxmsg-repair-policy-mixed-"));
+  try {
+    const fixture = staleInboundPolicyArtifactFixture(root);
+    writeFileSync(
+      path.join(root, "inbound-policies", "unexpected-entry"),
+      "unrecognized\n",
+      { mode: 0o600 },
+    );
+    const plan = runCxmsg(root, [
+      "repair",
+      "plan",
+      fixture.findingId,
+      "--json",
+    ]);
+    assert.equal(plan.status, 1);
+    assert.match(plan.stderr, /requires only recognized stale artifacts/);
+    assert.equal(existsSync(fixture.artifactPath), true);
+    assert.equal(existsSync(path.join(root, "repairs")), false);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
