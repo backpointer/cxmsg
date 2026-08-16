@@ -37,6 +37,12 @@ export class AppServerError extends Error {
   }
 }
 
+function appServerNotConnectedError() {
+  const error = new AppServerError("app-server client is not connected");
+  error.code = "EAPPWSNOTCONNECTED";
+  return error;
+}
+
 export function appServerVersion(userAgent) {
   return APP_SERVER_VERSION_PATTERN.exec(userAgent || "")?.[1] || null;
 }
@@ -148,9 +154,7 @@ export class AppServerClient {
 
   request(method, params = {}) {
     if (!this.transport?.upgraded) {
-      return Promise.reject(
-        new AppServerError("app-server client is not connected"),
-      );
+      return Promise.reject(appServerNotConnectedError());
     }
 
     const id = this.nextId++;
@@ -175,7 +179,7 @@ export class AppServerClient {
 
   notify(method, params = undefined) {
     if (!this.transport?.upgraded) {
-      throw new AppServerError("app-server client is not connected");
+      throw appServerNotConnectedError();
     }
     const payload = params === undefined ? { method } : { method, params };
     this.transport.sendText(JSON.stringify(payload));
@@ -183,7 +187,7 @@ export class AppServerClient {
 
   respond(id, result) {
     if (!this.transport?.upgraded) {
-      throw new AppServerError("app-server client is not connected");
+      throw appServerNotConnectedError();
     }
     this.transport.sendText(JSON.stringify({ id, result }));
   }

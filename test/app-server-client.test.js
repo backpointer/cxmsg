@@ -179,6 +179,19 @@ test("outbound frame preflight rejects structurally without retaining a pending 
   await client.close();
 });
 
+test("a disconnected App Server client fails structurally with zero pending request", async () => {
+  const client = new AppServerClient({ transportFactory: () => new FakeTransport() });
+  await assert.rejects(
+    client.request("thread/fork", { threadId: "fixture" }),
+    (error) => error?.code === "EAPPWSNOTCONNECTED",
+  );
+  assert.equal(client.pending.size, 0);
+  assert.throws(
+    () => client.notify("initialized"),
+    (error) => error?.code === "EAPPWSNOTCONNECTED",
+  );
+});
+
 test("App Server socket validation requires a private owner-controlled path", async () => {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-app-socket-"));
   const socketPath = path.join(directory, "app-server.sock");
