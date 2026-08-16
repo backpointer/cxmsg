@@ -4,6 +4,7 @@ import {
   closeSync,
   constants,
   existsSync,
+  fstatSync,
   fsyncSync,
   lstatSync,
   mkdirSync,
@@ -165,8 +166,7 @@ export function validInboundPolicyRecord(record, filenameStem = null) {
   return true;
 }
 
-function privateMetadata(filename, expectedType) {
-  const metadata = lstatSync(filename);
+function assertPrivateMetadata(metadata, expectedType) {
   const validType =
     expectedType === "directory" ? metadata.isDirectory() : metadata.isFile();
   if (
@@ -179,6 +179,28 @@ function privateMetadata(filename, expectedType) {
     throw new Error("Inbound policy state is not owner-private");
   }
   return metadata;
+}
+
+function privateMetadata(filename, expectedType) {
+  return assertPrivateMetadata(lstatSync(filename), expectedType);
+}
+
+function readPrivatePolicyFile(filename) {
+  const descriptor = openSync(
+    filename,
+    constants.O_RDONLY | (constants.O_NOFOLLOW || 0),
+  );
+  try {
+    const metadata = assertPrivateMetadata(fstatSync(descriptor), "file");
+    if (metadata.size > INBOUND_POLICY_MAX_RECORD_BYTES) {
+      const error = new Error("Inbound policy record exceeds its bounded size");
+      error.code = "EINBOUNDPOLICYSIZE";
+      throw error;
+    }
+    return { metadata, contents: readFileSync(descriptor, "utf8") };
+  } finally {
+    closeSync(descriptor);
+  }
 }
 
 function ensurePrivateDirectory(directory) {
@@ -239,9 +261,9 @@ function atomicWritePolicy(filename, record) {
 export function inboundPolicyState(targetNodeKey) {
   const normalized = normalizeInboundNodeKey(targetNodeKey);
   const filename = policyPath(normalized);
-  let metadata;
+  let source;
   try {
-    metadata = privateMetadata(filename, "file");
+    source = readPrivatePolicyFile(filename);
   } catch (error) {
     if (error?.code === "ENOENT") {
       return { state: "missing", record: null, errorCode: null };
@@ -252,15 +274,8 @@ export function inboundPolicyState(targetNodeKey) {
       errorCode: error?.code || "EINBOUNDPOLICYMETADATA",
     };
   }
-  if (metadata.size > INBOUND_POLICY_MAX_RECORD_BYTES) {
-    return {
-      state: "invalid",
-      record: null,
-      errorCode: "EINBOUNDPOLICYSIZE",
-    };
-  }
   try {
-    const record = JSON.parse(readFileSync(filename, "utf8"));
+    const record = JSON.parse(source.contents);
     if (!validInboundPolicyRecord(record, path.basename(filename, ".json"))) {
       return {
         state: "invalid",
@@ -293,11 +308,8 @@ export function listInboundPoliciesStrict() {
       throw new Error("Inbound policy directory contains an unexpected entry");
     }
     const filename = path.join(INBOUND_POLICIES_DIR, name);
-    const metadata = privateMetadata(filename, "file");
-    if (metadata.size > INBOUND_POLICY_MAX_RECORD_BYTES) {
-      throw new Error("Inbound policy record exceeds its bounded size");
-    }
-    const record = JSON.parse(readFileSync(filename, "utf8"));
+    const { contents } = readPrivatePolicyFile(filename);
+    const record = JSON.parse(contents);
     if (!validInboundPolicyRecord(record, name.slice(0, -5))) {
       throw new Error("Inbound policy record failed schema validation");
     }
