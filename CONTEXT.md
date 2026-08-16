@@ -37,6 +37,14 @@ they carry different authority and delivery semantics.
 - **Route Admission**: the pre-injection decision that compares a typed Peer
   Message route with the target Node's externally owned Project and role
   binding. It is separate from Delivery evidence.
+- **Inbound Peer Message Policy**: an owner-configured, recipient-Node-scoped
+  deny-only policy evaluated before ordinary Peer Message context injection.
+  It matches only verified stable sender Node or Project identity, or an
+  explicit unknown-sender rule, and grants no authority.
+- **Inbound Denial**: terminal metadata-only evidence that an ordinary Peer
+  Message was rejected by Inbound Peer Message Policy before transport. It is
+  distinct from Quarantine, retains no Message Body, and creates no retry,
+  replay, reroute, wake, grant, approval, or task authority.
 - **Quarantine**: owner-private durable storage for a Peer Message rejected by
   Route Admission. Quarantine creates no context injection, retry, reroute,
   wake, grant, approval, or task authority.

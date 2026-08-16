@@ -344,6 +344,20 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Keep denial evidence out of routing, retry, wake, permission, approval,
       and Delegation decisions.
 
+### Post-roadmap extension — Inbound Peer Message Policy
+
+- Status: CONTRACT REVIEW; implementation not started
+
+- [ ] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
+      privacy, authority, deduplication, fan-out, scheduling, and retention
+      invariants.
+- [ ] Implement the owner-private policy Adapter, evaluator, CLI, and Doctor.
+- [ ] Integrate direct Codex and Claude ordinary ingress with metadata-only
+      terminal denial.
+- [ ] Revalidate scheduled recipients and integrate Group and Team fan-out.
+- [ ] Add redacted trace, graph, and web projections only after core evidence
+      is stable.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.
