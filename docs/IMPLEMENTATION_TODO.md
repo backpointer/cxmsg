@@ -332,6 +332,18 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Keep package-version skew informational when the loaded module revision
       is still current.
 
+### Post-roadmap maintenance — Claude denial observability
+
+- Status: COMPLETE; native wire status remains unchanged
+
+- [x] Preserve the reason-free native `denied` control frame for protocol
+      compatibility.
+- [x] Record a bounded local error code and denial origin after successful
+      status return so Route Admission quarantine and downstream failure are
+      distinguishable.
+- [x] Keep denial evidence out of routing, retry, wake, permission, approval,
+      and Delegation decisions.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.

@@ -24,12 +24,14 @@ test("coordination events redact bodies, paths, and unbounded values", () => {
     target: "/private/secret/project",
     outcome: "x".repeat(129),
     errorCode: "EPERM",
+    denialOrigin: "downstream-error",
     body: "must not be logged",
   });
 
   assert.equal(event.target, "redacted");
   assert.equal(event.outcome, "redacted");
   assert.equal(event.errorCode, "EPERM");
+  assert.equal(event.denialOrigin, "downstream-error");
   assert.equal("body" in event, false);
 });
 

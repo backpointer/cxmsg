@@ -176,6 +176,29 @@ test("Claude bridge returns native downstream status without turning it into an 
   });
   assert.equal(events[0].phase, "status-returned");
 
+  const deniedEvents = [];
+  const denied = await returnClaudePeerStatus(
+    "coordinator",
+    {
+      fromSocket: "/tmp/cc-socks/12345.sock",
+      messageId: MESSAGE_ID,
+    },
+    "denied",
+    {
+      errorCode: "EEXTERNALWRITERUNVERIFIED",
+      denialOrigin: "downstream-error",
+      send: async (socketPath, frame) => sent.push({ socketPath, frame }),
+      log: async (event) => deniedEvents.push(event),
+    },
+  );
+  assert.equal(denied, true);
+  assert.deepEqual(parseClaudePeerStatusFrame(sent[1].frame), {
+    messageId: MESSAGE_ID,
+    status: "denied",
+  });
+  assert.equal(deniedEvents[0].errorCode, "EEXTERNALWRITERUNVERIFIED");
+  assert.equal(deniedEvents[0].denialOrigin, "downstream-error");
+
   const failedEvents = [];
   const failed = await returnClaudePeerStatus(
     "coordinator",

@@ -450,6 +450,10 @@ best-effort `denied`. A successful socket write does not prove that the Claude
 sender surfaced or persisted the status. A returned status still conveys no
 model completion or authority, and failure to return the diagnostic receipt
 does not replay input.
+The native frame remains reason-free. For local diagnosis only, cxmsg records a
+bounded error code and denial origin in its owner-private coordination event
+log. This evidence never changes routing, retry, wake, permission, approval, or
+Delegation state and contains no Message Body, path, endpoint, or token.
 
 Busy fallback is opt-in per dispatch invocation. The default remains
 fail-before-attempt. With `--when-busy when-idle`, only an exact frozen Codex

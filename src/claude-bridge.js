@@ -470,7 +470,12 @@ export async function returnClaudePeerStatus(
   target,
   parsed,
   status,
-  { send = sendClaudePeerFrame, log = writeCoordinationEvent } = {},
+  {
+    send = sendClaudePeerFrame,
+    log = writeCoordinationEvent,
+    errorCode = null,
+    denialOrigin = null,
+  } = {},
 ) {
   try {
     await send(
@@ -483,6 +488,8 @@ export async function returnClaudePeerStatus(
       correlationId: parsed.messageId,
       target,
       outcome: status,
+      errorCode,
+      denialOrigin,
     });
     return true;
   } catch (error) {
@@ -496,6 +503,12 @@ export async function returnClaudePeerStatus(
     });
     return false;
   }
+}
+
+function boundedClaudeIngressErrorCode(error) {
+  return typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code)
+    ? error.code
+    : "ECLAUDEINGRESS";
 }
 
 export async function runClaudeBridge(target) {
@@ -656,9 +669,20 @@ export async function runClaudeBridge(target) {
           target,
           parsed,
           denied ? "denied" : "delivered",
+          denied
+            ? {
+                errorCode: "EROUTEQUARANTINED",
+                denialOrigin: "route-admission",
+              }
+            : undefined,
         );
       } catch (error) {
-        if (parsed) await returnClaudePeerStatus(target, parsed, "denied");
+        if (parsed) {
+          await returnClaudePeerStatus(target, parsed, "denied", {
+            errorCode: boundedClaudeIngressErrorCode(error),
+            denialOrigin: "downstream-error",
+          });
+        }
         process.stderr.write(`cxmsg Claude bridge delivery failed: ${error.message}\n`);
       } finally {
         if (!socket.writableEnded) {

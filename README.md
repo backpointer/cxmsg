@@ -1121,6 +1121,11 @@ quarantine or a downstream delivery failure attempts `denied`. Both are
 best-effort protocol feedback: successful UDS write does not prove that the
 sender surfaced or persisted the receipt. It never claims that the Codex model
 read or completed the request.
+Because the native frame has no reason field, cxmsg also records bounded local
+`errorCode` and `denialOrigin` evidence on a successful returned `denied`
+status. Route Admission quarantine is distinguished from downstream delivery
+failure without adding body text, paths, endpoints, or authority to the wire
+frame.
 
 An ordinary Claude Peer Message may carry an exact envelope-level
 `in-reply-to` UUID. After exact source validation, cxmsg records this separately

@@ -37,6 +37,7 @@ export function coordinationEvent(fields) {
     attempt: Number.isSafeInteger(fields.attempt) ? fields.attempt : null,
     outcome: safeValue(fields.outcome),
     errorCode: safeValue(fields.errorCode),
+    denialOrigin: safeValue(fields.denialOrigin),
     late: fields.late === true,
   };
   return Object.fromEntries(
