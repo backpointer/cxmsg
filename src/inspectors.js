@@ -3184,6 +3184,7 @@ export function inspectRouteState({
   ledgerQuotaBytes = DELIVERY_LEDGER_QUOTA_BYTES,
   processStateFn = processState,
   schedulerRevision = CXMSG_IMPLEMENTATION_REVISIONS.scheduler,
+  inboundPolicyFeatureActive = INBOUND_POLICY_FEATURE_ACTIVE,
 } = {}) {
   const bindings = scanJsonDirectory({
     stateDir,
@@ -3237,7 +3238,7 @@ export function inspectRouteState({
       }).length
     : 0;
   const inactiveEvidenceValid =
-    INBOUND_POLICY_FEATURE_ACTIVE || inboundPolicyEvidenceCount === 0;
+    inboundPolicyFeatureActive || inboundPolicyEvidenceCount === 0;
   checks.push(
     diagnosticCheck({
       id: "inbound-policies.inactive-evidence",

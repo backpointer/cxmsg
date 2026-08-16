@@ -511,18 +511,22 @@ test("Group policy denial is recipient-local and all-denied stores no body", asy
     selectorValue: nodeKeys.first,
   });
   const expiry = new Date(Date.now() + 60_000).toISOString();
-  const inactive = await groups.storeOnlyGroupMessage({
+  const active = await groups.storeOnlyGroupMessage({
     conversationId: ids.policyConversation,
     senderNodeKey: nodeKeys.first,
-    message: "inactive Group policy context",
+    message: "active Group policy context",
     logicalMessageId: ids.inactivePolicyMessage,
     expiry,
   });
-  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, false);
-  assert.ok(
-    inactive.ledger.groupDeliveries.every(
-      (delivery) => delivery.admissionState === "admitted",
+  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, true);
+  assert.deepEqual(
+    active.ledger.groupDeliveries.map(
+      ({ targetNodeKey, admissionState }) => ({ targetNodeKey, admissionState }),
     ),
+    [
+      { targetNodeKey: nodeKeys.second, admissionState: "denied" },
+      { targetNodeKey: nodeKeys.third, admissionState: "admitted" },
+    ].sort((left, right) => left.targetNodeKey.localeCompare(right.targetNodeKey)),
   );
   const mixed = await groups.storeOnlyGroupMessage(
     {
@@ -532,7 +536,6 @@ test("Group policy denial is recipient-local and all-denied stores no body", asy
       logicalMessageId: ids.mixedPolicyMessage,
       expiry,
     },
-    { policyEvaluator: inbound.evaluateInboundPolicy },
   );
   assert.match(mixed.ledger.logicalMessage.body.contentRef, /^cxmsg-message:/);
   assert.equal(
@@ -634,7 +637,11 @@ test("Group policy denial is recipient-local and all-denied stores no body", asy
     /already has terminal evidence/,
   );
   const inactiveEvidence = inspectors
-    .inspectRouteState({ stateDir, sessions: [] })
+    .inspectRouteState({
+      stateDir,
+      sessions: [],
+      inboundPolicyFeatureActive: false,
+    })
     .find((check) => check.id === "inbound-policies.inactive-evidence");
   assert.equal(inactiveEvidence.status, "fail");
   assert.equal(inactiveEvidence.errorCode, "EINBOUNDPOLICYBYPASS");

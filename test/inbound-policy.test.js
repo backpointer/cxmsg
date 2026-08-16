@@ -383,7 +383,7 @@ test("policy writer rejects a symlink mutation lock without touching its target"
   }
 });
 
-test("Doctor foundation reports inactive policies and redacted identity gaps", async () => {
+test("Doctor foundation reports activation state and redacted identity gaps", async () => {
   const target = "codex:82345678-1234-4234-8234-123456789abc";
   await upsertInboundDenyRule({
     targetNodeKey: target,
@@ -398,7 +398,7 @@ test("Doctor foundation reports inactive policies and redacted identity gaps", a
   const before = createHash("sha256")
     .update(await fs.readFile(policyFilename))
     .digest("hex");
-  const checks = inspectInboundPolicies({ stateDir: root });
+  const checks = inspectInboundPolicies({ stateDir: root, featureActive: false });
   assert.equal(
     checks.find((check) => check.id === "inbound-policies.activation").errorCode,
     "EINBOUNDPOLICYINACTIVE",
@@ -414,7 +414,7 @@ test("Doctor foundation reports inactive policies and redacted identity gaps", a
     before,
   );
 
-  const activeChecks = inspectInboundPolicies({ stateDir: root, featureActive: true });
+  const activeChecks = inspectInboundPolicies({ stateDir: root });
   assert.equal(
     activeChecks.find((check) => check.id === "inbound-policies.activation").status,
     "pass",

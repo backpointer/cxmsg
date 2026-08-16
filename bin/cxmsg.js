@@ -151,6 +151,13 @@ import {
   CXMSG_VERSION,
 } from "../src/version.js";
 import {
+  listInboundPoliciesStrict,
+  normalizeInboundNodeKey,
+  purgeInboundPolicyRecord,
+  removeInboundDenyRule,
+  upsertInboundDenyRule,
+} from "../src/inbound-policy.js";
+import {
   processIdentity,
   processState,
   serviceEvidence,
@@ -203,6 +210,7 @@ import {
   readExecutionThread,
   readCluster,
   readNode,
+  readNodeTombstone,
   readProject,
   recoverClusterMembership,
   removeClusterMember,
@@ -310,6 +318,12 @@ function usage(exitCode = 0) {
   cxmsg route reconcile <logical-message-id> [--json]
   cxmsg route retry <logical-message-id> [--json]
   cxmsg quarantine list [--json]
+  cxmsg inbound deny add <target-session|node-key>
+             (--sender-node <node-key>|--sender-project <project-id-or-label>|--unknown-sender) [--json]
+  cxmsg inbound deny remove <target-session|node-key> <rule-id> [--json]
+  cxmsg inbound deny list [<target-session|node-key>] [--json]
+  cxmsg inbound denials list [--target <target-session|node-key>] [--json]
+  cxmsg inbound policy purge <target-session|node-key> --confirm <sha256> [--json]
   cxmsg directory project ensure <routing-id> <root> [--json]
   cxmsg directory project move <routing-id|project-id> <root> [--json] [--paths]
   cxmsg directory project-transitions [--project <routing-id|project-id>] [--json] [--paths]
@@ -4349,6 +4363,271 @@ async function commandQuarantine(args) {
   );
 }
 
+function inboundPolicyError(code, message) {
+  const error = new Error(message);
+  error.code = code;
+  return error;
+}
+
+function resolveInboundTargetNodeKey(value, { requireLive = false } = {}) {
+  let targetNodeKey;
+  let session = null;
+  try {
+    targetNodeKey = normalizeInboundNodeKey(value);
+  } catch {
+    validateSessionName(value);
+    session = readSessionRecord(value);
+    if (!session) {
+      throw inboundPolicyError(
+        "ETARGETIDENTITY",
+        `unknown inbound policy target session: ${value}`,
+      );
+    }
+    targetNodeKey = normalizeInboundNodeKey(`codex:${session.threadId}`);
+  }
+  if (!requireLive) return targetNodeKey;
+  const [runtimeKind, nativeId] = targetNodeKey.split(":");
+  const node = readNode(runtimeKind, nativeId);
+  if (!node || readNodeTombstone(runtimeKind, nativeId)) {
+    let guidance = "";
+    if (session) {
+      const projects = listProjects().filter((project) =>
+        projectContainsPath(project, session.cwd),
+      );
+      guidance = projects.length === 1
+        ? `; run: cxmsg directory sync --project ${projects[0].routingId} --codex-only`
+        : "; run: cxmsg directory projects --paths, then cxmsg directory sync --project <routing-id> --codex-only";
+    }
+    throw inboundPolicyError(
+      "ETARGETNODE",
+      `inbound policy target must be a live synchronized Node${guidance}`,
+    );
+  }
+  return node.nodeKey;
+}
+
+function requireLiveInboundSenderNode(value) {
+  const senderNodeKey = normalizeInboundNodeKey(value);
+  const [runtimeKind, nativeId] = senderNodeKey.split(":");
+  const node = readNode(runtimeKind, nativeId);
+  if (!node || readNodeTombstone(runtimeKind, nativeId)) {
+    throw inboundPolicyError(
+      "ESENDERNODE",
+      "inbound sender selector must reference a live synchronized Node",
+    );
+  }
+  return node.nodeKey;
+}
+
+function resolveInboundProject(value) {
+  const project = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
+    value || "",
+  )
+    ? readProject(value)
+    : findProjectByRoutingId(value);
+  if (!project) {
+    throw inboundPolicyError(
+      "ESENDERPROJECT",
+      "inbound sender Project selector is unknown",
+    );
+  }
+  return project.projectId;
+}
+
+function publicInboundPolicy(record) {
+  return {
+    schemaVersion: record.schemaVersion,
+    targetNodeKey: record.targetNodeKey,
+    revision: record.revision,
+    rules: record.rules.map((rule) => ({ ...rule })),
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function inboundDenialProjection(record) {
+  const deliveries = record.teamDeliveries || record.groupDeliveries || [record.delivery];
+  return deliveries.flatMap((delivery) => {
+    const policyEvidence =
+      delivery.inboundPolicy ||
+      [...(delivery.evidence || [])]
+        .reverse()
+        .find((evidence) => evidence.inboundPolicy)?.inboundPolicy ||
+      null;
+    if (
+      !policyEvidence ||
+      !["denied", "policy_denied"].includes(delivery.state)
+    ) {
+      return [];
+    }
+    return [{
+      logicalMessageId: record.logicalMessage.messageId,
+      deliveryId: delivery.deliveryId,
+      targetNodeKey: policyEvidence.targetNodeKey,
+      status: delivery.state,
+      reason: policyEvidence.reason,
+      selectorKind: policyEvidence.selectorKind,
+      ruleId: policyEvidence.ruleId,
+      failClosed: policyEvidence.failClosed,
+      createdAt: record.logicalMessage.createdAt,
+      updatedAt: delivery.updatedAt,
+    }];
+  });
+}
+
+async function commandInbound(args) {
+  const category = args.shift();
+  const operation = args.shift();
+  if (category === "deny" && operation === "add") {
+    const targetNodeKey = resolveInboundTargetNodeKey(args.shift(), {
+      requireLive: true,
+    });
+    let selectorKind = null;
+    let selectorValue = null;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--unknown-sender") {
+        if (selectorKind) throw new Error("inbound deny add accepts one selector");
+        selectorKind = "unknown-sender";
+      } else if (["--sender-node", "--sender-project"].includes(option)) {
+        if (selectorKind) throw new Error("inbound deny add accepts one selector");
+        const value = args.shift();
+        if (!value) throw new Error(`${option} requires a value`);
+        if (option === "--sender-node") {
+          selectorKind = "sender-node";
+          selectorValue = requireLiveInboundSenderNode(value);
+        } else {
+          selectorKind = "sender-project";
+          selectorValue = resolveInboundProject(value);
+        }
+      } else throw new Error(`unknown inbound deny add option: ${option}`);
+    }
+    if (!selectorKind) throw new Error("inbound deny add requires exactly one selector");
+    const result = await upsertInboundDenyRule({
+      targetNodeKey,
+      selectorKind,
+      selectorValue,
+    });
+    const output = {
+      targetNodeKey,
+      rule: result.rule,
+      revision: result.policy.revision,
+      changed: result.changed,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `${result.changed ? "added" : "found"} inbound deny ${result.rule.ruleId}\ttarget=${targetNodeKey}\tselector=${selectorKind}\n`,
+    );
+    return;
+  }
+  if (category === "deny" && operation === "remove") {
+    const targetNodeKey = resolveInboundTargetNodeKey(args.shift());
+    const ruleId = args.shift();
+    const jsonOutput = args.includes("--json");
+    if (!ruleId || args.some((value) => value !== "--json")) usage(2);
+    const result = await removeInboundDenyRule({ targetNodeKey, ruleId });
+    const output = {
+      targetNodeKey,
+      removedRule: result.removedRule,
+      revision: result.policy?.revision || null,
+      policyDeleted: result.deleted,
+    };
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(output, null, 2)}\n`
+        : `removed inbound deny ${ruleId}\ttarget=${targetNodeKey}\tpolicy-deleted=${result.deleted}\n`,
+    );
+    return;
+  }
+  if (category === "deny" && operation === "list") {
+    let targetNodeKey = null;
+    let jsonOutput = false;
+    while (args.length) {
+      const value = args.shift();
+      if (value === "--json") jsonOutput = true;
+      else if (!targetNodeKey) targetNodeKey = resolveInboundTargetNodeKey(value);
+      else usage(2);
+    }
+    const records = listInboundPoliciesStrict()
+      .filter((record) => !targetNodeKey || record.targetNodeKey === targetNodeKey)
+      .map(publicInboundPolicy);
+    if (jsonOutput) {
+      process.stdout.write(`${JSON.stringify(records, null, 2)}\n`);
+      return;
+    }
+    for (const record of records) {
+      for (const rule of record.rules) {
+        const selector =
+          rule.selectorNodeKey || rule.projectId || "unknown-sender";
+        process.stdout.write(
+          `${record.targetNodeKey}\t${rule.ruleId}\t${rule.selectorKind}\t${selector}\trevision=${record.revision}\n`,
+        );
+      }
+    }
+    return;
+  }
+  if (category === "denials" && operation === "list") {
+    let targetNodeKey = null;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--target") {
+        const value = args.shift();
+        if (!value) throw new Error("inbound denials list --target requires a value");
+        targetNodeKey = resolveInboundTargetNodeKey(value);
+      } else throw new Error(`unknown inbound denials list option: ${option}`);
+    }
+    const records = (await listDeliveryLedgerIndexed())
+      .flatMap(inboundDenialProjection)
+      .filter((record) => !targetNodeKey || record.targetNodeKey === targetNodeKey)
+      .sort(
+        (left, right) =>
+          right.updatedAt.localeCompare(left.updatedAt) ||
+          left.deliveryId.localeCompare(right.deliveryId),
+      );
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(records, null, 2)}\n`
+        : records
+            .map(
+              (record) =>
+                `${record.updatedAt}\t${record.logicalMessageId}\t${record.targetNodeKey}\t${record.status}\t${record.reason}`,
+            )
+            .join("\n") + (records.length ? "\n" : ""),
+    );
+    return;
+  }
+  if (category === "policy" && operation === "purge") {
+    const targetNodeKey = resolveInboundTargetNodeKey(args.shift());
+    let confirmSha256 = null;
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--confirm") confirmSha256 = args.shift() || null;
+      else throw new Error(`unknown inbound policy purge option: ${option}`);
+    }
+    if (!confirmSha256) {
+      throw new Error("inbound policy purge requires --confirm <sha256>");
+    }
+    const result = await purgeInboundPolicyRecord({
+      targetNodeKey,
+      confirmSha256,
+    });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : `purged invalid inbound policy\ttarget=${targetNodeKey}\trecord-sha256=${result.recordSha256}\n`,
+    );
+    return;
+  }
+  usage(2);
+}
+
 function parseBodyReadInteger(option, value, { allowZero = false } = {}) {
   if (!/^\d+$/.test(value || "")) {
     throw new Error(`${option} must be an integer`);
@@ -4804,6 +5083,9 @@ async function main() {
       break;
     case "quarantine":
       await commandQuarantine(args);
+      break;
+    case "inbound":
+      await commandInbound(args);
       break;
     case "directory":
       await commandDirectory(args);

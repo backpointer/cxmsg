@@ -154,11 +154,11 @@ authority path. Logical-message deduplication prevents a second automatic wake
 after an attempt is durably marked, including when the first outcome is
 uncertain.
 
-Inbound Peer Message Policy remains internally staged and inactive. Its
-owner-private Adapter, evaluator, and direct/Explicit-Retry/Scheduler
-plus Group/Team integration create no public mutation or routing authority.
-Integration tests inject the evaluator explicitly; production routing keeps the
-single cross-path feature gate off. Scheduler evaluation occurs after lease
+Inbound Peer Message Policy is active across direct, Explicit-Retry, Scheduler,
+Group, and Team paths. Its owner-private mutation CLI resolves session aliases
+once to stable Directory Node identities; Project labels resolve once to UUIDs.
+Peer Messages, Claude frames, host relay calls, and messaging MCP tools cannot
+mutate policy or create routing authority. Scheduler evaluation occurs after lease
 renewal and before attempt creation or `turn/start`. A deny clears the claim and
 preserves the already retained body with zero attempts; a continuing decision
 is stored as a closed metadata-only attempt snapshot. Reclaimed pre-attempt work
@@ -170,15 +170,13 @@ evidence without a Message Body; mixed fan-out retains one owner-private body
 only for admitted recipient presentation. Team direct dispatch re-evaluates
 policy before its attempt, while scheduled recipients re-evaluate under their
 renewed Scheduler claim. Later denial never deletes an already retained body.
-Doctor fails with `EINBOUNDPOLICYINACTIVE` if a policy record exists before
-every ordinary Peer Message path is integrated. A staged policy record must
-never be represented as effective enforcement.
 Policy configuration and denial evidence have separate lifetimes: removing an
 empty or exact-digest-confirmed invalid configuration record never removes
 Delivery Ledger evidence, retained bodies, tombstones, or audit events.
-Inbound Policy evaluation may be injected only by isolated tests while the
-shared feature gate is off. Doctor reports `EINBOUNDPOLICYBYPASS` if durable
-denial or evaluation evidence appears in that state. An initially denied batch
+Inbound Policy evaluation may be injected only by isolated tests when they
+explicitly override the shared feature gate. Doctor reports
+`EINBOUNDPOLICYBYPASS` if durable denial or evaluation evidence appears while
+that gate is off. An initially denied batch
 must bind its evaluated sender identity through a SHA-256 digest.
 Stable Node keys and Project UUIDs are routing identities, not credentials.
 They may appear in owner-private Ledger evidence and explicit owner-local

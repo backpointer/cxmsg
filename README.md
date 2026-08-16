@@ -170,24 +170,30 @@ reusing it with different content fails as an idempotency conflict. Targets
 without an explicit binding retain legacy unscoped-send compatibility during
 migration.
 
-Inbound Peer Message Policy v1 currently has an internal owner-private record
-Adapter, pure evaluator, schema inspection, Doctor foundation, and inactive
-direct, Explicit-Retry, Scheduler, Group, and Team integration. Injected tests
-prove that direct Codex sends, direct replies, Claude ordinary ingress, the one
-Explicit Retry, and scheduled work after lease renewal can produce metadata-only
-terminal denial with zero new attempt or wake. A continuing scheduled decision
+Inbound Peer Message Policy v1 provides owner-only CLI mutation over stable
+Node and Project identities. Direct Codex sends, direct replies, Claude
+ordinary ingress, the one Explicit Retry, scheduled work after lease renewal,
+Group, and Team all pass through the shared active policy gate. A denial is
+metadata-only with zero new attempt or wake. A continuing scheduled decision
 is stored as a closed snapshot on its actual attempt; an expired pre-attempt
-claim must evaluate current policy again. The cross-path feature gate remains
-off, so public policy mutation and message enforcement are deliberately
-unavailable until an independent cross-path review passes. Group and Team
+claim must evaluate current policy again. Group and Team
 fan-out preserve one frozen recipient set with per-recipient outcomes; an
 all-denied new fan-out stores no Message Body, and denied Group recipients are
-absent from inbox and digest projections. If policy records appear before
-activation, Doctor reports
-`EINBOUNDPOLICYINACTIVE`; do not treat those records as enforced blocking.
-Removing the final internal rule removes its empty configuration record, while
-an invalid record requires exact file-digest confirmation to purge. Neither
+absent from inbox and digest projections. Rules can deny one verified sender
+Node, one independently resolved Project UUID, or an unidentified sender:
+
+```sh
+cxmsg inbound deny add worker --sender-node codex:<uuid>
+cxmsg inbound deny add worker --sender-project <project-id-or-label>
+cxmsg inbound deny add worker --unknown-sender
+cxmsg inbound deny list worker
+cxmsg inbound denials list --target worker
+```
+
+Removing the final rule removes its empty configuration record. An invalid
+record requires an exact byte-digest-confirmed `inbound policy purge`; neither
 operation removes Delivery Ledger denial evidence or retained message data.
+Peer, Claude, relay, and MCP messages cannot mutate this policy.
 
 After a scan records no positive evidence, Doctor reports
 `EROUTERECONCILEDUNKNOWN` instead of requesting the same scan again. The

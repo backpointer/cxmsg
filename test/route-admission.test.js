@@ -273,9 +273,9 @@ test("Inbound Policy denial is metadata-only, idempotent, and starts zero attemp
   );
 });
 
-test("Slice 2 integration remains inactive without the cross-path feature gate", async () => {
+test("the active cross-path feature gate denies direct ingress by default", async () => {
   await ensurePolicySenderDeny();
-  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, false);
+  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, true);
   let dispatches = 0;
   const outcome = await routes.routePeerMessage(
     {
@@ -292,9 +292,10 @@ test("Slice 2 integration remains inactive without the cross-path feature gate",
       };
     },
   );
-  assert.equal(outcome.admissionState, "admitted");
-  assert.equal(outcome.status, "turn_started");
-  assert.equal(dispatches, 1);
+  assert.equal(outcome.admissionState, "quarantined");
+  assert.equal(outcome.reason, "route_rejected");
+  assert.equal(outcome.status, "denied");
+  assert.equal(dispatches, 0);
 });
 
 test("initial scheduled ingress is denied before Trigger validation or queueing", async () => {

@@ -353,8 +353,8 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap extension — Inbound Peer Message Policy
 
-- Status: SLICES 1-4 INTEGRATED; independent cross-path review PASS;
-  public mutation and activation pending
+- Status: CORE ACTIVE; independent cross-path review PASS; redacted graph and
+  web projections pending
 
 - [x] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
       privacy, authority, deduplication, fan-out, scheduling, and retention
@@ -370,7 +370,7 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
       portability rule and define an explicit stale-policy-artifact cleanup
       procedure without automatic repair.
 - [x] Integrate direct Codex and Claude ordinary ingress plus Explicit Retry
-      with metadata-only terminal denial behind the inactive cross-path gate.
+      with metadata-only terminal denial behind the shared cross-path gate.
 - [x] Revalidate scheduled recipients after lease renewal, persist the exact
       continuing-policy snapshot on the attempt, and deny with zero attempts
       after claim recovery when current policy changed.
@@ -380,7 +380,8 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Independently review the complete cross-path gate and close its low-risk
       hardening findings with gate-bypass Doctor detection, exact denied-sender
       digest binding, privacy documentation, and adversarial regression tests.
-- [ ] Expose owner-only public mutation CLI and activate enforcement.
+- [x] Expose owner-only public mutation CLI and activate the single shared
+      enforcement gate. Keep Peer, Claude, relay, and MCP mutation unavailable.
 - [ ] Add redacted trace, graph, and web projections only after core evidence
       is stable.
 

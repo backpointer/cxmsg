@@ -1,8 +1,7 @@
 # Inbound Peer Message Policy v1
 
-Status: Slices 1 through 4 integrated behind the inactive cross-path feature
-gate; independent cross-path review and public mutation/activation remain
-unavailable
+Status: core enforcement active after independent cross-path review; owner CLI
+mutation available; redacted graph and web projections remain future work
 
 ## Purpose
 
@@ -209,19 +208,24 @@ Mutation is unavailable through Peer Message, ordinary reply, Claude frame,
 host relay, or the cxmsg messaging MCP surface. A peer request to change policy
 is coordination text only and supplies no authority.
 
-Initial CLI shape:
+Owner CLI:
 
 ```text
-cxmsg inbound deny add <target-session> --sender-node <node-key> [--json]
-cxmsg inbound deny add <target-session> --sender-project <project-id-or-label> [--json]
-cxmsg inbound deny add <target-session> --unknown-sender [--json]
-cxmsg inbound deny remove <target-session> <rule-id> [--json]
-cxmsg inbound deny list [<target-session>] [--json]
-cxmsg inbound denials list [--target <target-session>] [--json]
+cxmsg inbound deny add <target-session|node-key> --sender-node <node-key> [--json]
+cxmsg inbound deny add <target-session|node-key> --sender-project <project-id-or-label> [--json]
+cxmsg inbound deny add <target-session|node-key> --unknown-sender [--json]
+cxmsg inbound deny remove <target-session|node-key> <rule-id> [--json]
+cxmsg inbound deny list [<target-session|node-key>] [--json]
+cxmsg inbound denials list [--target <target-session|node-key>] [--json]
+cxmsg inbound policy purge <target-session|node-key> --confirm <sha256> [--json]
 ```
 
-Project labels are resolved once to a stable UUID. Default output is redacted
-and bounded. No command displays a Message Body.
+Target session names resolve once to a live synchronized stable Node before a
+rule is created. Project labels resolve once to a stable UUID. A sender-Node
+selector must reference a live synchronized Node. Default output is bounded;
+the denial projection omits sender identity and Message Body fields. No command
+displays a Message Body. Invalid-record purge requires the exact SHA-256 of the
+current owner-private file bytes and cannot remove a valid policy.
 
 ## Group, Team, and scheduling invariants
 

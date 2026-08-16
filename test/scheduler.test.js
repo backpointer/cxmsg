@@ -305,7 +305,7 @@ function scheduledPolicyDependencies(overrides = {}) {
   };
 }
 
-test("scheduled Inbound Policy integration remains inactive behind the cross-path gate", async () => {
+test("scheduled Inbound Policy integration is active by default", async () => {
   await ensureScheduledSenderDeny();
   const record = await scheduledRecord(
     ids.policyInactive,
@@ -335,9 +335,9 @@ test("scheduled Inbound Policy integration remains inactive behind the cross-pat
     }),
   );
 
-  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, false);
-  assert.equal(outcome.state, "turn_started");
-  assert.equal(turnStarts, 1);
+  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, true);
+  assert.equal(outcome.state, "policy_denied");
+  assert.equal(turnStarts, 0);
 });
 
 test("a scheduled attempt retains the exact continuing policy snapshot", async () => {

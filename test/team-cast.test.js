@@ -979,20 +979,15 @@ test("one wake-all schedule failure stays visible without hiding siblings", asyn
 });
 
 test("Team Cast policy denial preserves partial fan-out and all-denied stores no body", async () => {
-  await inbound.upsertInboundDenyRule({
-    targetNodeKey: keys.first,
-    selectorKind: "sender-node",
-    selectorValue: keys.sender,
-  });
-  const inactive = await teams.prepareTeamCastMentionMessage({
+  const initiallyAdmitted = await teams.prepareTeamCastMentionMessage({
     selectionId: ids.fanoutSelection,
     senderNodeKey: keys.sender,
     logicalMessageId: ids.inactivePolicyMessage,
-    message: "inactive Team Cast policy pointer",
+    message: "Team Cast pointer prepared before a policy change",
   });
-  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, false);
+  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, true);
   assert.ok(
-    inactive.ledger.teamDeliveries.every(
+    initiallyAdmitted.ledger.teamDeliveries.every(
       (delivery) => delivery.admissionState === "admitted",
     ),
   );
@@ -1001,6 +996,17 @@ test("Team Cast policy denial preserves partial fan-out and all-denied stores no
     keys.first,
     { wakePolicy: "when-idle" },
   );
+  await teams.prepareTeamCastMentionMessage({
+    selectionId: ids.fanoutSelection,
+    senderNodeKey: keys.sender,
+    logicalMessageId: ids.dispatchPolicyMessage,
+    message: "revalidate immediately before Team Cast dispatch",
+  });
+  await inbound.upsertInboundDenyRule({
+    targetNodeKey: keys.first,
+    selectorKind: "sender-node",
+    selectorValue: keys.sender,
+  });
   const scheduledRecord = await ledger.readDeliveryLedgerIndexed(
     ids.inactivePolicyMessage,
   );
@@ -1026,7 +1032,6 @@ test("Team Cast policy denial preserves partial fan-out and all-denied stores no
         status: { type: "idle" },
       }),
       triggerReadiness: async () => ({ state: "eligible" }),
-      policyEvaluator: inbound.evaluateInboundPolicy,
       deliver: async (_client, _thread, _payload, options) => {
         await options.beforeStart();
         scheduledTurnStarts += 1;
@@ -1058,17 +1063,10 @@ test("Team Cast policy denial preserves partial fan-out and all-denied stores no
     ),
     /already terminal/,
   );
-  await teams.prepareTeamCastMentionMessage({
-    selectionId: ids.fanoutSelection,
-    senderNodeKey: keys.sender,
-    logicalMessageId: ids.dispatchPolicyMessage,
-    message: "revalidate immediately before Team Cast dispatch",
-  });
   const dispatchTargets = [];
   const revalidated = await teams.dispatchPreparedTeamCastMessage(
     { logicalMessageId: ids.dispatchPolicyMessage },
     {
-      policyEvaluator: inbound.evaluateInboundPolicy,
       preflightRecipient: async () => ({ transport: "codex-app-server" }),
       dispatchRecipient: async ({ targetNodeKey }) => {
         dispatchTargets.push(targetNodeKey);
@@ -1108,7 +1106,6 @@ test("Team Cast policy denial preserves partial fan-out and all-denied stores no
       logicalMessageId: ids.mixedPolicyMessage,
       message: "mixed Team Cast policy pointer",
     },
-    { policyEvaluator: inbound.evaluateInboundPolicy },
   );
   assert.match(mixed.body.contentRef, /^cxmsg-message:/);
   assert.equal(
@@ -1184,7 +1181,6 @@ test("Team Cast policy denial preserves partial fan-out and all-denied stores no
       message: "metadata only denied Team Cast pointer",
     },
     {
-      policyEvaluator: inbound.evaluateInboundPolicy,
       bodyStore: async () => {
         bodyWrites += 1;
         throw new Error("all-denied must not store a body");
