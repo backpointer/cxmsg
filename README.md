@@ -772,7 +772,11 @@ cxmsg message show <message-id> --offset 0 --limit 16384 --json
 
 The default read is 16 KiB and a single read is capped at 64 KiB. Repeat with
 the returned `nextOffset`; do not infer that fetching a range means the model
-read, understood, or completed the message.
+read, understood, or completed the message. `message info` and `message show`
+are pure read paths: they validate existing owner-private directories and
+segments but never create directories, change modes, acquire a writer lease, or
+rewrite the store. They therefore remain usable by a `:read-only` delegated
+reviewer when that profile permits reading the cxmsg state directory.
 
 Grant a coordinator permission to delegate user-authorized jobs to a worker:
 

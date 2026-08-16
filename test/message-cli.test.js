@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -60,6 +60,32 @@ function cxmsg(...args) {
   });
 }
 
+function readOnlyCxmsgAt(readStateDir, ...args) {
+  return spawnSync(
+    process.execPath,
+    [
+      "--permission",
+      `--allow-fs-read=${path.resolve(".")}`,
+      `--allow-fs-read=${readStateDir}`,
+      "bin/cxmsg.js",
+      ...args,
+    ],
+    {
+      cwd: path.resolve("."),
+      env: {
+        ...process.env,
+        CXMSG_STATE_DIR: readStateDir,
+        CODEX_SESSION_NAME: "reader",
+      },
+      encoding: "utf8",
+    },
+  );
+}
+
+function readOnlyCxmsg(...args) {
+  return readOnlyCxmsgAt(stateDir, ...args);
+}
+
 test("message info exposes bounded metadata without a storage path", () => {
   const result = cxmsg("message", "info", `cxmsg-message:${messageId}`, "--json");
   assert.equal(result.status, 0, result.stderr);
@@ -68,6 +94,44 @@ test("message info exposes bounded metadata without a storage path", () => {
   assert.equal(info.bodyBytes, Buffer.byteLength(body, "utf8"));
   assert.equal("path" in info, false);
   assert.equal("body" in info, false);
+});
+
+test("message info and show require no filesystem write permission", () => {
+  const info = readOnlyCxmsg("message", "info", messageId, "--json");
+  assert.equal(info.status, 0, info.stderr);
+  const metadata = JSON.parse(info.stdout);
+  assert.equal(metadata.messageId, messageId);
+  assert.equal("path" in metadata, false);
+
+  const shown = readOnlyCxmsg(
+    "message",
+    "show",
+    metadata.contentRef,
+    "--limit",
+    "64",
+    "--json",
+  );
+  assert.equal(shown.status, 0, shown.stderr);
+  assert.equal(JSON.parse(shown.stdout).messageId, messageId);
+});
+
+test("an absent body store stays absent during a read-only lookup", () => {
+  const emptyState = mkdtempSync(path.join(os.tmpdir(), "cxmsg-message-empty-"));
+  try {
+    const result = readOnlyCxmsgAt(
+      emptyState,
+      "message",
+      "info",
+      "72345678-1234-4234-8234-123456789abc",
+      "--json",
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /unknown message body/);
+    assert.doesNotMatch(result.stderr, /ERR_ACCESS_DENIED/);
+    assert.equal(existsSync(path.join(emptyState, "message-bodies")), false);
+  } finally {
+    rmSync(emptyState, { recursive: true, force: true });
+  }
 });
 
 test("message show reads resumable bounded ranges", () => {

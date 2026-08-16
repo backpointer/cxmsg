@@ -421,6 +421,17 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Document that stable Directory Node keys and Claude-visible Codex bridge
       names are not direct `cxmsg send` aliases.
 
+### Post-roadmap maintenance — read-only Message Body access
+
+- Status: COMPLETE
+
+- [x] Separate body-store validation from write-time directory creation and
+      permission normalization.
+- [x] Keep `message info`, `message show`, retained Delegation task reads, and
+      other body readers on the no-create Retention barrier.
+- [x] Verify the CLI under a filesystem profile with read permission and no
+      write permission, including a missing-store no-creation case.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.

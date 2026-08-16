@@ -20,7 +20,7 @@ import path from "node:path";
 import { requireNoFollowFlag } from "./file-safety.js";
 import { withFileLock } from "./file-lock.js";
 import {
-  assertRetentionReadable,
+  assertRetentionReadableNoCreate,
   withRetentionWriter,
 } from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
@@ -60,11 +60,34 @@ function ensurePrivateDirectory(directory) {
   chmodSync(directory, 0o700);
 }
 
+function assertPrivateDirectory(directory) {
+  const metadata = lstatSync(directory);
+  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
+    throw new Error(`message body path is not a directory: ${path.basename(directory)}`);
+  }
+  if (typeof process.getuid === "function" && metadata.uid !== process.getuid()) {
+    throw new Error(`message body directory is owned by another user: ${path.basename(directory)}`);
+  }
+  if ((metadata.mode & 0o077) !== 0) {
+    throw new Error(`message body directory permissions are too broad: ${path.basename(directory)}`);
+  }
+  return metadata;
+}
+
 function ensureStore() {
   ensurePrivateDirectory(CXMSG_STATE_DIR);
   ensurePrivateDirectory(MESSAGE_BODIES_DIR);
   ensurePrivateDirectory(MESSAGE_BODY_SEGMENTS_DIR);
   ensurePrivateDirectory(MESSAGE_BODY_QUARANTINE_DIR);
+}
+
+function assertStoreReadable() {
+  if (!existsSync(MESSAGE_BODIES_DIR)) return false;
+  assertPrivateDirectory(CXMSG_STATE_DIR);
+  assertPrivateDirectory(MESSAGE_BODIES_DIR);
+  assertPrivateDirectory(MESSAGE_BODY_SEGMENTS_DIR);
+  assertPrivateDirectory(MESSAGE_BODY_QUARANTINE_DIR);
+  return true;
 }
 
 function assertPrivateRegularFile(filename) {
@@ -297,9 +320,9 @@ function verifiedBody(record) {
 }
 
 export function messageBodyInfo(reference) {
-  assertRetentionReadable();
+  assertRetentionReadableNoCreate();
   const messageId = parseMessageContentRef(reference);
-  ensureStore();
+  if (!assertStoreReadable()) throw new Error(`unknown message body: ${messageId}`);
   const record = listRecords().find((candidate) => candidate.messageId === messageId);
   if (!record) throw new Error(`unknown message body: ${messageId}`);
   verifiedBody(record);
@@ -307,8 +330,8 @@ export function messageBodyInfo(reference) {
 }
 
 export function listMessageBodies() {
-  assertRetentionReadable();
-  ensureStore();
+  assertRetentionReadableNoCreate();
+  if (!assertStoreReadable()) return [];
   return listRecords().map((record) => {
     verifiedBody(record);
     return bodyReference(record);
@@ -316,9 +339,9 @@ export function listMessageBodies() {
 }
 
 export function readWholeMessageBody(reference) {
-  assertRetentionReadable();
+  assertRetentionReadableNoCreate();
   const messageId = parseMessageContentRef(reference);
-  ensureStore();
+  if (!assertStoreReadable()) throw new Error(`unknown message body: ${messageId}`);
   const record = listRecords().find((candidate) => candidate.messageId === messageId);
   if (!record) throw new Error(`unknown message body: ${messageId}`);
   return verifiedBody(record).toString("utf8");
@@ -328,7 +351,7 @@ export function readMessageBody(
   reference,
   { offset = 0, limit = DEFAULT_MESSAGE_READ_BYTES } = {},
 ) {
-  assertRetentionReadable();
+  assertRetentionReadableNoCreate();
   const messageId = parseMessageContentRef(reference);
   if (!Number.isSafeInteger(offset) || offset < 0) {
     throw new Error("message body offset must be a non-negative integer");
@@ -336,7 +359,7 @@ export function readMessageBody(
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_MESSAGE_READ_BYTES) {
     throw new Error(`message body limit must be 1-${MAX_MESSAGE_READ_BYTES} bytes`);
   }
-  ensureStore();
+  if (!assertStoreReadable()) throw new Error(`unknown message body: ${messageId}`);
   const record = listRecords().find((candidate) => candidate.messageId === messageId);
   if (!record) throw new Error(`unknown message body: ${messageId}`);
   const body = verifiedBody(record);

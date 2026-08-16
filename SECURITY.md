@@ -140,6 +140,10 @@ conversation history and must not be copied into a repository.
 Long Codex Peer Message bodies are stored separately under the owner-only
 Message Body Store. Content References expose a message UUID, byte count, and
 SHA-256 digest, never a filesystem path. Reads are bounded and digest-verified.
+Body lookup and range reads use the no-create Retention barrier and perform only
+private metadata validation plus file reads; they do not call mkdir, chmod,
+write, rename, or unlink. A missing store remains missing and an unsafe mode
+fails closed rather than being repaired by a read command.
 The initial store rejects writes above its quota and does not automatically
 purge data. Reads use a separate bounded scan ceiling so write-quota exhaustion
 does not make existing content inaccessible. Doctor checks only directory and
