@@ -38,6 +38,10 @@ import {
   storeMessageBody,
 } from "./message-bodies.js";
 import {
+  evaluateInboundPolicy,
+  INBOUND_POLICY_FEATURE_ACTIVE,
+} from "./inbound-policy.js";
+import {
   findProjectByRoutingId,
   nodeKey as directoryNodeKey,
   readExecutionThread,
@@ -569,8 +573,8 @@ function ledgerRouteDelivery(record) {
   const delivery = record.delivery;
   const activeAttempt = delivery.attempts.at(-1) || null;
   const status =
-    delivery.admissionState === "quarantined"
-      ? "quarantined"
+    ["quarantined", "denied"].includes(delivery.admissionState)
+      ? delivery.admissionState
       : (["created", "scheduled"].includes(delivery.state) && activeAttempt) ||
           (delivery.state === "retryable" && delivery.attempts.length === 2)
         ? "dispatching"
@@ -585,6 +589,9 @@ function ledgerRouteDelivery(record) {
       : {}),
     ...(message.senderThreadId
       ? { senderThreadId: message.senderThreadId }
+      : {}),
+    ...(message.senderIdentitySha256
+      ? { senderIdentitySha256: message.senderIdentitySha256 }
       : {}),
     ...(message.replyToMessageId
       ? { replyToMessageId: message.replyToMessageId }
@@ -601,6 +608,9 @@ function ledgerRouteDelivery(record) {
     route: message.route,
     admissionState: delivery.admissionState,
     admissionReason: delivery.admissionReason,
+    ...(delivery.inboundPolicy
+      ? { inboundPolicy: structuredClone(delivery.inboundPolicy) }
+      : {}),
     status,
     wakeAttemptedAt: delivery.attempts[0]?.startedAt || null,
     createdAt: message.createdAt,
@@ -682,11 +692,44 @@ function routeFingerprint(route) {
   return createHash("sha256").update(JSON.stringify(route)).digest("hex");
 }
 
+function senderIdentityDigest(senderNodeKey) {
+  return createHash("sha256")
+    .update(senderNodeKey || "sender-unidentified")
+    .digest("hex");
+}
+
+function inboundSenderIdentity(senderNodeKey) {
+  if (!senderNodeKey) return { state: "unidentified" };
+  const match = /^(codex|claude):([0-9a-f-]{36})$/i.exec(senderNodeKey);
+  if (!match) throw new Error("Inbound sender Node identity is invalid");
+  const runtimeKind = match[1].toLowerCase();
+  const nativeId = match[2].toLowerCase();
+  const live = readNode(runtimeKind, nativeId);
+  const tombstone = readNodeTombstone(runtimeKind, nativeId);
+  if (!live || tombstone) {
+    return { state: "unverifiable", nodeKey: senderNodeKey };
+  }
+  return {
+    state: "verified",
+    nodeKey: live.nodeKey,
+    projectId: live.projectId,
+  };
+}
+
+function inboundDecision(targetRecord, senderNodeKey, evaluator) {
+  if (!targetRecord?.threadId || typeof evaluator !== "function") return null;
+  return evaluator({
+    targetNodeKey: directoryNodeKey("codex", targetRecord.threadId),
+    senderIdentity: inboundSenderIdentity(senderNodeKey),
+  });
+}
+
 function publicOutcome(record, extra = {}) {
+  const initiallyDenied = record.admissionState === "denied";
   return {
     logicalMessageId: record.logicalMessageId,
-    admissionState: record.admissionState,
-    reason: record.admissionReason,
+    admissionState: initiallyDenied ? "quarantined" : record.admissionState,
+    reason: initiallyDenied ? "route_rejected" : record.admissionReason,
     status: record.status,
     target: record.target,
     delivery: record.delivery,
@@ -713,6 +756,9 @@ export async function routePeerMessage(
     log = writeCoordinationEvent,
     validateTrigger = null,
     classifyRejection = classifyAppServerNegativeAcceptance,
+    policyEvaluator = INBOUND_POLICY_FEATURE_ACTIVE
+      ? evaluateInboundPolicy
+      : null,
   } = {},
 ) {
   validateName("sender", from);
@@ -743,6 +789,7 @@ export async function routePeerMessage(
   }
   const messageSha256 = createHash("sha256").update(message).digest("hex");
   const fingerprint = routeFingerprint(normalizedRoute);
+  const senderIdentitySha256 = senderIdentityDigest(senderNodeKey);
   ensureDirectory(ROUTE_DELIVERIES_DIR);
 
   let prepared;
@@ -753,12 +800,17 @@ export async function routePeerMessage(
     }
     const existing = deliveryState.record;
     if (existing) {
+      const senderIdentityMatches =
+        existing.admissionState === "denied"
+          ? existing.senderIdentitySha256 === senderIdentitySha256
+          : (existing.senderNodeKey ||
+              (existing.senderThreadId
+                ? `codex:${existing.senderThreadId.toLowerCase()}`
+                : null)) === senderNodeKey;
       if (
         existing.from !== from ||
         existing.target !== target ||
-        (existing.senderNodeKey ||
-          (existing.senderThreadId ? `codex:${existing.senderThreadId.toLowerCase()}` : null)) !==
-          senderNodeKey ||
+        !senderIdentityMatches ||
         (existing.replyToMessageId || null) !== replyToMessageId ||
         existing.messageSha256 !== messageSha256 ||
         existing.routeFingerprint !== fingerprint
@@ -787,13 +839,21 @@ export async function routePeerMessage(
         throw new Error("peer reply routing identity changed before delivery");
       }
     }
-    const decision = admission(
-      targetBinding,
-      normalizedRoute,
-      senderBinding,
+    const inbound = inboundDecision(
       targetRecord,
-      senderRecord,
+      senderNodeKey,
+      policyEvaluator,
     );
+    const decision =
+      inbound?.decision === "deny"
+        ? { state: "denied", reason: "inbound_policy" }
+        : admission(
+            targetBinding,
+            normalizedRoute,
+            senderBinding,
+            targetRecord,
+            senderRecord,
+          );
     if (
       decision.state === "admitted" &&
       normalizedRoute &&
@@ -810,6 +870,18 @@ export async function routePeerMessage(
     }
     const now = new Date().toISOString();
     const messageBytes = Buffer.byteLength(message, "utf8");
+    const verifiedSenderNodeKey =
+      inbound?.senderIdentityState === "verified"
+        ? inbound.senderNodeKey
+        : senderNodeKey;
+    const retainedSenderThreadId =
+      decision.state === "denied"
+        ? verifiedSenderNodeKey?.startsWith("codex:")
+          ? verifiedSenderNodeKey.slice("codex:".length)
+          : null
+        : senderRecord?.threadId || null;
+    const retainedSenderNodeKey =
+      decision.state === "denied" ? inbound?.senderNodeKey : senderNodeKey;
     const conversation =
       decision.state === "admitted" && senderNodeKey && targetRecord?.threadId
         ? await recordDirectMessageIfKnown({
@@ -843,8 +915,11 @@ export async function routePeerMessage(
       logicalMessage: {
         messageId: logicalMessageId,
         from,
-        senderThreadId: senderRecord?.threadId || null,
-        ...(senderNodeKey ? { senderNodeKey } : {}),
+        senderThreadId: retainedSenderThreadId,
+        ...(retainedSenderNodeKey
+          ? { senderNodeKey: retainedSenderNodeKey }
+          : {}),
+        ...(decision.state === "denied" ? { senderIdentitySha256 } : {}),
         ...(replyToMessageId ? { replyToMessageId } : {}),
         ...(conversation
           ? {
@@ -866,6 +941,7 @@ export async function routePeerMessage(
       targetThreadId: targetRecord?.threadId || null,
       admissionState: decision.state,
       admissionReason: decision.reason,
+      ...(decision.state === "denied" ? { inboundPolicy: inbound } : {}),
       wakePolicy: normalizedRoute?.wake_policy || "immediate",
       now,
     });
@@ -893,14 +969,23 @@ export async function routePeerMessage(
     return publicOutcome(prepared.existing, { deduplicated: true });
   }
   await log({
-    kind: "route-admission",
+    kind:
+      prepared.record.admissionState === "denied"
+        ? "inbound-policy"
+        : "route-admission",
     phase: "decision",
     correlationId: logicalMessageId,
     target,
     outcome: prepared.record.admissionState,
-    errorCode: prepared.record.admissionReason,
+    errorCode:
+      prepared.record.admissionState === "denied"
+        ? "EINBOUNDDENIED"
+        : prepared.record.admissionReason,
+    ...(prepared.record.admissionState === "denied"
+      ? { denialOrigin: "inbound-policy" }
+      : {}),
   });
-  if (prepared.record.admissionState === "quarantined") {
+  if (["quarantined", "denied"].includes(prepared.record.admissionState)) {
     return publicOutcome(prepared.record);
   }
   if (prepared.record.status === "scheduled") {
@@ -947,6 +1032,9 @@ export async function retryRouteDelivery(
     log = writeCoordinationEvent,
     classifyRejection = classifyAppServerNegativeAcceptance,
     now = Date.now,
+    policyEvaluator = INBOUND_POLICY_FEATURE_ACTIVE
+      ? evaluateInboundPolicy
+      : null,
   } = {},
 ) {
   validateUuid("logical message id", logicalMessageId);
@@ -996,6 +1084,30 @@ export async function retryRouteDelivery(
       prepared = { expired };
       return;
     }
+    const retrySenderNodeKey =
+      record.senderNodeKey ||
+      (record.senderThreadId
+        ? directoryNodeKey("codex", record.senderThreadId)
+        : null);
+    const inbound = inboundDecision(
+      targetRecord,
+      retrySenderNodeKey,
+      policyEvaluator,
+    );
+    if (inbound?.decision === "deny") {
+      const denied = ledgerRouteDelivery(
+        await appendDeliveryEvidence(logicalMessageId, {
+          attemptId: null,
+          state: "policy_denied",
+          evidenceKind: "inbound-policy",
+          errorCode: "EINBOUNDDENIED",
+          inboundPolicy: inbound,
+          observedAt: new Date(currentTime).toISOString(),
+        }),
+      );
+      prepared = { policyDenied: denied };
+      return;
+    }
     const attempt = await beginRetryDelivery(logicalMessageId, {
       now: new Date(currentTime).toISOString(),
     });
@@ -1012,6 +1124,19 @@ export async function retryRouteDelivery(
       errorCode: "ERETRYEXPIRED",
     });
     return publicOutcome(prepared.expired, { retryAttempted: false });
+  }
+
+  if (prepared.policyDenied) {
+    await log({
+      kind: "inbound-policy",
+      phase: "retry-decision",
+      correlationId: logicalMessageId,
+      target: prepared.policyDenied.target,
+      outcome: "denied",
+      errorCode: "EINBOUNDDENIED",
+      denialOrigin: "inbound-policy",
+    });
+    return publicOutcome(prepared.policyDenied, { retryAttempted: false });
   }
 
   await log({

@@ -16,6 +16,8 @@ const TERMINAL_DELIVERY_STATES = new Set([
   "failed",
   "expired",
   "cancelled",
+  "denied",
+  "policy_denied",
 ]);
 
 function timestamp(label, value) {
@@ -195,7 +197,10 @@ export function planRetention(
         record.delivery.admissionState === "quarantined" &&
         coupledQuarantineIds.has(messageId);
       if (
-        deliveries.some((delivery) => delivery.admissionState !== "admitted") &&
+        deliveries.some(
+          (delivery) =>
+            !["admitted", "denied"].includes(delivery.admissionState),
+        ) &&
         !coupledQuarantine
       ) {
         addReason(reasons, "quarantined_delivery");

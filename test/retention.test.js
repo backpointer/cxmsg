@@ -19,6 +19,8 @@ const ids = {
   quarantine: "81345678-1234-4234-8234-123456789abc",
   conversation: "a1345678-1234-4234-8234-123456789abc",
   delegatedTask: "b1345678-1234-4234-8234-123456789abc",
+  denied: "c1345678-1234-4234-8234-123456789abc",
+  policyDenied: "d1345678-1234-4234-8234-123456789abc",
 };
 
 function delivery(messageId, state, updatedAt = OLD, replyToMessageId = null) {
@@ -166,4 +168,32 @@ test("retention planning enforces minimum ages and keeps mutation in a separate 
     [ids.orphanBody],
   );
   assert.equal("purge" in retention, false);
+});
+
+test("terminal Inbound Policy denials follow ordinary Ledger retention", () => {
+  const initiallyDenied = delivery(ids.denied, "denied");
+  initiallyDenied.delivery.admissionState = "denied";
+  const deniedAfterRetry = delivery(ids.policyDenied, "policy_denied");
+  deniedAfterRetry.logicalMessage.body.contentRef =
+    `cxmsg-message:${ids.policyDenied}`;
+  const plan = retention.planRetention(
+    {
+      before: BEFORE,
+      scope: "all",
+      ledger: [initiallyDenied, deniedAfterRetry],
+      bodies: [body(ids.policyDenied)],
+      quarantine: [],
+      jobs: [],
+    },
+    { now: NOW },
+  );
+
+  assert.deepEqual(
+    plan.categories.ledger.eligible.map((candidate) => candidate.messageId),
+    [ids.denied, ids.policyDenied],
+  );
+  assert.deepEqual(
+    plan.categories.bodies.eligible.map((candidate) => candidate.messageId),
+    [ids.policyDenied],
+  );
 });

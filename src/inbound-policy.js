@@ -32,6 +32,7 @@ export const INBOUND_POLICY_MAX_RECORDS = 1024;
 export const INBOUND_POLICY_MAX_RULES = 4096;
 export const INBOUND_POLICY_MAX_RULES_PER_TARGET = 256;
 export const INBOUND_POLICY_TRANSIENT_GRACE_MS = 30_000;
+export const INBOUND_POLICY_FEATURE_ACTIVE = false;
 
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;

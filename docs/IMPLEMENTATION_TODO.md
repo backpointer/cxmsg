@@ -349,8 +349,8 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 
 ### Post-roadmap extension — Inbound Peer Message Policy
 
-- Status: SLICE 1 IMPLEMENTED; independent focused audit PASS; public
-  activation disabled
+- Status: SLICES 1-2 IMPLEMENTED; Slice 1 independent focused audit PASS;
+  public activation disabled
 
 - [x] Independently review `docs/INBOUND_PEER_POLICY_V1.md` for identity,
       privacy, authority, deduplication, fan-out, scheduling, and retention
@@ -360,13 +360,13 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Close the initial Adapter audit findings: final-rule deletion,
       exact-digest invalid-record purge, transient-file diagnostics, verified
       evidence projection, stable evaluator shape, and internal-only exports.
-- [ ] Before Slice 2 activation, hash stable Node and Project identities in
-      ordinary event projections rather than logging full keys.
+- [x] Keep stable Node and Project identities out of ordinary denial events;
+      retain only bounded error code and denial origin in that projection.
 - [ ] Align legacy storage Modules with the new fail-closed `O_NOFOLLOW`
       portability rule and define an explicit stale-policy-artifact cleanup
       procedure without automatic repair.
-- [ ] Integrate direct Codex and Claude ordinary ingress with metadata-only
-      terminal denial.
+- [x] Integrate direct Codex and Claude ordinary ingress plus Explicit Retry
+      with metadata-only terminal denial behind the inactive cross-path gate.
 - [ ] Revalidate scheduled recipients, integrate Group and Team fan-out, then
       activate the public CLI only after the cross-path gate passes.
 - [ ] Add redacted trace, graph, and web projections only after core evidence

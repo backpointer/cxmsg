@@ -19,6 +19,9 @@ const routes = await import(`../src/route-admission.js?test=${Date.now()}`);
 const policy = await import(`../src/delivery-policy.js?test=${Date.now()}`);
 const ledger = await import(`../src/delivery-ledger.js?route-test=${Date.now()}`);
 const registry = await import(`../src/registry.js?route-test=${Date.now()}`);
+const directory = await import(`../src/node-directory.js?route-test=${Date.now()}`);
+const inbound = await import(`../src/inbound-policy.js?route-test=${Date.now()}`);
+const bodies = await import(`../src/message-bodies.js?route-test=${Date.now()}`);
 registry.writeSessionRecord({
   name: "worker",
   threadId: "81345678-1234-4234-8234-123456789abc",
@@ -52,6 +55,33 @@ registry.writeSessionRecord({
 registry.writeSessionRecord({
   name: "bound-responder",
   threadId: "e9345678-1234-4234-8234-123456789abc",
+  cwd: path.resolve("."),
+});
+const policyProjectId = "7e345678-1234-4234-8234-123456789abc";
+await directory.ensureProject({
+  routingId: "route-policy",
+  root: path.resolve("."),
+  projectId: policyProjectId,
+});
+for (const [name, threadId] of [
+  ["policy-sender", "8e345678-1234-4234-8234-123456789abc"],
+  ["policy-worker", "9e345678-1234-4234-8234-123456789abc"],
+  ["policy-retry-sender", "ae345678-1234-4234-8234-123456789abc"],
+  ["policy-retry-worker", "be345678-1234-4234-8234-123456789abc"],
+  ["policy-invalid-worker", "ce345678-1234-4234-8234-123456789abc"],
+  ["policy-project-worker", "de345678-1234-4234-8234-123456789abc"],
+]) {
+  registry.writeSessionRecord({ name, threadId, cwd: path.resolve(".") });
+  await directory.upsertNode({
+    runtimeKind: "codex",
+    nativeId: threadId,
+    displayName: name,
+    projectId: policyProjectId,
+  });
+}
+registry.writeSessionRecord({
+  name: "policy-unverified-sender",
+  threadId: "ee345678-1234-4234-8234-123456789abc",
   cwd: path.resolve("."),
 });
 
@@ -94,6 +124,14 @@ const ids = {
   retryUnknown: "0e345678-1234-4234-8234-123456789abc",
   retryExpired: "2e345678-1234-4234-8234-123456789abc",
   retryCrash: "3e345678-1234-4234-8234-123456789abc",
+  policyDenied: "4e345678-1234-4234-8234-123456789abc",
+  policyRetry: "5e345678-1234-4234-8234-123456789abc",
+  policyReplyOriginal: "6e345678-1234-4234-8234-123456789abc",
+  policyReply: "6f345678-1234-4234-8234-123456789abc",
+  policyInvalid: "7a345678-1234-4234-8234-123456789abc",
+  policyInactive: "7b345678-1234-4234-8234-123456789abc",
+  policyScheduled: "7d345678-1234-4234-8234-123456789abc",
+  policyUnverifiable: "7e345678-2234-4234-8234-123456789abc",
 };
 
 function route(messageId, changes = {}) {
@@ -106,6 +144,20 @@ function route(messageId, changes = {}) {
     wake_policy: "immediate",
     ...changes,
   };
+}
+
+async function ensurePolicySenderDeny() {
+  return inbound.upsertInboundDenyRule({
+    targetNodeKey: directory.nodeKey(
+      "codex",
+      "9e345678-1234-4234-8234-123456789abc",
+    ),
+    selectorKind: "sender-node",
+    selectorValue: directory.nodeKey(
+      "codex",
+      "8e345678-1234-4234-8234-123456789abc",
+    ),
+  });
 }
 
 test("unbound targets remain compatible and logical messages wake at most once", async () => {
@@ -143,6 +195,266 @@ test("unbound targets remain compatible and logical messages wake at most once",
   assert.equal(duplicate.deduplicated, true);
   assert.equal(duplicate.status, "turn_started");
   assert.equal(dispatches, 1);
+});
+
+test("Inbound Policy denial is metadata-only, idempotent, and starts zero attempts", async () => {
+  const senderNodeKey = directory.nodeKey(
+    "codex",
+    "8e345678-1234-4234-8234-123456789abc",
+  );
+  const targetNodeKey = directory.nodeKey(
+    "codex",
+    "9e345678-1234-4234-8234-123456789abc",
+  );
+  await ensurePolicySenderDeny();
+  const events = [];
+  let dispatches = 0;
+  const deliver = () => {
+    dispatches += 1;
+    throw new Error("policy-denied message must not dispatch");
+  };
+  const input = {
+    from: "policy-sender",
+    target: "policy-worker",
+    message: "private policy-denied body",
+    logicalMessageId: ids.policyDenied,
+  };
+  const first = await routes.routePeerMessage(input, deliver, {
+    log: async (event) => events.push(event),
+    policyEvaluator: inbound.evaluateInboundPolicy,
+  });
+  const duplicate = await routes.routePeerMessage(input, deliver, {
+    policyEvaluator: inbound.evaluateInboundPolicy,
+  });
+
+  assert.equal(first.admissionState, "quarantined");
+  assert.equal(first.reason, "route_rejected");
+  assert.equal(first.status, "denied");
+  assert.equal(first.denialOrigin, undefined);
+  assert.equal(duplicate.deduplicated, true);
+  assert.equal(dispatches, 0);
+  assert.deepEqual(events, [
+    {
+      kind: "inbound-policy",
+      phase: "decision",
+      correlationId: ids.policyDenied,
+      target: "policy-worker",
+      outcome: "denied",
+      errorCode: "EINBOUNDDENIED",
+      denialOrigin: "inbound-policy",
+    },
+  ]);
+
+  const routed = routes.readRouteDelivery(ids.policyDenied);
+  assert.equal(routed.admissionState, "denied");
+  assert.equal(routed.status, "denied");
+  assert.equal(routed.attemptCount, 0);
+  assert.equal(routed.contentRef, null);
+  assert.equal(routed.inboundPolicy.reason, "sender_denied");
+  assert.equal(routed.inboundPolicy.senderNodeKey, senderNodeKey);
+  assert.equal(routed.inboundPolicy.targetNodeKey, targetNodeKey);
+  assert.throws(
+    () => bodies.messageBodyInfo(`cxmsg-message:${ids.policyDenied}`),
+    /unknown message body/,
+  );
+  assert.equal(
+    routes.listQuarantine().some(
+      (record) => record.logicalMessageId === ids.policyDenied,
+    ),
+    false,
+  );
+  await assert.rejects(
+    routes.routePeerMessage(
+      { ...input, message: "changed denied body" },
+      deliver,
+      { policyEvaluator: inbound.evaluateInboundPolicy },
+    ),
+    /idempotency conflict/,
+  );
+});
+
+test("Slice 2 integration remains inactive without the cross-path feature gate", async () => {
+  await ensurePolicySenderDeny();
+  assert.equal(inbound.INBOUND_POLICY_FEATURE_ACTIVE, false);
+  let dispatches = 0;
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "policy-sender",
+      target: "policy-worker",
+      message: "inactive policy integration baseline",
+      logicalMessageId: ids.policyInactive,
+    },
+    async () => {
+      dispatches += 1;
+      return {
+        delivery: "started",
+        turnId: "7c345678-1234-4234-8234-123456789abc",
+      };
+    },
+  );
+  assert.equal(outcome.admissionState, "admitted");
+  assert.equal(outcome.status, "turn_started");
+  assert.equal(dispatches, 1);
+});
+
+test("initial scheduled ingress is denied before Trigger validation or queueing", async () => {
+  await ensurePolicySenderDeny();
+  let triggerChecks = 0;
+  let dispatches = 0;
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "policy-sender",
+      target: "policy-worker",
+      message: "scheduled body denied before queueing",
+      logicalMessageId: ids.policyScheduled,
+      route: route(ids.policyScheduled, {
+        wake_policy: "after-job",
+        expiry: new Date(Date.now() + 60_000).toISOString(),
+        trigger_job_id: "8d345678-1234-4234-8234-123456789abc",
+      }),
+    },
+    async () => {
+      dispatches += 1;
+    },
+    {
+      policyEvaluator: inbound.evaluateInboundPolicy,
+      validateTrigger: async () => {
+        triggerChecks += 1;
+      },
+    },
+  );
+
+  assert.equal(outcome.status, "denied");
+  assert.equal(triggerChecks, 0);
+  assert.equal(dispatches, 0);
+  const retained = routes.readRouteDelivery(ids.policyScheduled);
+  assert.equal(retained.status, "denied");
+  assert.equal(retained.attemptCount, 0);
+  assert.equal(retained.claim, null);
+  assert.equal(retained.contentRef, null);
+});
+
+test("a direct reply cannot bypass the recipient Inbound Policy", async () => {
+  await ensurePolicySenderDeny();
+  let replyHandle = null;
+  await routes.routePeerMessage(
+    {
+      from: "policy-worker",
+      target: "policy-sender",
+      message: "request a policy-filtered reply",
+      logicalMessageId: ids.policyReplyOriginal,
+    },
+    async ({ replyHandle: handle }) => {
+      replyHandle = handle;
+      return {
+        delivery: "started",
+        turnId: "7f345678-1234-4234-8234-123456789abc",
+      };
+    },
+    { policyEvaluator: inbound.evaluateInboundPolicy },
+  );
+  assert.match(replyHandle, /^m:/);
+  const reply = routes.planPeerReply({
+    from: "policy-sender",
+    replyToMessageId: replyHandle,
+    logicalMessageId: ids.policyReply,
+  });
+  let dispatches = 0;
+  const denied = await routes.routePeerMessage(
+    { ...reply, message: "reply denied by stable sender Node" },
+    async () => {
+      dispatches += 1;
+    },
+    { policyEvaluator: inbound.evaluateInboundPolicy },
+  );
+
+  assert.equal(denied.admissionState, "quarantined");
+  assert.equal(denied.status, "denied");
+  assert.equal(dispatches, 0);
+  const retained = routes.readRouteDelivery(ids.policyReply);
+  assert.equal(retained.replyToMessageId, ids.policyReplyOriginal);
+  assert.equal(retained.inboundPolicy.reason, "sender_denied");
+  assert.equal(retained.replyHandle, null);
+});
+
+test("an invalid Inbound Policy fails closed before body retention or dispatch", async () => {
+  const targetNodeKey = directory.nodeKey(
+    "codex",
+    "ce345678-1234-4234-8234-123456789abc",
+  );
+  await inbound.upsertInboundDenyRule({
+    targetNodeKey,
+    selectorKind: "unknown-sender",
+  });
+  writeFileSync(
+    path.join(
+      inbound.INBOUND_POLICIES_DIR,
+      inbound.inboundPolicyFilename(targetNodeKey),
+    ),
+    "{}\n",
+  );
+  let dispatches = 0;
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "policy-sender",
+      target: "policy-invalid-worker",
+      message: "body must not survive invalid policy",
+      logicalMessageId: ids.policyInvalid,
+    },
+    async () => {
+      dispatches += 1;
+    },
+    { policyEvaluator: inbound.evaluateInboundPolicy },
+  );
+
+  assert.equal(outcome.admissionState, "quarantined");
+  assert.equal(outcome.reason, "route_rejected");
+  assert.equal(dispatches, 0);
+  const retained = routes.readRouteDelivery(ids.policyInvalid);
+  assert.equal(retained.inboundPolicy.reason, "policy_invalid");
+  assert.equal(retained.contentRef, null);
+  assert.equal(retained.attemptCount, 0);
+  assert.throws(
+    () => bodies.messageBodyInfo(`cxmsg-message:${ids.policyInvalid}`),
+    /unknown message body/,
+  );
+  await inbound.purgeInboundPolicyRecord({
+    targetNodeKey,
+    confirmSha256: createHash("sha256").update("{}\n").digest("hex"),
+  });
+});
+
+test("a sender-Project rule fails closed when a claimed sender Node is unverifiable", async () => {
+  const targetNodeKey = directory.nodeKey(
+    "codex",
+    "de345678-1234-4234-8234-123456789abc",
+  );
+  await inbound.upsertInboundDenyRule({
+    targetNodeKey,
+    selectorKind: "sender-project",
+    selectorValue: policyProjectId,
+  });
+  let dispatches = 0;
+  const outcome = await routes.routePeerMessage(
+    {
+      from: "policy-unverified-sender",
+      target: "policy-project-worker",
+      message: "unverifiable sender claim",
+      logicalMessageId: ids.policyUnverifiable,
+    },
+    async () => {
+      dispatches += 1;
+    },
+    { policyEvaluator: inbound.evaluateInboundPolicy },
+  );
+
+  assert.equal(outcome.status, "denied");
+  assert.equal(dispatches, 0);
+  const retained = routes.readRouteDelivery(ids.policyUnverifiable);
+  assert.equal(retained.inboundPolicy.reason, "identity_unverifiable");
+  assert.equal(retained.inboundPolicy.senderNodeKey, null);
+  assert.equal(retained.senderNodeKey, undefined);
+  assert.match(retained.senderIdentitySha256, /^[0-9a-f]{64}$/);
 });
 
 const negativeAcceptance = (error) =>
@@ -214,6 +526,75 @@ test("a proven rejection permits exactly one explicit retry with the retained bo
   await assert.rejects(
     routes.retryRouteDelivery(ids.retryAccepted, async () => ({})),
     /not eligible/,
+  );
+});
+
+test("a new Inbound Policy denial terminally blocks Explicit Retry without another attempt", async () => {
+  await assert.rejects(
+    routes.routePeerMessage(
+      {
+        from: "policy-retry-sender",
+        target: "policy-retry-worker",
+        message: "retain this retry body",
+        logicalMessageId: ids.policyRetry,
+      },
+      async () => {
+        throw Object.assign(new Error("active turn changed"), {
+          code: "ESTALEACTIVE",
+        });
+      },
+      { classifyRejection: negativeAcceptance },
+    ),
+    /active turn changed/,
+  );
+  const before = routes.readRouteDelivery(ids.policyRetry);
+  assert.equal(before.status, "retryable");
+  assert.equal(before.attemptCount, 1);
+  const senderNodeKey = directory.nodeKey(
+    "codex",
+    "ae345678-1234-4234-8234-123456789abc",
+  );
+  await inbound.upsertInboundDenyRule({
+    targetNodeKey: directory.nodeKey(
+      "codex",
+      "be345678-1234-4234-8234-123456789abc",
+    ),
+    selectorKind: "sender-node",
+    selectorValue: senderNodeKey,
+  });
+
+  let dispatches = 0;
+  const outcome = await routes.retryRouteDelivery(
+    ids.policyRetry,
+    async () => {
+      dispatches += 1;
+    },
+    {
+      now: () =>
+        Date.parse(before.updatedAt) + policy.ORDINARY_RETRY_MIN_DELAY_MS,
+      policyEvaluator: inbound.evaluateInboundPolicy,
+    },
+  );
+  assert.equal(outcome.status, "policy_denied");
+  assert.equal(outcome.retryAttempted, false);
+  assert.equal(outcome.attemptCount, 1);
+  assert.equal(dispatches, 0);
+
+  const retained = ledger.readDeliveryLedger(ids.policyRetry);
+  assert.equal(retained.delivery.state, "policy_denied");
+  assert.equal(retained.delivery.attempts.length, 1);
+  assert.equal(
+    retained.logicalMessage.body.contentRef,
+    `cxmsg-message:${ids.policyRetry}`,
+  );
+  assert.equal(retained.delivery.evidence.at(-1).attemptId, null);
+  assert.equal(
+    retained.delivery.evidence.at(-1).inboundPolicy.reason,
+    "sender_denied",
+  );
+  assert.equal(
+    "contentRef" in retained.delivery.evidence.at(-1).inboundPolicy,
+    false,
   );
 });
 

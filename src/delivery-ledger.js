@@ -69,6 +69,19 @@ const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 const NODE_KEY_PATTERN = /^(codex|claude):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i;
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
+const INBOUND_POLICY_REASONS = new Set([
+  "policy_invalid",
+  "sender_denied",
+  "project_denied",
+  "identity_unverifiable",
+  "sender_unidentified",
+  "sender_unverifiable",
+]);
+const INBOUND_POLICY_SELECTOR_KINDS = new Set([
+  "sender-node",
+  "sender-project",
+  "unknown-sender",
+]);
 const REPLY_HANDLE_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 export const REPLY_HANDLE_PATTERN = /^m:[0-9A-HJKMNP-TV-Z]{10}$/;
 const CLAIM_RELEASE_REASONS = new Set(["target_busy", "worker_stopping", "dispatch_unavailable"]);
@@ -157,6 +170,97 @@ function validBody(body, messageId) {
   );
 }
 
+function validInboundPolicyDenial(evidence) {
+  if (
+    !evidence ||
+    evidence.decision !== "deny" ||
+    !INBOUND_POLICY_REASONS.has(evidence.reason) ||
+    !NODE_KEY_PATTERN.test(evidence.targetNodeKey || "") ||
+    !["verified", "unidentified", "unverifiable"].includes(
+      evidence.senderIdentityState,
+    ) ||
+    (evidence.senderNodeKey !== null &&
+      !NODE_KEY_PATTERN.test(evidence.senderNodeKey || "")) ||
+    (evidence.senderProjectId !== null &&
+      !UUID_PATTERN.test(evidence.senderProjectId || "")) ||
+    (evidence.policyRevision !== null &&
+      (!Number.isSafeInteger(evidence.policyRevision) ||
+        evidence.policyRevision < 1)) ||
+    (evidence.policySha256 !== null &&
+      !SHA256_PATTERN.test(evidence.policySha256 || "")) ||
+    (evidence.ruleId !== null && !UUID_PATTERN.test(evidence.ruleId || "")) ||
+    (evidence.selectorKind !== null &&
+      !INBOUND_POLICY_SELECTOR_KINDS.has(evidence.selectorKind)) ||
+    typeof evidence.failClosed !== "boolean" ||
+    !Object.keys(evidence).every((field) =>
+      [
+        "decision",
+        "reason",
+        "targetNodeKey",
+        "senderIdentityState",
+        "senderNodeKey",
+        "senderProjectId",
+        "policyRevision",
+        "policySha256",
+        "ruleId",
+        "selectorKind",
+        "failClosed",
+      ].includes(field),
+    )
+  ) {
+    return false;
+  }
+  const verifiedIdentity = Boolean(
+    evidence.senderNodeKey && evidence.senderProjectId,
+  );
+  if ((evidence.senderIdentityState === "verified") !== verifiedIdentity) {
+    return false;
+  }
+  if (evidence.reason === "policy_invalid") {
+    return Boolean(
+      evidence.policyRevision === null &&
+        evidence.policySha256 === null &&
+        evidence.ruleId === null &&
+        evidence.selectorKind === null &&
+        evidence.failClosed,
+    );
+  }
+  if (
+    !Number.isSafeInteger(evidence.policyRevision) ||
+    !SHA256_PATTERN.test(evidence.policySha256 || "")
+  ) {
+    return false;
+  }
+  if (evidence.reason === "identity_unverifiable") {
+    return Boolean(
+      evidence.senderIdentityState === "unverifiable" &&
+      evidence.ruleId === null &&
+        evidence.selectorKind === null &&
+        evidence.failClosed,
+    );
+  }
+  if (evidence.failClosed || !evidence.ruleId) return false;
+  if (evidence.reason === "sender_denied") {
+    return (
+      evidence.senderIdentityState === "verified" &&
+      evidence.selectorKind === "sender-node"
+    );
+  }
+  if (evidence.reason === "project_denied") {
+    return (
+      evidence.senderIdentityState === "verified" &&
+      evidence.selectorKind === "sender-project"
+    );
+  }
+  return Boolean(
+    ["sender_unidentified", "sender_unverifiable"].includes(
+      evidence.reason,
+    ) &&
+      evidence.senderIdentityState !== "verified" &&
+      evidence.selectorKind === "unknown-sender",
+  );
+}
+
 function validSenderNode(message) {
   if (message.senderNodeKey === undefined) return true;
   const match = /^(codex|claude):([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})$/i.exec(
@@ -167,6 +271,13 @@ function validSenderNode(message) {
     return message.senderThreadId?.toLowerCase() === match[2].toLowerCase();
   }
   return message.senderThreadId === null || message.senderThreadId === undefined;
+}
+
+function validSenderIdentityDigest(message) {
+  return (
+    message.senderIdentitySha256 === undefined ||
+    SHA256_PATTERN.test(message.senderIdentitySha256 || "")
+  );
 }
 
 function validConversationProjection(message) {
@@ -190,12 +301,24 @@ function validInitialDelivery(delivery, message, { storeOnly = false } = {}) {
         delivery.replyHandle === null ||
         (delivery.admissionState === "admitted" &&
           REPLY_HANDLE_PATTERN.test(delivery.replyHandle))) &&
-      ["admitted", "quarantined"].includes(delivery.admissionState) &&
+      ["admitted", "quarantined", "denied"].includes(
+        delivery.admissionState,
+      ) &&
       typeof delivery.admissionReason === "string" &&
       validTimestamp(delivery.createdAt) &&
       delivery.createdAt === delivery.updatedAt,
   );
   if (!common) return false;
+  if (delivery.admissionState === "denied") {
+    return Boolean(
+      delivery.replyHandle === null &&
+        delivery.state === "denied" &&
+        delivery.admissionReason === "inbound_policy" &&
+        message.body.contentRef === null &&
+        validInboundPolicyDenial(delivery.inboundPolicy),
+    );
+  }
+  if (delivery.inboundPolicy !== undefined) return false;
   if (storeOnly) {
     const targetIdentity = NODE_KEY_PATTERN.exec(delivery.targetNodeKey || "");
     return Boolean(
@@ -414,6 +537,7 @@ function validBatch(record) {
         message.senderThreadId === null ||
         UUID_PATTERN.test(message.senderThreadId || "")) &&
       validSenderNode(message) &&
+      validSenderIdentityDigest(message) &&
       validConversationProjection(message) &&
       (message.replyToMessageId === undefined ||
         (UUID_PATTERN.test(message.replyToMessageId || "") &&
@@ -558,14 +682,40 @@ function validEvidence(record) {
       UUID_PATTERN.test(record.messageId || "") &&
       UUID_PATTERN.test(record.deliveryId || "") &&
       (record.attemptId === null || UUID_PATTERN.test(record.attemptId || "")) &&
-      ["turn_started", "retryable", "failed", "unknown", "expired", "cancelled"].includes(record.state) &&
-      ["dispatch-result", "negative-acceptance", "reconciliation", "retry-policy", "scheduler"].includes(record.evidenceKind) &&
+      [
+        "turn_started",
+        "retryable",
+        "failed",
+        "unknown",
+        "expired",
+        "cancelled",
+        "policy_denied",
+      ].includes(record.state) &&
+      [
+        "dispatch-result",
+        "negative-acceptance",
+        "reconciliation",
+        "retry-policy",
+        "scheduler",
+        "inbound-policy",
+      ].includes(record.evidenceKind) &&
       (record.turnId === null || UUID_PATTERN.test(record.turnId || "")) &&
       (record.transportResult === null || typeof record.transportResult === "string") &&
       (record.errorCode === null || /^[A-Z0-9_]{1,32}$/.test(record.errorCode || "")) &&
       validTimestamp(record.observedAt)
   );
   if (!common) return false;
+  if (record.evidenceKind === "inbound-policy") {
+    return Boolean(
+      record.state === "policy_denied" &&
+        record.attemptId === null &&
+        record.turnId === null &&
+        record.transportResult === null &&
+        record.errorCode === "EINBOUNDDENIED" &&
+        validInboundPolicyDenial(record.inboundPolicy),
+    );
+  }
+  if (record.inboundPolicy !== undefined) return false;
   if (
     record.evidenceKind !== "negative-acceptance" &&
     record.negativeAcceptanceContract !== undefined
@@ -1106,7 +1256,12 @@ function validIndexProjection(projection, messageId) {
         ),
     );
   }
-  const initialState = delivery.wakePolicy === "immediate" ? "created" : "scheduled";
+  const initialState =
+    delivery.admissionState === "denied"
+      ? "denied"
+      : delivery.wakePolicy === "immediate"
+        ? "created"
+        : "scheduled";
   const baseDelivery = {
     ...structuredClone(delivery),
     state: initialState,
@@ -1122,7 +1277,18 @@ function validIndexProjection(projection, messageId) {
   };
   if (
     !validBatch(baseBatch) ||
-    !["created", "scheduled", "turn_started", "retryable", "failed", "unknown", "expired", "cancelled"].includes(
+    ![
+      "created",
+      "scheduled",
+      "turn_started",
+      "retryable",
+      "failed",
+      "unknown",
+      "expired",
+      "cancelled",
+      "denied",
+      "policy_denied",
+    ].includes(
       delivery.state,
     ) ||
     !validTimestamp(delivery.updatedAt) ||
@@ -1737,7 +1903,14 @@ function applyDeliveryEvent(projected, record) {
     !(
       (current === "created" && ["turn_started", "retryable", "unknown"].includes(record.state)) ||
       (current === "scheduled" && ["turn_started", "unknown"].includes(record.state)) ||
-      (current === "retryable" && ["turn_started", "failed", "unknown", "expired"].includes(record.state)) ||
+      (current === "retryable" &&
+        [
+          "turn_started",
+          "failed",
+          "unknown",
+          "expired",
+          "policy_denied",
+        ].includes(record.state)) ||
       (current === "scheduled" && ["expired", "cancelled"].includes(record.state)) ||
       (current === "unknown" && ["turn_started", "unknown"].includes(record.state)) ||
       (current === "turn_started" && record.state === "turn_started") ||
@@ -1747,8 +1920,10 @@ function applyDeliveryEvent(projected, record) {
     throw new Error(`invalid Delivery evidence transition: ${current}->${record.state}`);
   }
   if (
-    (record.state === "retryable" && projected.delivery.attempts.length !== 1) ||
-    (record.state === "failed" && projected.delivery.attempts.length !== 2) ||
+      (record.state === "retryable" && projected.delivery.attempts.length !== 1) ||
+      (record.state === "failed" && projected.delivery.attempts.length !== 2) ||
+      (record.state === "policy_denied" &&
+        projected.delivery.attempts.length !== 1) ||
     (record.evidenceKind === "retry-policy" &&
       projected.delivery.attempts.length !== 1)
   ) {
@@ -1987,6 +2162,7 @@ export async function commitSingleRecipientDelivery(
     targetThreadId = null,
     admissionState,
     admissionReason,
+    inboundPolicy = null,
     wakePolicy = "immediate",
     now = new Date().toISOString(),
   },
@@ -2009,8 +2185,14 @@ export async function commitSingleRecipientDelivery(
   if (!NAME_PATTERN.test(logicalMessage?.from || "")) throw new Error("invalid Ledger sender");
   if (!NAME_PATTERN.test(target || "")) throw new Error("invalid Ledger target");
   if (targetThreadId !== null) validateUuid("target thread id", targetThreadId);
-  if (!["admitted", "quarantined"].includes(admissionState)) {
+  if (!["admitted", "quarantined", "denied"].includes(admissionState)) {
     throw new Error("invalid Delivery admission state");
+  }
+  if (
+    (admissionState === "denied" && !validInboundPolicyDenial(inboundPolicy)) ||
+    (admissionState !== "denied" && inboundPolicy !== null)
+  ) {
+    throw new Error("invalid Inbound Policy denial evidence");
   }
   if (!["immediate", ...SCHEDULED_WAKE_POLICIES].includes(wakePolicy)) {
     throw new Error("Ledger v1 does not support this wake policy");
@@ -2043,6 +2225,8 @@ export async function commitSingleRecipientDelivery(
         existing.delivery.targetThreadId !== targetThreadId ||
         existing.delivery.admissionState !== admissionState ||
         existing.delivery.admissionReason !== admissionReason ||
+        JSON.stringify(existing.delivery.inboundPolicy || null) !==
+          JSON.stringify(inboundPolicy) ||
         existing.delivery.wakePolicy !== wakePolicy
       ) {
         throw new Error(`Delivery Ledger idempotency conflict: ${logicalMessage.messageId}`);
@@ -2107,8 +2291,16 @@ export async function commitSingleRecipientDelivery(
           replyHandle,
           admissionState,
           admissionReason,
+          ...(inboundPolicy
+            ? { inboundPolicy: structuredClone(inboundPolicy) }
+            : {}),
           wakePolicy,
-          state: wakePolicy === "immediate" ? "created" : "scheduled",
+          state:
+            admissionState === "denied"
+              ? "denied"
+              : wakePolicy === "immediate"
+                ? "created"
+                : "scheduled",
           createdAt: now,
           updatedAt: now,
         },
@@ -3051,6 +3243,7 @@ export async function appendDeliveryEvidence(
     transportResult = null,
     errorCode = null,
     negativeAcceptanceContract = undefined,
+    inboundPolicy = undefined,
     observedAt = new Date().toISOString(),
   },
   options = {},
@@ -3074,6 +3267,9 @@ export async function appendDeliveryEvidence(
       transportResult,
       errorCode,
       ...(negativeAcceptanceContract ? { negativeAcceptanceContract } : {}),
+      ...(inboundPolicy
+        ? { inboundPolicy: structuredClone(inboundPolicy) }
+        : {}),
       observedAt,
     };
     if (!validEvidence(event)) throw new Error("invalid Delivery evidence");
@@ -3084,6 +3280,8 @@ export async function appendDeliveryEvidence(
       record.delivery.transportResult === transportResult &&
       (record.delivery.evidence.at(-1)?.negativeAcceptanceContract || null) ===
         (negativeAcceptanceContract || null) &&
+      JSON.stringify(record.delivery.evidence.at(-1)?.inboundPolicy || null) ===
+        JSON.stringify(inboundPolicy || null) &&
       record.delivery.evidence.at(-1)?.evidenceKind === evidenceKind
     ) {
       return record;

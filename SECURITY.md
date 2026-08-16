@@ -155,10 +155,12 @@ after an attempt is durably marked, including when the first outcome is
 uncertain.
 
 Inbound Peer Message Policy remains internally staged and inactive. Its
-owner-private Adapter and pure evaluator create no public mutation or routing
-authority. Doctor fails with `EINBOUNDPOLICYINACTIVE` if a policy record exists
-before every ordinary Peer Message path is integrated. A staged policy record
-must never be represented as effective enforcement.
+owner-private Adapter, evaluator, and direct/Explicit-Retry integration create
+no public mutation or routing authority. Integration tests inject the evaluator
+explicitly; production routing keeps the single cross-path feature gate off.
+Doctor fails with `EINBOUNDPOLICYINACTIVE` if a policy record exists before
+every ordinary Peer Message path is integrated. A staged policy record must
+never be represented as effective enforcement.
 Policy configuration and denial evidence have separate lifetimes: removing an
 empty or exact-digest-confirmed invalid configuration record never removes
 Delivery Ledger evidence, retained bodies, tombstones, or audit events.

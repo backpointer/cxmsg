@@ -117,6 +117,64 @@ test("a Logical Message and its recipient Delivery commit in one private journal
   assert.doesNotMatch(lines[0], /private coordination body/);
 });
 
+test("metadata-only Inbound Policy denial evidence has a closed identity schema", async () => {
+  const senderNodeKey = `codex:${ids.sourceThread}`;
+  const targetNodeKey = `codex:${ids.targetThread}`;
+  const denied = {
+    schemaVersion: 1,
+    recordType: "ledger-batch",
+    batchId: "91345678-2234-4234-8234-123456789abc",
+    logicalMessage: {
+      ...logicalMessage(),
+      senderNodeKey,
+      senderIdentitySha256: createHash("sha256")
+        .update(senderNodeKey)
+        .digest("hex"),
+    },
+    deliveries: [
+      {
+        deliveryId: "a1345678-2234-4234-8234-123456789abc",
+        target: "auditor",
+        targetThreadId: ids.targetThread,
+        replyHandle: null,
+        admissionState: "denied",
+        admissionReason: "inbound_policy",
+        inboundPolicy: {
+          decision: "deny",
+          reason: "sender_denied",
+          targetNodeKey,
+          senderIdentityState: "verified",
+          senderNodeKey,
+          senderProjectId: "71345678-1234-4234-8234-123456789abc",
+          policyRevision: 1,
+          policySha256: "a".repeat(64),
+          ruleId: "81345678-2234-4234-8234-123456789abc",
+          selectorKind: "sender-node",
+          failClosed: false,
+        },
+        wakePolicy: "immediate",
+        state: "denied",
+        createdAt: "2026-08-14T00:00:00.000Z",
+        updatedAt: "2026-08-14T00:00:00.000Z",
+      },
+    ],
+    committedAt: "2026-08-14T00:00:00.000Z",
+  };
+
+  assert.equal(ledger.validDeliveryLedgerRecord(denied), true);
+
+  const claimedUnverifiedIdentity = structuredClone(denied);
+  claimedUnverifiedIdentity.deliveries[0].inboundPolicy.senderIdentityState =
+    "unverifiable";
+  assert.equal(
+    ledger.validDeliveryLedgerRecord(claimedUnverifiedIdentity),
+    false,
+  );
+  const extendedEvidence = structuredClone(denied);
+  extendedEvidence.deliveries[0].inboundPolicy.unboundedDetail = "forbidden";
+  assert.equal(ledger.validDeliveryLedgerRecord(extendedEvidence), false);
+});
+
 test("reply handles are recipient-scoped and collisions are retried", async () => {
   const first = await ledger.commitSingleRecipientDelivery(
     {

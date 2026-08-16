@@ -1,6 +1,7 @@
 # Inbound Peer Message Policy v1
 
-Status: independently reviewed contract; implementation not started
+Status: Slices 1 and 2 implemented behind the inactive cross-path feature
+gate; Scheduler, Group, Team, and public mutation remain unavailable
 
 ## Purpose
 

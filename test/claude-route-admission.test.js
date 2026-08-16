@@ -10,6 +10,8 @@ const bridge = await import(`../src/claude-bridge.js?route-test=${Date.now()}`);
 const directory = await import(`../src/node-directory.js?claude-route=${Date.now()}`);
 const registry = await import(`../src/registry.js?claude-route=${Date.now()}`);
 const routes = await import(`../src/route-admission.js?claude-route=${Date.now()}`);
+const inbound = await import(`../src/inbound-policy.js?claude-route=${Date.now()}`);
+const bodies = await import(`../src/message-bodies.js?claude-route=${Date.now()}`);
 const threadId = "c1345678-1234-4234-8234-123456789abc";
 const project = await directory.ensureProject({ routingId: "hermes", root: path.resolve(".") });
 await directory.upsertNode({
@@ -102,6 +104,61 @@ test("Claude bridge quarantines untyped ingress and admits an exact typed route"
   assert.equal(reply.targetRuntime, "claude");
   assert.equal(reply.targetNativeId, "d1345678-1234-4234-8234-123456789abc");
   assert.equal(dispatches, 1);
+});
+
+test("Claude ordinary ingress obeys Inbound Policy without exposing its reason on wire", async () => {
+  const logicalMessageId = "12345678-3234-4234-8234-123456789abc";
+  await inbound.upsertInboundDenyRule({
+    targetNodeKey: directory.nodeKey("codex", threadId),
+    selectorKind: "sender-node",
+    selectorValue: directory.nodeKey(
+      "claude",
+      "d1345678-1234-4234-8234-123456789abc",
+    ),
+  });
+  let dispatches = 0;
+  const denied = await bridge.deliverClaudeMessage(
+    "coordinator",
+    parsed(
+      "22345678-3234-4234-8234-123456789abc",
+      JSON.stringify({
+        protocol: "cxmsg-route/1",
+        schema_version: 1,
+        project_id: "hermes",
+        target_role: "coordinator",
+        logical_message_id: logicalMessageId,
+        payload_type: "coordination",
+        wake_policy: "immediate",
+        message: "policy denied Claude body",
+      }),
+    ),
+    {
+      withServer: async (callback) => callback({}),
+      readThread: async () => ({ id: threadId }),
+      deliver: async () => {
+        dispatches += 1;
+        throw new Error("denied Claude ingress must not dispatch");
+      },
+      policyEvaluator: inbound.evaluateInboundPolicy,
+    },
+  );
+
+  assert.equal(denied.delivery, "quarantined");
+  assert.equal(denied.admission.reason, "route_rejected");
+  assert.equal(denied.admission.denialOrigin, undefined);
+  assert.equal(dispatches, 0);
+  const retained = routes.readRouteDelivery(logicalMessageId);
+  assert.equal(retained.admissionState, "denied");
+  assert.equal(retained.attemptCount, 0);
+  assert.equal(retained.inboundPolicy.reason, "sender_denied");
+  assert.throws(
+    () => bodies.messageBodyInfo(`cxmsg-message:${logicalMessageId}`),
+    /unknown message body/,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(denied),
+    /sender_denied|policy denied Claude body/,
+  );
 });
 
 test("Claude bridge retains the exact reply address only for legacy frames without a session ID", async () => {

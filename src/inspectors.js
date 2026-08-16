@@ -32,6 +32,7 @@ import { validGroupConversationRecord } from "./group-conversations.js";
 import { hostRelayRequest } from "./host-relay.js";
 import {
   classifyInboundPolicyEntry,
+  INBOUND_POLICY_FEATURE_ACTIVE,
   INBOUND_POLICY_MAX_RECORD_BYTES,
   INBOUND_POLICY_MAX_RECORDS,
   INBOUND_POLICY_MAX_RULES,
@@ -3701,7 +3702,7 @@ export function inspectRouteState({
 
 export function inspectInboundPolicies({
   stateDir,
-  featureActive = false,
+  featureActive = INBOUND_POLICY_FEATURE_ACTIVE,
 } = {}) {
   const scope = "inbound-policies";
   const policies = scanJsonDirectory({

@@ -276,6 +276,7 @@ export async function deliverClaudeMessage(
     withServer = withAppServer,
     readThread = readThreadMetadata,
     deliver = deliverPeerMessage,
+    policyEvaluator = undefined,
   } = {},
 ) {
   const targetRecord = readRecord(target);
@@ -314,6 +315,7 @@ export async function deliverClaudeMessage(
       ...(stableClaudeNode ? { senderNode: stableClaudeNode } : {}),
     },
     dispatch,
+    { policyEvaluator },
   );
   if (outcome.admissionState === "quarantined") {
     return {
@@ -688,14 +690,20 @@ export async function runClaudeBridge(target) {
         const denied =
           handled.kind === "message" &&
           handled.delivery?.delivery === "quarantined";
+        const inboundPolicyDenied =
+          denied && handled.delivery?.admission?.status === "denied";
         await returnClaudePeerStatus(
           target,
           parsed,
           denied ? "denied" : "delivered",
           denied
             ? {
-                errorCode: "EROUTEQUARANTINED",
-                denialOrigin: "route-admission",
+                errorCode: inboundPolicyDenied
+                  ? "EINBOUNDDENIED"
+                  : "EROUTEQUARANTINED",
+                denialOrigin: inboundPolicyDenied
+                  ? "inbound-policy"
+                  : "route-admission",
               }
             : undefined,
         );
