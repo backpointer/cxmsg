@@ -1,7 +1,7 @@
 # Inbound Peer Message Policy v1
 
-Status: core enforcement active after independent cross-path review; owner CLI
-mutation available; redacted graph and web projections remain future work
+Status: complete after independent cross-path review; core enforcement, owner
+CLI mutation, and redacted trace, graph, and web projections are active
 
 ## Purpose
 
