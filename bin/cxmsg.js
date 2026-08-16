@@ -114,6 +114,7 @@ import {
   requestGroupInboxDigest,
   storeOnlyGroupMessage,
 } from "../src/group-conversations.js";
+import { listRecentConversations } from "../src/recent-conversations.js";
 import {
   dispatchPreparedTeamCastMessage,
   publicTeamCastSelection,
@@ -329,6 +330,7 @@ function usage(exitCode = 0) {
   cxmsg directory execution-thread show <thread-id> [--json]
   cxmsg conversation direct ensure <codex|claude> <native-id> <codex|claude> <native-id> [--json]
   cxmsg conversation list [--json]
+  cxmsg conversation recent <node-key> [--limit <count>] [--kind all|direct|group] [--json]
   cxmsg conversation show <conversation-id> [--json]
   cxmsg conversation history <conversation-id> [--limit <count>] [--before <sequence>] [--json]
   cxmsg conversation migrate <conversation-id> <codex|claude> <predecessor-id> <codex|claude> <successor-id> [--json]
@@ -3589,6 +3591,36 @@ async function commandConversation(args) {
         ? `${JSON.stringify(output, null, 2)}\n`
         : `${result.created ? "created" : "found"} Direct Conversation ${output.conversationId}\n`,
     );
+    return;
+  }
+  if (operation === "recent") {
+    const nodeKey = stableNodeKey(args.shift());
+    let limit = 50;
+    let kind = "all";
+    let jsonOutput = false;
+    while (args.length) {
+      const option = args.shift();
+      if (option === "--json") jsonOutput = true;
+      else if (option === "--limit") limit = Number(args.shift());
+      else if (option === "--kind") kind = args.shift() || "";
+      else usage(2);
+    }
+    const result = await listRecentConversations(nodeKey, { limit, kind });
+    if (jsonOutput) {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+    } else {
+      for (const record of result.conversations) {
+        process.stdout.write(
+          `${record.lastActivityAt}\t${record.kind}\t${record.conversationId}\t${record.peerNodeKey || record.label}\t${record.peerState || "group"}\n`,
+        );
+      }
+    }
+    if (!result.complete) {
+      process.stderr.write(
+        `cxmsg: recent Conversation projection is incomplete: ${JSON.stringify(result.diagnostics)}\n`,
+      );
+      process.exitCode = 1;
+    }
     return;
   }
   if (operation === "list") {

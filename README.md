@@ -547,6 +547,7 @@ Inspect the metadata-only projection locally:
 
 ```bash
 cxmsg conversation list --json
+cxmsg conversation recent codex:<thread-id> --limit 50 --json
 cxmsg conversation show <conversation-id> --json
 cxmsg conversation history <conversation-id> --limit 50 --json
 ```
@@ -555,6 +556,30 @@ History includes Node keys, Logical Message IDs, reply links, source kind, and
 current Ledger or Job status. It never includes message bodies and is never
 injected into a model turn automatically. Conversation membership creates no
 role, permission, approval, Delegation, wake, or cross-Project authority.
+
+`conversation recent` is a messenger-style, per-Node metadata projection. JSON
+output contains `{ conversations, diagnostics, complete, hasMore }`. An
+incomplete projection is printed for diagnosis but exits nonzero, so automation
+cannot silently select an older peer after suppressed evidence. It combines
+current Direct and Group membership, orders durable Logical Message
+activity by parsed timestamp descending and Conversation ID ascending, and
+shows the stable peer Node for Direct Conversations. Alias values are display
+only. A bounded owner-private summary index keeps the healthy path from loading
+retained message arrays. Missing-summary diagnosis inspects at most 32
+unindexed Conversation records to scope the finding to the requested Node;
+excess records remain explicitly unscoped. Doctor reports missing, stale, or orphan summaries
+without repairing them automatically. Each summary is bound to the private
+Conversation file generation; a crash-stale generation is omitted rather than
+used for peer discovery. Reads share the Conversation mutation lock so member
+migration cannot race the projection. The command never selects a replacement peer, follows an implicit
+successor, authorizes a send, or exposes a body, Endpoint, path, task, result,
+grant, or token. Unread state is `null` in this first projection slice and is
+not inferred from Delivery or message counts.
+
+Only messages whose retained Ledger or Claude Job source matches the
+Conversation are projected. A metadata entry left by a crash before its source
+commit remains recoverable by exact retry but is not presented as a recent
+conversation until that source exists.
 
 Create an empty Direct Conversation only after both Nodes are present in the
 Directory, or explicitly continue one after recording the exact successor
@@ -569,6 +594,12 @@ Original members remain visible when Tombstoned; migration changes only the
 current member projection. Retention protects Ledger and Message Body records
 referenced by Conversation history. See
 [Direct Conversation v1](docs/DIRECT_CONVERSATION_V1.md).
+
+Inbound Claude `from-session` values are wire claims, not Directory evidence.
+cxmsg therefore never creates a Node from an inbound frame merely to populate
+recent conversations. Synchronize locally observed Nodes explicitly; a missing
+Node causes Conversation recording to be skipped without weakening delivery or
+Route Admission.
 
 ## Group Conversations and store-only inbox
 

@@ -7,8 +7,10 @@ import {
   readdirSync,
 } from "node:fs";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { probeAppServerSocket, withAppServer } from "./app-server-client.js";
 import { validDirectConversationRecord } from "./conversations.js";
+import { validConversationSummary } from "./conversation-summaries.js";
 import {
   CLAUDE_BRIDGE_IMPLEMENTATION_REVISION,
   probeClaudeBridge,
@@ -2036,6 +2038,18 @@ export function inspectConversationState({ stateDir, jobs = [] } = {}) {
       errorCode: "EGROUPCONVERSATIONSCHEMA",
     }),
   });
+  const summaries = scanJsonDirectory({
+    stateDir,
+    directoryName: "conversations/summaries",
+    scope: "conversation-summaries",
+    maxRecordBytes: 32 * 1024,
+    validate: (record, stem) => ({
+      valid:
+        validConversationSummary(record) &&
+        `${record.kind}--${record.conversationId}` === stem.toLowerCase(),
+      errorCode: "ECONVERSATIONSUMMARYSCHEMA",
+    }),
+  });
   const plans = scanJsonDirectory({
     stateDir,
     directoryName: "team-casts/plans",
@@ -2081,9 +2095,40 @@ export function inspectConversationState({ stateDir, jobs = [] } = {}) {
   const checks = [
     ...direct.checks,
     ...groups.checks,
+    ...summaries.checks,
     ...plans.checks,
     ...selections.checks,
   ];
+  const summaryDirectory = path.join(stateDir, "conversations", "summaries");
+  try {
+    const names = readdirSync(summaryDirectory);
+    let staleArtifacts = 0;
+    let unexpectedEntries = 0;
+    for (const name of names) {
+      if (/^(direct|group)--[0-9a-f-]{36}\.json$/i.test(name)) continue;
+      if (/^(direct|group)--[0-9a-f-]{36}\.json\.[0-9a-f-]{36}\.tmp$/i.test(name)) {
+        const metadata = lstatSync(path.join(summaryDirectory, name));
+        if (Date.now() - metadata.mtimeMs >= 30_000) staleArtifacts += 1;
+        continue;
+      }
+      unexpectedEntries += 1;
+    }
+    if (staleArtifacts || unexpectedEntries) {
+      checks.push(
+        diagnosticCheck({
+          id: "conversation-summaries.artifacts",
+          scope: "conversation-summaries",
+          status: "warn",
+          summary: "Conversation summary storage contains stale or unexpected artifacts",
+          verification: "metadata",
+          errorCode: staleArtifacts
+            ? "ECONVERSATIONSUMMARYTEMPSTALE"
+            : "ECONVERSATIONSUMMARYUNEXPECTED",
+          required: false,
+        }),
+      );
+    }
+  } catch {}
   const identities = identityRecordMap(nodes, tombstones);
   const projectIds = new Set(projects.records.map((record) => record.projectId));
   const projections = Array.isArray(ledger.projections)
@@ -2093,6 +2138,141 @@ export function inspectConversationState({ stateDir, jobs = [] } = {}) {
     (projections || []).map((record) => [record.logicalMessage.messageId, record]),
   );
   const jobsById = new Map(jobs.map((record) => [record.jobId, record]));
+  const summariesByConversation = new Map(
+    summaries.records.map((record) => [
+      `${record.kind}:${record.conversationId}`,
+      record,
+    ]),
+  );
+
+  function retainedConversationEvidence(conversation) {
+    try {
+      const filename = path.join(
+        stateDir,
+        "conversations",
+        conversation.kind,
+        `${conversation.conversationId}.json`,
+      );
+      const metadata = lstatSync(filename);
+      if (
+        !metadata.isFile() ||
+        metadata.isSymbolicLink() ||
+        metadata.uid !== process.getuid() ||
+        metadata.nlink !== 1 ||
+        (metadata.mode & 0o077) !== 0 ||
+        metadata.size > 4 * 1024 * 1024
+      ) {
+        return null;
+      }
+      return createHash("sha256")
+        .update(
+          `${metadata.dev}:${metadata.ino}:${metadata.size}:${metadata.mtimeMs}`,
+        )
+        .digest("hex");
+    } catch {
+      return null;
+    }
+  }
+
+  function expectedSummary(conversation) {
+    const directConversation = conversation.kind === "direct";
+    const selected = conversation.messages.reduce((current, message) => {
+      if (!current) return message;
+      const difference = Date.parse(message.recordedAt) - Date.parse(current.recordedAt);
+      return difference > 0 ||
+        (difference === 0 && message.sequence > current.sequence)
+        ? message
+        : current;
+    }, null);
+    return {
+      version: 1,
+      kind: conversation.kind,
+      conversationId: conversation.conversationId,
+      currentMembers: directConversation
+        ? [...conversation.currentMembers]
+        : [...conversation.membershipSnapshots.at(-1).members],
+      label: directConversation ? null : conversation.label,
+      lastActivityAt: selected
+        ? new Date(selected.recordedAt).toISOString()
+        : null,
+      lastMessageId: selected?.logicalMessageId || null,
+      lastSenderNodeKey: selected?.senderNodeKey || null,
+      lastSourceKind: selected
+        ? directConversation
+          ? selected.sourceKind
+          : "delivery-ledger"
+        : null,
+      lastSequence: selected?.sequence || 0,
+      messageCount: conversation.messages.length,
+      conversationUpdatedAt: conversation.updatedAt,
+      recordEvidence: retainedConversationEvidence(conversation),
+    };
+  }
+
+  const conversationsBySummaryKey = new Map(
+    [...direct.records, ...groups.records].map((record) => [
+      `${record.kind}:${record.conversationId}`,
+      record,
+    ]),
+  );
+  for (const [key, conversation] of conversationsBySummaryKey) {
+    const expected = expectedSummary(conversation);
+    const activityFields = [
+      conversation.lastActivityAt,
+      conversation.lastMessageId,
+      conversation.lastSenderNodeKey,
+    ];
+    const activityCacheValid =
+      activityFields.every((value) => value === undefined) ||
+      (conversation.lastActivityAt === expected.lastActivityAt &&
+        conversation.lastMessageId === expected.lastMessageId &&
+        conversation.lastSenderNodeKey === expected.lastSenderNodeKey);
+    checks.push(
+      diagnosticCheck({
+        id: `conversation-summaries.activity.${safeLabel(conversation.conversationId)}`,
+        scope: "conversation-summaries",
+        status: activityCacheValid ? "pass" : "warn",
+        summary: activityCacheValid
+          ? "Conversation activity cache matches retained message ordering"
+          : "Conversation activity cache will be rederived on the next write",
+        verification: "records",
+        errorCode: activityCacheValid ? null : "ECONVERSATIONACTIVITYSTALE",
+        required: false,
+      }),
+    );
+    const summary = summariesByConversation.get(key);
+    const valid = Boolean(
+      summary && isDeepStrictEqual(summary, expected),
+    );
+    checks.push(
+      diagnosticCheck({
+        id: `conversation-summaries.record.${safeLabel(conversation.conversationId)}`,
+        scope: "conversation-summaries",
+        status: valid ? "pass" : "warn",
+        summary: valid
+          ? "Recent Conversation summary matches its retained Conversation"
+          : "Recent Conversation summary is missing or stale",
+        verification: "records",
+        errorCode: valid ? null : "ECONVERSATIONSUMMARYSTALE",
+        required: false,
+      }),
+    );
+  }
+  for (const summary of summaries.records) {
+    const key = `${summary.kind}:${summary.conversationId}`;
+    if (conversationsBySummaryKey.has(key)) continue;
+    checks.push(
+      diagnosticCheck({
+        id: `conversation-summaries.orphan.${safeLabel(summary.conversationId)}`,
+        scope: "conversation-summaries",
+        status: "warn",
+        summary: "Recent Conversation summary has no retained Conversation",
+        verification: "records",
+        errorCode: "ECONVERSATIONSUMMARYORPHAN",
+        required: false,
+      }),
+    );
+  }
 
   for (const conversation of direct.records) {
     const label = safeLabel(conversation.conversationId);

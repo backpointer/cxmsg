@@ -28,7 +28,10 @@ import {
   SCHEDULED_WAKE_POLICIES,
 } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
-import { recordDirectMessageIfKnown } from "./conversations.js";
+import {
+  recordDirectMessageIfKnown,
+  refreshDirectConversationSummary,
+} from "./conversations.js";
 import {
   MAX_STORED_MESSAGE_BYTES,
   readWholeMessageBody,
@@ -866,6 +869,14 @@ export async function routePeerMessage(
       wakePolicy: normalizedRoute?.wake_policy || "immediate",
       now,
     });
+    if (conversation) {
+      const refreshed = await refreshDirectConversationSummary(
+        conversation.conversation.conversationId,
+      );
+      if (!refreshed.refreshed) {
+        throw new Error("Direct Conversation summary source is unavailable after Ledger commit");
+      }
+    }
     const record = ledgerRouteDelivery(committed.record);
     prepared = { record };
   });

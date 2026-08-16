@@ -23,6 +23,7 @@ import {
   CONVERSATIONS_DIR,
   CONVERSATIONS_LOCK_PATH,
 } from "./conversations.js";
+import { writeConversationSummary } from "./conversation-summaries.js";
 import { MAX_WHEN_IDLE_DELAY_MS } from "./delivery-policy.js";
 import { withFileLock } from "./file-lock.js";
 import { readMessageBody, storeMessageBody } from "./message-bodies.js";
@@ -61,6 +62,9 @@ const GROUP_FIELDS = new Set([
   "membershipSnapshots",
   "nextSequence",
   "messages",
+  "lastActivityAt",
+  "lastMessageId",
+  "lastSenderNodeKey",
   "createdAt",
   "updatedAt",
 ]);
@@ -184,6 +188,63 @@ function digestIntentPath(nodeKey) {
 
 function validTimestamp(value) {
   return Number.isFinite(Date.parse(value || ""));
+}
+
+function groupActivity(record) {
+  const lastMessage = record.messages.reduce((selected, message) => {
+    if (!selected) return message;
+    const difference = Date.parse(message.recordedAt) - Date.parse(selected.recordedAt);
+    return difference > 0 ||
+      (difference === 0 && message.sequence > selected.sequence)
+      ? message
+      : selected;
+  }, null);
+  return lastMessage
+    ? {
+        lastActivityAt: new Date(lastMessage.recordedAt).toISOString(),
+        lastMessageId: lastMessage.logicalMessageId,
+        lastSenderNodeKey: lastMessage.senderNodeKey,
+      }
+    : {
+        lastActivityAt: null,
+        lastMessageId: null,
+        lastSenderNodeKey: null,
+      };
+}
+
+function groupConversationSummary(record) {
+  const activity = groupActivity(record);
+  const message = activity.lastMessageId
+    ? record.messages.find(
+        (candidate) => candidate.logicalMessageId === activity.lastMessageId,
+      )
+    : null;
+  return {
+    version: 1,
+    kind: "group",
+    conversationId: record.conversationId,
+    currentMembers: [...record.membershipSnapshots.at(-1).members],
+    label: record.label,
+    ...activity,
+    lastSourceKind: message ? "delivery-ledger" : null,
+    lastSequence: message?.sequence || 0,
+    messageCount: record.messages.length,
+    conversationUpdatedAt: record.updatedAt,
+  };
+}
+
+function persistGroupSummary(record) {
+  if (
+    [
+      record.lastActivityAt,
+      record.lastMessageId,
+      record.lastSenderNodeKey,
+    ].every((value) => value === undefined)
+  ) {
+    return record;
+  }
+  writeConversationSummary(groupConversationSummary(record));
+  return record;
 }
 
 function validGroup(record) {
@@ -430,6 +491,7 @@ export async function ensureGroupConversation({
         ) {
           throw new Error("Group Conversation identity conflict");
         }
+        persistGroupSummary(existing);
         return { conversation: existing, created: false };
       }
       if (records.length >= GROUP_LIMIT) {
@@ -438,7 +500,7 @@ export async function ensureGroupConversation({
       conversationId ||= randomUUID();
       const { projectId } = validateLiveMembership(members);
       const now = new Date().toISOString();
-      const conversation = writeGroup({
+      const conversation = persistGroupSummary(writeGroup({
         version: 1,
         kind: "group",
         conversationId,
@@ -448,9 +510,12 @@ export async function ensureGroupConversation({
         membershipSnapshots: [{ version: 1, members, createdAt: now }],
         nextSequence: 1,
         messages: [],
+        lastActivityAt: null,
+        lastMessageId: null,
+        lastSenderNodeKey: null,
         createdAt: now,
         updatedAt: now,
-      });
+      }));
       return { conversation, created: true };
     });
   });
@@ -472,6 +537,7 @@ export async function changeGroupMember({ conversationId, action, nodeKey }) {
       const current = currentSnapshot(conversation).members;
       const present = current.includes(nodeKey);
       if ((action === "add" && present) || (action === "remove" && !present)) {
+        persistGroupSummary(conversation);
         return { conversation, changed: false };
       }
       const members = sortedMembers(
@@ -488,7 +554,7 @@ export async function changeGroupMember({ conversationId, action, nodeKey }) {
       }
       const now = new Date().toISOString();
       const version = conversation.membershipVersion + 1;
-      const updated = writeGroup({
+      const updated = persistGroupSummary(writeGroup({
         ...conversation,
         membershipVersion: version,
         membershipSnapshots: [
@@ -496,13 +562,14 @@ export async function changeGroupMember({ conversationId, action, nodeKey }) {
           { version, members, createdAt: now },
         ],
         updatedAt: now,
-      });
+      }));
       return { conversation: updated, changed: true };
     });
   });
 }
 
 function groupPublic(record, { members = false, history = false } = {}) {
+  const activity = groupActivity(record);
   const output = {
     version: record.version,
     kind: record.kind,
@@ -512,6 +579,7 @@ function groupPublic(record, { members = false, history = false } = {}) {
     membershipVersion: record.membershipVersion,
     memberCount: currentSnapshot(record).members.length,
     messageCount: record.messages.length,
+    ...activity,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
   };
@@ -628,11 +696,26 @@ export async function storeOnlyGroupMessage({
           bodySha256,
           recordedAt: now,
         };
+        const priorActivity = groupActivity(conversation);
+        const advancesActivity =
+          priorActivity.lastActivityAt === null ||
+          Date.parse(now) >= Date.parse(priorActivity.lastActivityAt);
         conversation = writeGroup({
           ...conversation,
           nextSequence: conversation.nextSequence + 1,
           messages: [...conversation.messages, groupMessage],
-          updatedAt: now,
+          lastActivityAt: advancesActivity
+            ? now
+            : priorActivity.lastActivityAt,
+          lastMessageId: advancesActivity
+            ? logicalMessageId
+            : priorActivity.lastMessageId,
+          lastSenderNodeKey: advancesActivity
+            ? senderNodeKey
+            : priorActivity.lastSenderNodeKey,
+          updatedAt: new Date(
+            Math.max(Date.parse(conversation.updatedAt), Date.parse(now)),
+          ).toISOString(),
         });
       }
 
@@ -680,6 +763,7 @@ export async function storeOnlyGroupMessage({
         })),
         now: groupMessage.recordedAt,
       });
+      persistGroupSummary(conversation);
       return {
         conversation: groupPublic(conversation, { members: true }),
         message: structuredClone(groupMessage),

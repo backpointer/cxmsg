@@ -14,7 +14,10 @@ import {
   updateJob,
 } from "./jobs.js";
 import { writeCoordinationEvent } from "./observability.js";
-import { recordDirectMessageIfKnown } from "./conversations.js";
+import {
+  recordDirectMessageIfKnown,
+  refreshDirectConversationSummary,
+} from "./conversations.js";
 
 const ACK_PATTERN =
   /^<cxmsg-ack in-reply-to="([0-9a-f-]{36})" status="(accepted|completed|retryable_error|failed)"(?: code="([^"]{1,32})")?(?: retry-after="(\d{1,5})")?>\n([\s\S]*)\n<\/cxmsg-ack>$/i;
@@ -352,11 +355,24 @@ export async function createClaudeDeliveryJob({
         attempt: job.delivery?.attempt || 0,
         outcome: job.status,
       });
+      if (conversation) {
+        await refreshDirectConversationSummary(
+          conversation.conversation.conversationId,
+        );
+      }
       return { ...job, deduplicated: true };
     }
   } else {
     const created = createJob(spec);
     job = await updateJob(created, initial(created));
+  }
+  if (conversation) {
+    const refreshed = await refreshDirectConversationSummary(
+      conversation.conversation.conversationId,
+    );
+    if (!refreshed.refreshed) {
+      throw new Error("Direct Conversation summary source is unavailable after Job commit");
+    }
   }
   await writeCoordinationEvent({
     kind: "claude-delivery",

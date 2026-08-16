@@ -69,8 +69,12 @@ they carry different authority and delivery semantics.
 - **Conversation**: a durable ordered context for Logical Messages and replies.
   A Conversation is either Direct or Group and never conveys user authority.
 - **Direct Conversation**: the canonical owner-private Conversation for an
-  unordered pair of stable Node identities. It orders retained metadata and
-  replies but never injects history or conveys authority.
+unordered pair of stable Node identities. It orders retained metadata and
+replies but never injects history or conveys authority.
+- **Recent Conversation Projection**: a bounded per-Node view of current
+Conversation membership and durable Logical Message activity. It is discovery
+metadata only; it never chooses a peer, follows a successor, or authorizes a
+send.
 - **Group Conversation**: a same-Project Conversation with explicitly versioned
   membership and a recipient set frozen for each Logical Message.
 - **Store-only Delivery**: a recipient-specific Group Delivery retained for an

@@ -15,6 +15,7 @@ import {
 } from "node:fs";
 import path from "node:path";
 import { withFileLock } from "./file-lock.js";
+import { writeConversationSummary } from "./conversation-summaries.js";
 import { readDeliveryLedger } from "./delivery-ledger.js";
 import { readJob } from "./jobs.js";
 import {
@@ -43,6 +44,9 @@ const CONVERSATION_FIELDS = new Set([
   "nextSequence",
   "messages",
   "migrations",
+  "lastActivityAt",
+  "lastMessageId",
+  "lastSenderNodeKey",
   "createdAt",
   "updatedAt",
 ]);
@@ -155,7 +159,82 @@ function validMessage(message, conversationId, sequence) {
   );
 }
 
+function canonicalTimestamp(value) {
+  return new Date(value).toISOString();
+}
+
+function derivedActivity(messages) {
+  let selected = null;
+  for (const message of messages) {
+    const activityAt = canonicalTimestamp(message.recordedAt);
+    if (
+      !selected ||
+      Date.parse(activityAt) > Date.parse(selected.lastActivityAt) ||
+      (Date.parse(activityAt) === Date.parse(selected.lastActivityAt) &&
+        message.sequence > selected.sequence)
+    ) {
+      selected = {
+        lastActivityAt: activityAt,
+        lastMessageId: message.logicalMessageId,
+        lastSenderNodeKey: message.senderNodeKey,
+        sequence: message.sequence,
+      };
+    }
+  }
+  return selected
+    ? {
+        lastActivityAt: selected.lastActivityAt,
+        lastMessageId: selected.lastMessageId,
+        lastSenderNodeKey: selected.lastSenderNodeKey,
+      }
+    : {
+        lastActivityAt: null,
+        lastMessageId: null,
+        lastSenderNodeKey: null,
+      };
+}
+
+function storedActivity(record) {
+  return derivedActivity(record.messages);
+}
+
+function hasActivitySummary(record) {
+  return [
+    record.lastActivityAt,
+    record.lastMessageId,
+    record.lastSenderNodeKey,
+  ].some((value) => value !== undefined);
+}
+
+function directConversationSummary(record) {
+  const activity = storedActivity(record);
+  const message = activity.lastMessageId
+    ? record.messages.find(
+        (candidate) => candidate.logicalMessageId === activity.lastMessageId,
+      )
+    : null;
+  return {
+    version: 1,
+    kind: "direct",
+    conversationId: record.conversationId,
+    currentMembers: [...record.currentMembers],
+    label: null,
+    ...activity,
+    lastSourceKind: message?.sourceKind || null,
+    lastSequence: message?.sequence || 0,
+    messageCount: record.messages.length,
+    conversationUpdatedAt: record.updatedAt,
+  };
+}
+
+function persistConversationSummary(record) {
+  if (!hasActivitySummary(record)) return record;
+  writeConversationSummary(directConversationSummary(record));
+  return record;
+}
+
 function validConversation(record) {
+  const activitySummaryPresent = hasActivitySummary(record);
   if (
     record?.version !== 1 ||
     record.kind !== "direct" ||
@@ -179,6 +258,8 @@ function validConversation(record) {
     record.nextSequence !== record.messages.length + 1 ||
     !Number.isFinite(Date.parse(record.createdAt || "")) ||
     !Number.isFinite(Date.parse(record.updatedAt || "")) ||
+    (activitySummaryPresent &&
+      Date.parse(record.updatedAt) < Date.parse(record.createdAt)) ||
     !Object.keys(record).every((field) => CONVERSATION_FIELDS.has(field))
   ) {
     return false;
@@ -187,6 +268,12 @@ function validConversation(record) {
   for (let index = 0; index < record.messages.length; index += 1) {
     const message = record.messages[index];
     if (!validMessage(message, record.conversationId, index + 1)) return false;
+    if (
+      activitySummaryPresent &&
+      Date.parse(message.recordedAt) < Date.parse(record.createdAt)
+    ) {
+      return false;
+    }
     if (messageIds.has(message.logicalMessageId)) return false;
     messageIds.add(message.logicalMessageId);
   }
@@ -337,7 +424,10 @@ function ensureDirectConversationLocked(first, second, records) {
     throw new Error("Direct Conversation creation requires two live Nodes");
   }
   const current = findCurrentConversation(records, members);
-  if (current) return { conversation: current, created: false };
+  if (current) {
+    persistConversationSummary(current);
+    return { conversation: current, created: false };
+  }
   if (records.length >= CONVERSATION_LIMIT) {
     throw new Error("Direct Conversation count reached its bounded limit");
   }
@@ -345,7 +435,7 @@ function ensureDirectConversationLocked(first, second, records) {
   const collision = records.find((record) => record.conversationId === conversationId);
   if (collision) throw new Error("Direct Conversation identity collision");
   const now = new Date().toISOString();
-  const conversation = writeConversation({
+  const conversation = persistConversationSummary(writeConversation({
     version: 1,
     kind: "direct",
     conversationId,
@@ -354,9 +444,12 @@ function ensureDirectConversationLocked(first, second, records) {
     nextSequence: 1,
     messages: [],
     migrations: [],
+    lastActivityAt: null,
+    lastMessageId: null,
+    lastSenderNodeKey: null,
     createdAt: now,
     updatedAt: now,
-  });
+  }));
   return { conversation, created: true };
 }
 
@@ -414,6 +507,14 @@ export async function recordDirectMessage({
       const ensured = ensureDirectConversationLocked(pair[0], pair[1], records);
       const conversation = ensured.conversation;
       records = ensured.created ? [...records, conversation] : records;
+      if (Date.parse(recordedAt) < Date.parse(conversation.createdAt)) {
+        if (!ensured.created) {
+          throw new Error("Direct Conversation message predates its Conversation");
+        }
+        recordedAt = conversation.createdAt;
+      } else {
+        recordedAt = canonicalTimestamp(recordedAt);
+      }
       if (conversation.messages.length >= MESSAGE_LIMIT) {
         throw new Error("Direct Conversation message history reached its bounded limit");
       }
@@ -437,11 +538,27 @@ export async function recordDirectMessage({
         ),
         recordedAt,
       };
+      const priorActivity = storedActivity(conversation);
+      const candidateAt = canonicalTimestamp(recordedAt);
+      const advancesActivity =
+        priorActivity.lastActivityAt === null ||
+        Date.parse(candidateAt) >= Date.parse(priorActivity.lastActivityAt);
       const updated = writeConversation({
         ...conversation,
         nextSequence: conversation.nextSequence + 1,
         messages: [...conversation.messages, message],
-        updatedAt: recordedAt,
+        lastActivityAt: advancesActivity
+          ? candidateAt
+          : priorActivity.lastActivityAt,
+        lastMessageId: advancesActivity
+          ? logicalMessageId
+          : priorActivity.lastMessageId,
+        lastSenderNodeKey: advancesActivity
+          ? senderNodeKey
+          : priorActivity.lastSenderNodeKey,
+        updatedAt: new Date(
+          Math.max(Date.parse(conversation.updatedAt), Date.parse(candidateAt)),
+        ).toISOString(),
       });
       return { conversation: updated, message, created: true };
     });
@@ -456,6 +573,42 @@ export async function recordDirectMessageIfKnown(spec) {
     if (/stable Node key|live Nodes/.test(error.message)) return null;
     throw error;
   }
+}
+
+function activitySourceMatches(record) {
+  const summary = directConversationSummary(record);
+  if (!summary.lastMessageId) return true;
+  if (summary.lastSourceKind === "delivery-ledger") {
+    const source = readDeliveryLedger(summary.lastMessageId);
+    return Boolean(
+      source?.logicalMessage?.conversationId === record.conversationId &&
+        source.logicalMessage.conversationSequence === summary.lastSequence,
+    );
+  }
+  const source = readJob(summary.lastMessageId);
+  return Boolean(
+    source?.kind === "claude-delivery" &&
+      source.conversation?.conversationId === record.conversationId &&
+      source.conversation?.sequence === summary.lastSequence,
+  );
+}
+
+export async function refreshDirectConversationSummary(conversationId) {
+  conversationId = validateUuid("conversation id", conversationId);
+  return withRetentionWriter(async () => {
+    ensureDirectory();
+    return withFileLock(CONVERSATIONS_LOCK_PATH, async () => {
+      const conversation = listDirectConversationsStrict().find(
+        (record) => record.conversationId === conversationId,
+      );
+      if (!conversation) throw new Error(`unknown Direct Conversation: ${conversationId}`);
+      if (!activitySourceMatches(conversation)) {
+        return { conversation, refreshed: false, reason: "missing-source" };
+      }
+      persistConversationSummary(conversation);
+      return { conversation, refreshed: true, reason: null };
+    });
+  });
 }
 
 export async function migrateDirectConversationMember({
@@ -480,6 +633,7 @@ export async function migrateDirectConversationMember({
           migration.successorNodeKey === successorNodeKey,
       );
       if (existing && conversation.currentMembers.includes(successorNodeKey)) {
+        persistConversationSummary(conversation);
         return { conversation, migrated: false };
       }
       if (!conversation.currentMembers.includes(predecessorNodeKey)) {
@@ -506,7 +660,7 @@ export async function migrateDirectConversationMember({
         throw new Error("Direct Conversation migration history reached its bounded limit");
       }
       const migratedAt = new Date().toISOString();
-      const updated = writeConversation({
+      const updated = persistConversationSummary(writeConversation({
         ...conversation,
         currentMembers,
         migrations: [
@@ -519,7 +673,7 @@ export async function migrateDirectConversationMember({
           },
         ],
         updatedAt: migratedAt,
-      });
+      }));
       return { conversation: updated, migrated: true };
     });
   });
@@ -534,6 +688,7 @@ function memberState(nodeKey) {
 
 export function publicDirectConversation(record) {
   if (!validConversation(record)) throw new Error("invalid Direct Conversation record");
+  const activity = storedActivity(record);
   return {
     version: record.version,
     kind: record.kind,
@@ -544,6 +699,7 @@ export function publicDirectConversation(record) {
       state: memberState(nodeKey),
     })),
     messageCount: record.messages.length,
+    ...activity,
     migrationCount: record.migrations.length,
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,

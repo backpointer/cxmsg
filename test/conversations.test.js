@@ -1,6 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { lstatSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import {
+  lstatSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -15,6 +24,10 @@ const registry = await import(`../src/registry.js?conversation=${Date.now()}`);
 const route = await import(`../src/route-admission.js?conversation=${Date.now()}`);
 const ledger = await import(`../src/delivery-ledger.js?conversation=${Date.now()}`);
 const claude = await import(`../src/claude-delivery.js?conversation=${Date.now()}`);
+const recent = await import(`../src/recent-conversations.js?conversation=${Date.now()}`);
+const summaries = await import(
+  `../src/conversation-summaries.js?conversation=${Date.now()}`
+);
 const cxmsgPath = path.resolve("bin/cxmsg.js");
 
 function cxmsg(...args) {
@@ -114,6 +127,15 @@ test("Direct Conversation assigns one durable sequence and deduplicates retries"
     }),
     /idempotency conflict/,
   );
+  const staleCache = structuredClone(reply.conversation);
+  staleCache.lastActivityAt = "2000-01-01T00:00:00.000Z";
+  staleCache.lastMessageId = ids.firstMessage;
+  staleCache.lastSenderNodeKey = `codex:${ids.first}`;
+  assert.equal(conversations.validDirectConversationRecord(staleCache), true);
+  assert.equal(
+    conversations.publicDirectConversation(staleCache).lastMessageId,
+    ids.replyMessage,
+  );
 });
 
 test("successor continuation requires explicit Conversation migration", async () => {
@@ -122,12 +144,19 @@ test("successor continuation requires explicit Conversation migration", async ()
     successorNodeKey: `codex:${ids.successor}`,
   });
   const conversation = conversations.listDirectConversations()[0];
+  const activityBeforeMigration = conversations.publicDirectConversation(
+    conversation,
+  ).lastActivityAt;
   const migrated = await conversations.migrateDirectConversationMember({
     conversationId: conversation.conversationId,
     predecessorNodeKey: `codex:${ids.first}`,
     successorNodeKey: `codex:${ids.successor}`,
   });
   assert.equal(migrated.migrated, true);
+  assert.equal(
+    conversations.publicDirectConversation(migrated.conversation).lastActivityAt,
+    activityBeforeMigration,
+  );
   assert.equal(
     (await conversations.migrateDirectConversationMember({
       conversationId: conversation.conversationId,
@@ -258,6 +287,120 @@ test("cross-runtime Claude reply Jobs reuse the parent Conversation", async () =
   );
   assert.equal(history.at(-1).sourceKind, "claude-job");
   assert.equal(history.at(-1).status, "queued");
+});
+
+test("per-Node recent Conversations are stable, bounded, and activity ordered", async () => {
+  const nodeKey = `codex:${ids.sender}`;
+  const result = await recent.listRecentConversations(nodeKey, {
+    kind: "direct",
+  });
+  assert.equal(result.complete, true);
+  const records = result.conversations;
+  assert.ok(records.length >= 2);
+  assert.ok(
+    records.every(
+      (record) =>
+        record.kind === "direct" &&
+        record.peerNodeKey !== nodeKey &&
+        record.unread === null,
+    ),
+  );
+  assert.deepEqual(
+    [...records].sort(
+      (left, right) =>
+        Date.parse(right.lastActivityAt) - Date.parse(left.lastActivityAt) ||
+        left.conversationId.localeCompare(right.conversationId),
+    ),
+    records,
+  );
+  assert.doesNotMatch(
+    JSON.stringify(records),
+    /conversation route fixture|cross-runtime response|tmp\/fixture|contentRef/,
+  );
+
+  const cli = cxmsg("conversation", "recent", nodeKey, "--kind", "direct", "--json");
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.deepEqual(JSON.parse(cli.stdout), result);
+  const textList = cxmsg("conversation", "recent", nodeKey, "--kind", "direct");
+  assert.equal(textList.status, 0, textList.stderr);
+  assert.match(textList.stdout, /\tlive\n/);
+
+  const claudeJobPath = path.join(stateDir, "jobs", `${ids.claudeReply}.json`);
+  const hiddenJobPath = `${claudeJobPath}.hidden`;
+  renameSync(claudeJobPath, hiddenJobPath);
+  try {
+    const degraded = await recent.listRecentConversations(nodeKey, {
+      kind: "direct",
+    });
+    assert.equal(degraded.complete, false);
+    assert.equal(degraded.diagnostics.sourceUnverified, 1);
+    assert.equal(
+      degraded.conversations.some(
+        (record) => record.lastMessageId === ids.claudeReply,
+      ),
+      false,
+    );
+  } finally {
+    renameSync(hiddenJobPath, claudeJobPath);
+  }
+
+  const hidden = `${conversations.DIRECT_CONVERSATIONS_DIR}-hidden`;
+  renameSync(conversations.DIRECT_CONVERSATIONS_DIR, hidden);
+  try {
+    const degraded = await recent.listRecentConversations(nodeKey, {
+      kind: "direct",
+    });
+    assert.equal(degraded.complete, false);
+    assert.equal(degraded.conversations.length, 0);
+    assert.ok(degraded.diagnostics.summaryStale >= 1);
+  } finally {
+    renameSync(hidden, conversations.DIRECT_CONVERSATIONS_DIR);
+  }
+  assert.equal(lstatSync(summaries.CONVERSATION_SUMMARIES_DIR).mode & 0o077, 0);
+  for (const name of readdirSync(summaries.CONVERSATION_SUMMARIES_DIR)) {
+    assert.equal(
+      lstatSync(path.join(summaries.CONVERSATION_SUMMARIES_DIR, name)).mode &
+        0o077,
+      0,
+    );
+  }
+
+  const missingSummary = path.join(
+    summaries.CONVERSATION_SUMMARIES_DIR,
+    `direct--${records[0].conversationId}.json`,
+  );
+  const missingBytes = readFileSync(missingSummary);
+  unlinkSync(missingSummary);
+  try {
+    const degraded = await recent.listRecentConversations(nodeKey, {
+      kind: "direct",
+    });
+    assert.equal(degraded.complete, false);
+    assert.equal(degraded.diagnostics.summaryMissing, 1);
+  } finally {
+    writeFileSync(missingSummary, missingBytes, { mode: 0o600 });
+  }
+
+  const invalidId = "f2345678-4234-4234-8234-123456789abc";
+  const invalidSummary = path.join(
+    summaries.CONVERSATION_SUMMARIES_DIR,
+    `direct--${invalidId}.json`,
+  );
+  const staleTemporary = `${invalidSummary}.${invalidId}.tmp`;
+  writeFileSync(invalidSummary, "{}\n", { mode: 0o600 });
+  writeFileSync(staleTemporary, "{}\n", { mode: 0o600 });
+  try {
+    const degraded = await recent.listRecentConversations(nodeKey, {
+      kind: "direct",
+    });
+    assert.equal(degraded.complete, false);
+    assert.deepEqual(degraded.conversations, records);
+    assert.equal(degraded.diagnostics.invalidSummaries, 1);
+    assert.equal(degraded.diagnostics.staleArtifacts, 1);
+  } finally {
+    unlinkSync(invalidSummary);
+    unlinkSync(staleTemporary);
+  }
 });
 
 test("Conversation CLI exposes bounded metadata history without message bodies", () => {

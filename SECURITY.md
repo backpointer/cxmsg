@@ -371,6 +371,22 @@ subsystem. Malformed, linked, non-owner, overly permissive, oversized, or
 identity-inconsistent Conversation storage fails closed. Retention preserves
 Ledger and body records referenced by Conversation history.
 
+Recent Conversation output is a bounded discovery projection, not a routing or
+authority source. It uses only current membership and source-backed durable
+Logical Message activity. Its owner-private summary index contains no body,
+Endpoint, path, task, result, grant, approval, or token; malformed and linked
+records fail closed, while Doctor reports cross-record drift. Summary records
+are bound to the owner-private Conversation file generation so stale membership
+cannot remain eligible for peer discovery. The recent CLI exposes bounded
+completeness diagnostics and exits nonzero when evidence was suppressed, so a
+caller cannot mistake an older partial list for complete reviewer continuity.
+Direct peer aliases are explicitly presentation-only;
+callers must retain the stable Node key and pass normal liveness, binding, Route
+Admission, grant, and permission checks before sending. A missing, Tombstoned,
+or unreachable peer is never replaced by another same-Project or idle peer.
+Inbound wire-claimed session IDs cannot create Directory Nodes or become recent
+conversation peers without an independent local Directory observation.
+
 Group Conversation v1 is same-Project and store-only. It validates every
 member as a live stable Node before a new membership version or Logical Message
 is created, freezes recipients at send time, and starts no model turn. One

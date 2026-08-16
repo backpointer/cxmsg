@@ -163,6 +163,9 @@ and cannot be confused with a Scheduled Peer Message.
       model turn automatically.
 - [x] Render Tombstoned members and define explicit successor migration.
 - [x] Keep Conversation membership informational and non-authoritative.
+- [x] Expose a bounded per-Node recent Conversation projection using stable
+      peers, current membership, monotonic message activity, and no implicit
+      replacement.
 
 Done when Codex↔Codex and Codex↔Claude use the same Conversation invariants
 while Endpoint changes and retries do not fork history.

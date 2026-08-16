@@ -15,6 +15,7 @@ const groups = await import(`../src/group-conversations.js?groups=${Date.now()}`
 const ledger = await import(`../src/delivery-ledger.js?groups=${Date.now()}`);
 const scheduler = await import(`../src/scheduler.js?groups=${Date.now()}`);
 const messaging = await import(`../src/messaging.js?groups=${Date.now()}`);
+const recent = await import(`../src/recent-conversations.js?groups=${Date.now()}`);
 const cxmsgPath = path.resolve("bin/cxmsg.js");
 
 function cxmsg(...args) {
@@ -194,6 +195,17 @@ test("Group replies retain parent and bounded hop provenance", async () => {
   assert.equal(reply.message.replyToMessageId, ids.firstMessage);
   assert.equal(reply.message.hopCount, 1);
   assert.equal(reply.ledger.logicalMessage.group.parentMessageId, ids.firstMessage);
+  const staleCache = structuredClone(
+    groups.readGroupConversation(ids.conversation),
+  );
+  staleCache.lastActivityAt = "2000-01-01T00:00:00.000Z";
+  staleCache.lastMessageId = ids.firstMessage;
+  staleCache.lastSenderNodeKey = nodeKeys.first;
+  assert.equal(groups.validGroupConversationRecord(staleCache), true);
+  assert.equal(
+    groups.publicGroupConversation(staleCache).lastMessageId,
+    ids.replyMessage,
+  );
 });
 
 test("a failed Ledger commit is recoverable without a second sequence", async () => {
@@ -221,6 +233,12 @@ test("a failed Ledger commit is recoverable without a second sequence", async ()
   );
   assert.ok(prepared);
   assert.equal(ledger.readDeliveryLedger(ids.crashMessage), null);
+  const interrupted = await recent.listRecentConversations(nodeKeys.first, {
+    kind: "group",
+  });
+  assert.equal(interrupted.complete, false);
+  assert.equal(interrupted.conversations.length, 0);
+  assert.equal(interrupted.diagnostics.summaryStale, 1);
   const recovered = await groups.storeOnlyGroupMessage({
     conversationId: ids.conversation,
     senderNodeKey: nodeKeys.first,
@@ -230,6 +248,33 @@ test("a failed Ledger commit is recoverable without a second sequence", async ()
   });
   assert.equal(recovered.message.sequence, prepared.sequence);
   assert.ok(ledger.readDeliveryLedger(ids.crashMessage));
+  assert.equal(
+    (await recent.listRecentConversations(nodeKeys.first, { kind: "group" }))
+      .conversations[0].lastMessageId,
+    ids.crashMessage,
+  );
+});
+
+test("recent Conversation projection includes current Group members only", async () => {
+  const result = await recent.listRecentConversations(nodeKeys.second, {
+    kind: "group",
+  });
+  assert.equal(result.complete, true);
+  const records = result.conversations;
+  assert.equal(records.length, 1);
+  assert.equal(records[0].conversationId, ids.conversation);
+  assert.equal(records[0].label, "review-team");
+  assert.equal(records[0].peerNodeKey, null);
+  assert.equal(records[0].unread, null);
+  assert.doesNotMatch(
+    JSON.stringify(records[0]),
+    /bounded group context|recoverable group message|contentRef/,
+  );
+  assert.deepEqual(
+    (await recent.listRecentConversations(nodeKeys.fourth, { kind: "group" }))
+      .conversations,
+    [],
+  );
 });
 
 test("bounded inbox is metadata-only and acknowledgement is a separate cursor", async () => {

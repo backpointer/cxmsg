@@ -495,6 +495,12 @@ test("Conversation Inspector detects missing sources and fan-out plans without e
     assert.deepEqual(after, before);
     assert.ok(checks.some((check) => check.errorCode === "ECONVERSATIONSOURCE"));
     assert.ok(checks.some((check) => check.errorCode === "EGROUPFANOUT"));
+    assert.equal(
+      checks.filter(
+        (check) => check.errorCode === "ECONVERSATIONSUMMARYSTALE",
+      ).length,
+      2,
+    );
     assert.ok(
       checks.some((check) => check.errorCode === "ETEAMCASTSELECTIONPLAN"),
     );

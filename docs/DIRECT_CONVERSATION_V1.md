@@ -35,6 +35,14 @@ Claude Job remains delivery truth for Codex-to-Claude sends. Conversation
 history resolves only their current redacted status and never upgrades an ACK,
 model reply, or text such as “completed” into durable task completion.
 
+`lastActivityAt`, `lastMessageId`, and `lastSenderNodeKey` are bounded summary
+metadata. Activity advances only when a new Logical Message receives a durable
+Conversation sequence. Deduplication, retry, dispatch, ACK, receipt, and member
+migration do not refresh it. Timestamps are normalized to UTC and advance
+monotonically; deterministic presentation sorts parsed epochs descending and
+then Conversation IDs ascending. A scheduled message therefore appears at its
+durable enqueue time, not its later wake time.
+
 ## Storage and failure behavior
 
 Conversation records live in owner-only local state with a single bounded
@@ -60,6 +68,7 @@ retention and removal are intentionally not introduced in v1.
 ```bash
 cxmsg conversation direct ensure codex <thread-id> claude <session-id>
 cxmsg conversation list --json
+cxmsg conversation recent codex:<thread-id> --limit 50 --json
 cxmsg conversation show <conversation-id> --json
 cxmsg conversation history <conversation-id> --limit 50 --json
 cxmsg conversation migrate <conversation-id> codex <old-id> codex <new-id>
@@ -69,6 +78,32 @@ cxmsg conversation migrate <conversation-id> codex <old-id> codex <new-id>
 and uses an exclusive `--before <sequence>` cursor. No command wakes a Node or
 loads history into a model turn.
 
+`recent` accepts one stable Node key, filters only `currentMembers`, combines
+Direct and Group Conversations, and returns at most 200 metadata records. A
+Direct record includes its stable peer Node plus a presentation-only current
+alias and liveness state. It does not resolve a send target, migrate a member,
+or select a replacement reviewer. Unread state is `null` in this first slice
+and is not inferred from Delivery counts. A rebuildable owner-private summary
+record keeps current membership and the latest activity pointer so the healthy
+projection does not load full retained message arrays. Doctor reports missing,
+stale, and orphan summaries without silently repairing them. A private file
+generation binding and the shared mutation lock make stale summaries fail
+closed at query time. Entries whose latest Conversation message lacks its
+matching Ledger or Claude Job source are omitted until exact retry completes
+the source commit.
+
+JSON output is an envelope containing `conversations`, bounded `diagnostics`,
+`complete`, and `hasMore`. Missing-summary diagnosis inspects at most 32
+otherwise unindexed records to determine whether they include the requested
+Node. Invalid, stale, missing, or source-unverified evidence makes
+`complete=false` and the CLI exits nonzero after printing the bounded result;
+an older partial list is never presented as complete reviewer continuity.
+
+Inbound Claude frame identities are wire claims. They are never promoted to
+Directory Nodes as a side effect of delivery or Conversation recording. Local
+Directory synchronization remains the trust boundary for addressable Node
+identity.
+
 ## Fixed v1 bounds
 
 - 2,048 Direct Conversations
@@ -76,6 +111,7 @@ loads history into a model turn.
 - 32 explicit member migrations per Conversation
 - 4 MiB maximum serialized Conversation record
 - 200 history entries per CLI request
+- 200 recent Conversation entries per CLI request
 
 Group Conversation, inbox presentation, fan-out, Team Cast selection, and
 Graph Projection remain separate later phases.
