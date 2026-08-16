@@ -24,6 +24,7 @@ import {
 import { withFileLock } from "./file-lock.js";
 import {
   inspectInboundPolicies,
+  inspectJobs,
   inspectNodeDirectory,
   inspectRouteState,
 } from "./inspectors.js";
@@ -38,6 +39,13 @@ import {
   listClusters,
   recoverClusterMembership,
 } from "./node-directory.js";
+import {
+  listJobsReadOnly,
+  readJob,
+  withJobLock,
+  writeJob,
+} from "./jobs.js";
+import { withRetentionMutation } from "./retention-barrier.js";
 import { CXMSG_STATE_DIR } from "./runtime.js";
 
 export const REPAIR_STATE_DIR = path.join(CXMSG_STATE_DIR, "repairs");
@@ -51,8 +59,11 @@ const REPAIR_LOCK_PATH = path.join(REPAIR_STATE_DIR, "mutation.lock");
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const CLUSTER_FINDING_PREFIX = "directory-cluster-memberships.history.";
 const INDEX_FINDING_ID = "delivery-ledger.index.consistency";
+const LEGACY_JOB_FINDING_ID = "jobs.records.legacy-kind";
 const INBOUND_POLICY_ARTIFACT_BACKUP_DIR = "inbound-policy-artifacts";
+const LEGACY_JOB_BACKUP_NAME = "legacy-job.json";
 const INDEX_BACKUP_MAX_BYTES = 128 * 1024 * 1024;
+const LEGACY_JOB_BACKUP_MAX_BYTES = 256 * 1024;
 const INDEX_BACKUP_MAX_FILES = 4_097;
 const REPAIR_STATE_QUOTA_BYTES = 256 * 1024 * 1024;
 const REPAIR_TRANSACTION_LIMIT = 1_024;
@@ -285,11 +296,116 @@ function inboundPolicyArtifactRepairPlan(findingId) {
   });
 }
 
+const LEGACY_DELEGATION_FIELDS = new Set([
+  "version",
+  "jobId",
+  "from",
+  "target",
+  "targetThreadId",
+  "threadId",
+  "task",
+  "permissions",
+  "turnId",
+  "status",
+  "result",
+  "error",
+  "createdAt",
+  "updatedAt",
+  "completedAt",
+]);
+const LEGACY_DELEGATION_TERMINAL_STATES = new Set([
+  "completed",
+  "failed",
+  "interrupted",
+  "cancelled",
+  "unknown",
+]);
+
+function assertMigratableLegacyDelegation(job) {
+  if (
+    job?.version !== 1 ||
+    !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
+      job.jobId || "",
+    ) ||
+    job.kind !== undefined ||
+    !LEGACY_DELEGATION_TERMINAL_STATES.has(job.status) ||
+    typeof job.from !== "string" ||
+    typeof job.target !== "string" ||
+    !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
+      job.threadId || "",
+    ) ||
+    typeof job.task !== "string" ||
+    Buffer.byteLength(job.task, "utf8") > 16 * 1024 ||
+    !Number.isFinite(Date.parse(job.createdAt || "")) ||
+    !Number.isFinite(Date.parse(job.updatedAt || "")) ||
+    !Number.isFinite(Date.parse(job.completedAt || "")) ||
+    Object.keys(job).some((field) => !LEGACY_DELEGATION_FIELDS.has(field))
+  ) {
+    const error = new Error(
+      "Legacy Job is not an unambiguous terminal Delegation record",
+    );
+    error.code = "ELEGACYJOBUNSAFE";
+    throw error;
+  }
+  return job;
+}
+
+function legacyJobMigrationEvidence() {
+  const candidates = listJobsReadOnly()
+    .filter((job) => job.kind === undefined)
+    .sort((left, right) => left.jobId.localeCompare(right.jobId))
+    .map((job) => {
+      assertMigratableLegacyDelegation(job);
+      return {
+        job,
+        jobId: job.jobId,
+        recordSha256: sha256(JSON.stringify(job)),
+      };
+    });
+  const summary = candidates.map(({ jobId, recordSha256 }) => ({
+    jobId,
+    recordSha256,
+  }));
+  return {
+    candidates,
+    legacyCount: candidates.length,
+    evidenceSha256: sha256(JSON.stringify(summary)),
+  };
+}
+
+function legacyJobRepairPlan(findingId) {
+  const finding = findingById(inspectJobs(listJobsReadOnly()), findingId);
+  if (finding.errorCode !== "ELEGACYJOB") {
+    throw new Error("Repair finding is not a current legacy Job kind warning");
+  }
+  const evidence = legacyJobMigrationEvidence();
+  if (evidence.legacyCount === 0) {
+    throw new Error("Legacy Job Repair has no eligible record");
+  }
+  const target = evidence.candidates[0];
+  return finalizePlan({
+    schemaVersion: 1,
+    findingId,
+    errorCode: finding.errorCode,
+    repairKind: "legacy-job-kind-migration",
+    mutationCategory: "job-schema-migration",
+    target: { kind: "job", id: target.jobId },
+    legacyCount: evidence.legacyCount,
+    targetRecordSha256: target.recordSha256,
+    evidenceSha256: evidence.evidenceSha256,
+    recoverability: "owner-private-job-backup",
+    automatic: false,
+  });
+}
+
 export function buildRepairPlan({ findingId }) {
   if (typeof findingId !== "string" || findingId.length > 192) {
     throw new Error("Repair finding id is invalid");
   }
   if (findingId === INDEX_FINDING_ID) return indexRepairPlan(findingId);
+  if (findingId === LEGACY_JOB_FINDING_ID) {
+    return legacyJobRepairPlan(findingId);
+  }
   if (findingId === INBOUND_POLICY_STALE_FINDING_ID) {
     return inboundPolicyArtifactRepairPlan(findingId);
   }
@@ -297,7 +413,7 @@ export function buildRepairPlan({ findingId }) {
     return clusterRepairPlan(findingId);
   }
   throw new Error(
-    "Repair supports only Cluster membership redo, stale Ledger index, and stale Inbound Policy artifact findings",
+    "Repair supports only Cluster membership redo, stale Ledger index, stale Inbound Policy artifact, and legacy Job kind findings",
   );
 }
 
@@ -409,12 +525,49 @@ function backupInboundPolicyArtifacts(transactionDirectory, plan) {
   return { kind: "inbound-policy-artifacts", files, evidence };
 }
 
+function backupLegacyJob(transactionDirectory, plan) {
+  const evidence = legacyJobMigrationEvidence();
+  const target = evidence.candidates[0];
+  if (
+    evidence.legacyCount !== plan.legacyCount ||
+    evidence.evidenceSha256 !== plan.evidenceSha256 ||
+    target?.jobId !== plan.target.id ||
+    target?.recordSha256 !== plan.targetRecordSha256
+  ) {
+    const error = new Error("Legacy Job Repair evidence changed before backup");
+    error.code = "EREPAIRSTALE";
+    throw error;
+  }
+  const contents = `${JSON.stringify(target.job, null, 2)}\n`;
+  const bytes = Buffer.byteLength(contents, "utf8");
+  if (bytes > LEGACY_JOB_BACKUP_MAX_BYTES) {
+    throw new Error("Legacy Job backup exceeds its byte limit");
+  }
+  assertRepairCapacity(bytes + 512 * 1024);
+  writePrivateFile(
+    path.join(transactionDirectory, LEGACY_JOB_BACKUP_NAME),
+    contents,
+  );
+  return {
+    kind: "legacy-job",
+    files: [{
+      name: LEGACY_JOB_BACKUP_NAME,
+      bytes,
+      sha256: sha256(contents),
+    }],
+    evidence,
+  };
+}
+
 function backupRepair(transactionDirectory, plan) {
   if (plan.repairKind === "cluster-membership-redo") {
     return backupCluster(transactionDirectory, plan);
   }
   if (plan.repairKind === "delivery-ledger-index-rebuild") {
     return backupIndex(transactionDirectory, plan);
+  }
+  if (plan.repairKind === "legacy-job-kind-migration") {
+    return backupLegacyJob(transactionDirectory, plan);
   }
   return backupInboundPolicyArtifacts(transactionDirectory, plan);
 }
@@ -426,6 +579,33 @@ function boundedErrorCode(error) {
 }
 
 function verifyRepair(plan) {
+  if (plan.repairKind === "legacy-job-kind-migration") {
+    const target = readJob(plan.target.id);
+    if (!target || target.kind !== "delegation") {
+      const error = new Error("Legacy Job Repair did not migrate its exact target");
+      error.code = "EREPAIRVERIFY";
+      throw error;
+    }
+    const { kind: _kind, ...originalShape } = target;
+    if (sha256(JSON.stringify(originalShape)) !== plan.targetRecordSha256) {
+      const error = new Error("Legacy Job Repair changed fields beyond kind");
+      error.code = "EREPAIRVERIFY";
+      throw error;
+    }
+    const remaining = listJobsReadOnly().filter(
+      (job) => job.kind === undefined,
+    ).length;
+    if (remaining !== plan.legacyCount - 1) {
+      const error = new Error("Legacy Job Repair remaining count is inconsistent");
+      error.code = "EREPAIRVERIFY";
+      throw error;
+    }
+    return {
+      id: plan.findingId,
+      status: remaining === 0 ? "pass" : "progress",
+      remainingCount: remaining,
+    };
+  }
   const checks = plan.repairKind === "cluster-membership-redo"
     ? inspectNodeDirectory({ stateDir: CXMSG_STATE_DIR })
     : plan.repairKind === "delivery-ledger-index-rebuild"
@@ -455,6 +635,43 @@ async function executeRepair(plan, backup) {
     return rebuildDeliveryLedgerIndex({
       expectedLedgerManifestSha256: backup.evidence.ledgerManifestSha256,
       expectedIndexGenerationSha256: backup.evidence.indexGenerationSha256,
+    });
+  }
+  if (plan.repairKind === "legacy-job-kind-migration") {
+    return withRetentionMutation(async () => {
+      const evidence = legacyJobMigrationEvidence();
+      const target = evidence.candidates[0];
+      if (
+        evidence.legacyCount !== plan.legacyCount ||
+        evidence.evidenceSha256 !== backup.evidence.evidenceSha256 ||
+        target?.jobId !== plan.target.id ||
+        target?.recordSha256 !== plan.targetRecordSha256
+      ) {
+        const error = new Error(
+          "Legacy Job Repair evidence changed before mutation",
+        );
+        error.code = "EREPAIRSTALE";
+        throw error;
+      }
+      await withJobLock(plan.target.id, () => {
+        const current = readJob(plan.target.id);
+        if (
+          !current ||
+          current.kind !== undefined ||
+          sha256(JSON.stringify(current)) !== plan.targetRecordSha256
+        ) {
+          const error = new Error(
+            "Legacy Job Repair target changed before mutation",
+          );
+          error.code = "EREPAIRSTALE";
+          throw error;
+        }
+        writeJob({ ...current, kind: "delegation" });
+      });
+      return {
+        migrated: true,
+        remainingCount: plan.legacyCount - 1,
+      };
     });
   }
   return purgeStaleInboundPolicyArtifacts({

@@ -306,7 +306,7 @@ cxmsg deliveries cancel <logical-message-id> --json
 cxmsg deliveries rebuild-index --json
 ```
 
-Three deterministic Doctor findings have an explicit Repair path. Planning is
+Four deterministic Doctor findings have an explicit Repair path. Planning is
 read-only and writes no Repair state. Apply requires the exact digest, repeats
 the finding and evidence checks under a private Repair lease, preserves an
 owner-only backup, calls the existing owner mutation once, verifies the same
@@ -325,6 +325,10 @@ cxmsg repair plan inbound-policies.entries --json
 cxmsg repair apply inbound-policies.entries \
   --confirm <plan-digest> --json
 
+cxmsg repair plan jobs.records.legacy-kind --json
+cxmsg repair apply jobs.records.legacy-kind \
+  --confirm <plan-digest> --json
+
 cxmsg repair retention plan --before <ISO-timestamp> --json
 cxmsg repair retention archive --before <same-ISO-timestamp> \
   --confirm <plan-digest> --json
@@ -333,9 +337,13 @@ cxmsg repair retention restore <archive-id> \
   --confirm <archive-id> --json
 ```
 
-Only `ECLUSTERMEMBERSHIPREDO`, `ELEDGERINDEXSTALE`, and
-`EINBOUNDPOLICYTRANSIENTSTALE` are allowlisted. The last operation accepts only
-recognized, owner-private policy mutation artifacts older than the grace
+Only `ECLUSTERMEMBERSHIPREDO`, `ELEDGERINDEXSTALE`,
+`EINBOUNDPOLICYTRANSIENTSTALE`, and `ELEGACYJOB` are allowlisted. Legacy Job
+migration selects one deterministic, terminal, unambiguous implicit Delegation
+per confirmed plan, preserves every existing field, adds only
+`kind: "delegation"`, and reports the remaining count. Repeat plan/apply until
+the finding clears; each Job has its own private backup and receipt. The policy
+artifact operation accepts only recognized, owner-private mutation artifacts older than the grace
 period, backs up their exact bytes, and never deletes a valid or invalid policy
 record. A stale digest, changed owner evidence, ambiguous Cluster prefix, unsafe backup,
 unverified result, or exhausted 256 MiB/1,024-transaction Repair retention

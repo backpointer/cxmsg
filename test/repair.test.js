@@ -208,6 +208,53 @@ function staleInboundPolicyArtifactFixture(root) {
   };
 }
 
+function legacyJobFixture(root) {
+  const jobs = path.join(root, "jobs");
+  mkdirSync(jobs, { recursive: true, mode: 0o700 });
+  const records = [
+    {
+      version: 1,
+      jobId: "13345678-2234-4234-8234-123456789abc",
+      from: "repair-sender",
+      target: "repair-target-a",
+      targetThreadId: "23345678-2234-4234-8234-123456789abc",
+      threadId: "23345678-2234-4234-8234-123456789abc",
+      task: "private legacy task marker",
+      permissions: "read-only",
+      turnId: "33345678-2234-4234-8234-123456789abc",
+      status: "completed",
+      result: "private legacy result marker",
+      error: null,
+      createdAt: "2026-08-15T00:00:00.000Z",
+      updatedAt: "2026-08-15T00:01:00.000Z",
+      completedAt: "2026-08-15T00:01:00.000Z",
+    },
+    {
+      version: 1,
+      jobId: "43345678-2234-4234-8234-123456789abc",
+      from: "repair-sender",
+      target: "repair-target-b",
+      threadId: "53345678-2234-4234-8234-123456789abc",
+      task: "second private legacy task",
+      permissions: null,
+      turnId: null,
+      status: "interrupted",
+      result: null,
+      error: "interrupted before migration",
+      createdAt: "2026-08-15T00:02:00.000Z",
+      updatedAt: "2026-08-15T00:03:00.000Z",
+      completedAt: "2026-08-15T00:03:00.000Z",
+    },
+  ];
+  for (const record of records) {
+    writeJson(path.join(jobs, `${record.jobId}.json`), record);
+  }
+  return {
+    records,
+    findingId: "jobs.records.legacy-kind",
+  };
+}
+
 test("Repair plan is read-only and exact apply emits a recoverable receipt", () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "cxmsg-repair-cluster-"));
   try {
@@ -523,6 +570,155 @@ test("Repair refuses to hide an unexpected Inbound Policy entry behind stale cle
     assert.match(plan.stderr, /requires only recognized stale artifacts/);
     assert.equal(existsSync(fixture.artifactPath), true);
     assert.equal(existsSync(path.join(root, "repairs")), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Repair migrates one deterministic legacy Job kind per confirmed plan", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "cxmsg-repair-legacy-job-"));
+  try {
+    const fixture = legacyJobFixture(root);
+    const planResult = runCxmsg(root, [
+      "repair",
+      "plan",
+      fixture.findingId,
+      "--json",
+    ]);
+    assert.equal(planResult.status, 0, planResult.stderr);
+    const plan = JSON.parse(planResult.stdout);
+    assert.equal(plan.repairKind, "legacy-job-kind-migration");
+    assert.equal(plan.legacyCount, 2);
+    assert.equal(plan.target.id, fixture.records[0].jobId);
+    assert.match(plan.targetRecordSha256, /^[0-9a-f]{64}$/);
+    assert.doesNotMatch(planResult.stdout, /private legacy task marker/);
+    assert.doesNotMatch(planResult.stdout, /private legacy result marker/);
+    assert.equal(existsSync(path.join(root, "repairs")), false);
+
+    const firstPath = path.join(root, "jobs", `${fixture.records[0].jobId}.json`);
+    const staleRecord = JSON.parse(readFileSync(firstPath, "utf8"));
+    staleRecord.updatedAt = "2026-08-15T00:01:01.000Z";
+    writeJson(firstPath, staleRecord);
+    const stale = runCxmsg(root, [
+      "repair",
+      "apply",
+      fixture.findingId,
+      "--confirm",
+      plan.planDigest,
+      "--json",
+    ]);
+    assert.equal(stale.status, 1);
+    assert.match(stale.stderr, /plan changed/);
+    assert.equal(existsSync(path.join(root, "repairs")), false);
+    writeJson(firstPath, fixture.records[0]);
+
+    const currentPlan = JSON.parse(
+      runCxmsg(root, ["repair", "plan", fixture.findingId, "--json"]).stdout,
+    );
+    const applied = runCxmsg(root, [
+      "repair",
+      "apply",
+      fixture.findingId,
+      "--confirm",
+      currentPlan.planDigest,
+      "--json",
+    ]);
+    assert.equal(applied.status, 0, applied.stderr);
+    const receipt = JSON.parse(applied.stdout);
+    assert.equal(receipt.status, "completed");
+    assert.equal(receipt.verification.status, "progress");
+    assert.equal(receipt.verification.remainingCount, 1);
+    assert.doesNotMatch(applied.stdout, /private legacy task marker/);
+    assert.doesNotMatch(applied.stdout, /private legacy result marker/);
+
+    const migrated = JSON.parse(readFileSync(firstPath, "utf8"));
+    assert.equal(migrated.kind, "delegation");
+    const { kind, ...preserved } = migrated;
+    assert.equal(kind, "delegation");
+    assert.deepEqual(preserved, fixture.records[0]);
+    const secondPath = path.join(
+      root,
+      "jobs",
+      `${fixture.records[1].jobId}.json`,
+    );
+    assert.equal(JSON.parse(readFileSync(secondPath, "utf8")).kind, undefined);
+
+    const backup = path.join(
+      root,
+      "repairs",
+      "transactions",
+      receipt.transactionId,
+      "legacy-job.json",
+    );
+    assert.deepEqual(JSON.parse(readFileSync(backup, "utf8")), fixture.records[0]);
+    assert.equal(statSync(backup).mode & 0o077, 0);
+    assert.equal(
+      inspectRepairState({ stateDir: root })
+        .find((check) =>
+          check.id ===
+            `repairs.transaction.${receipt.transactionId.slice(0, 8)}.consistency`
+        )?.status,
+      "pass",
+    );
+
+    const finalPlan = JSON.parse(
+      runCxmsg(root, ["repair", "plan", fixture.findingId, "--json"]).stdout,
+    );
+    assert.equal(finalPlan.legacyCount, 1);
+    assert.equal(finalPlan.target.id, fixture.records[1].jobId);
+    const finalApply = runCxmsg(root, [
+      "repair",
+      "apply",
+      fixture.findingId,
+      "--confirm",
+      finalPlan.planDigest,
+      "--json",
+    ]);
+    assert.equal(finalApply.status, 0, finalApply.stderr);
+    const finalReceipt = JSON.parse(finalApply.stdout);
+    assert.equal(finalReceipt.verification.status, "pass");
+    assert.equal(finalReceipt.verification.remainingCount, 0);
+    assert.equal(JSON.parse(readFileSync(secondPath, "utf8")).kind, "delegation");
+
+    const replay = runCxmsg(root, [
+      "repair",
+      "apply",
+      fixture.findingId,
+      "--confirm",
+      finalPlan.planDigest,
+      "--json",
+    ]);
+    assert.equal(replay.status, 1);
+    assert.match(replay.stderr, /missing or ambiguous/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Repair rejects an ambiguous or active implicit Job without mutation", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "cxmsg-repair-legacy-unsafe-"));
+  try {
+    const fixture = legacyJobFixture(root);
+    const unsafePath = path.join(
+      root,
+      "jobs",
+      `${fixture.records[0].jobId}.json`,
+    );
+    writeJson(unsafePath, {
+      ...fixture.records[0],
+      status: "running",
+      completedAt: null,
+    });
+    const result = runCxmsg(root, [
+      "repair",
+      "plan",
+      fixture.findingId,
+      "--json",
+    ]);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /not an unambiguous terminal Delegation/);
+    assert.equal(existsSync(path.join(root, "repairs")), false);
+    assert.equal(JSON.parse(readFileSync(unsafePath, "utf8")).kind, undefined);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

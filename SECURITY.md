@@ -71,8 +71,12 @@ The Repair Transaction Module is separate from Doctor and has no broad
 requires the exact plan digest, reacquires the finding and evidence under an
 owner-private Repair lease, then passes the same evidence digest into the
 existing owner lock before mutation. Only one recoverable Cluster head redo,
-rebuild of a stale Delivery Ledger cache index, and exact cleanup of recognized
-stale Inbound Policy mutation artifacts are allowlisted. Policy artifact cleanup
+rebuild of a stale Delivery Ledger cache index, exact cleanup of recognized
+stale Inbound Policy mutation artifacts, and one terminal unambiguous legacy
+Delegation Job kind migration are allowlisted. Legacy Job migration backs up
+the complete owner-private record, binds the plan to all remaining legacy Job
+digests, adds only the explicit `kind` field, and exposes no task or result text
+in the plan or receipt. Policy artifact cleanup
 backs up the exact private bytes before removal and cannot select policy records,
 active artifacts, or unexpected entries. Every
 attempt that reaches mutation preparation retains a bounded private backup and

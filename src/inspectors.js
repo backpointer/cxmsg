@@ -2692,6 +2692,7 @@ export function inspectRepairState({ stateDir } = {}) {
             "cluster-membership-redo",
             "delivery-ledger-index-rebuild",
             "inbound-policy-stale-artifact-purge",
+            "legacy-job-kind-migration",
           ].includes(
             receipt.repairKind,
           ) &&
@@ -2829,6 +2830,7 @@ export function inspectRepairState({ stateDir } = {}) {
           "cluster-head",
           "delivery-ledger-index",
           "inbound-policy-artifacts",
+          "legacy-job",
         ].includes(
           manifest?.backup?.kind,
         ) &&
@@ -2871,6 +2873,10 @@ export function inspectRepairState({ stateDir } = {}) {
       expectedRootEntries.add("index");
     } else if (manifest?.backup?.kind === "inbound-policy-artifacts") {
       expectedRootEntries.add("inbound-policy-artifacts");
+    } else if (manifest?.backup?.kind === "legacy-job") {
+      for (const backup of backupFiles) {
+        expectedRootEntries.add(backup.name);
+      }
     }
     if (
       readdirSync(transactionDirectory).some(
@@ -4544,7 +4550,8 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
       summary: `${legacy} legacy Job record(s) rely on the implicit Delegation kind`,
       verification: "schema-compatible",
       errorCode: "ELEGACYJOB",
-      remediation: "Retain the records; a future explicit migration may add the kind field",
+      remediation:
+        "Run cxmsg repair plan jobs.records.legacy-kind, confirm its exact digest, and repeat one-record Repair until the finding clears",
     }));
   }
   if (checks.length === 0) {
