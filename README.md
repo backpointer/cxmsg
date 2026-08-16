@@ -1126,6 +1126,8 @@ Because the native frame has no reason field, cxmsg also records bounded local
 status. Route Admission quarantine is distinguished from downstream delivery
 failure without adding body text, paths, endpoints, or authority to the wire
 frame.
+If returning the native status itself fails, the original denial code remains
+separate from bounded `returnErrorCode` transport evidence.
 
 An ordinary Claude Peer Message may carry an exact envelope-level
 `in-reply-to` UUID. After exact source validation, cxmsg records this separately

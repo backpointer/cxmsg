@@ -19,6 +19,7 @@ import {
   sendClaudePeerFrame,
 } from "../src/claude-messaging.js";
 import {
+  claudeIngressErrorCode,
   handleClaudeRequestOrMessage,
   returnClaudePeerStatus,
 } from "../src/claude-bridge.js";
@@ -128,6 +129,13 @@ test("Claude native peer status frames preserve only bounded receipt evidence", 
     messageId: MESSAGE_ID,
     status: "delivered",
   });
+  assert.deepEqual(Object.keys(frame).sort(), [
+    "action",
+    "msgV",
+    "orig_msg_id",
+    "status",
+    "type",
+  ]);
   assert.deepEqual(
     parseClaudePeerStatusFrame(frame),
     { messageId: MESSAGE_ID, status: "delivered" },
@@ -199,6 +207,27 @@ test("Claude bridge returns native downstream status without turning it into an 
   assert.equal(deniedEvents[0].errorCode, "EEXTERNALWRITERUNVERIFIED");
   assert.equal(deniedEvents[0].denialOrigin, "downstream-error");
 
+  const quarantineEvents = [];
+  assert.equal(
+    await returnClaudePeerStatus(
+      "coordinator",
+      {
+        fromSocket: "/tmp/cc-socks/12345.sock",
+        messageId: MESSAGE_ID,
+      },
+      "denied",
+      {
+        errorCode: "EROUTEQUARANTINED",
+        denialOrigin: "route-admission",
+        send: async () => {},
+        log: async (event) => quarantineEvents.push(event),
+      },
+    ),
+    true,
+  );
+  assert.equal(quarantineEvents[0].errorCode, "EROUTEQUARANTINED");
+  assert.equal(quarantineEvents[0].denialOrigin, "route-admission");
+
   const failedEvents = [];
   const failed = await returnClaudePeerStatus(
     "coordinator",
@@ -208,6 +237,8 @@ test("Claude bridge returns native downstream status without turning it into an 
     },
     "denied",
     {
+      errorCode: "EEXTERNALWRITERUNVERIFIED",
+      denialOrigin: "downstream-error",
       send: async () => {
         throw Object.assign(new Error("blocked"), { code: "EPERM" });
       },
@@ -216,7 +247,19 @@ test("Claude bridge returns native downstream status without turning it into an 
   );
   assert.equal(failed, false);
   assert.equal(failedEvents[0].phase, "status-return");
-  assert.equal(failedEvents[0].errorCode, "EPERM");
+  assert.equal(failedEvents[0].errorCode, "EEXTERNALWRITERUNVERIFIED");
+  assert.equal(failedEvents[0].returnErrorCode, "EPERM");
+  assert.equal(failedEvents[0].denialOrigin, "downstream-error");
+});
+
+test("Claude ingress errors retain only bounded diagnostic codes", () => {
+  assert.equal(
+    claudeIngressErrorCode({ code: "EEXTERNALWRITERUNVERIFIED" }),
+    "EEXTERNALWRITERUNVERIFIED",
+  );
+  assert.equal(claudeIngressErrorCode({ code: "lowercase" }), "ECLAUDEINGRESS");
+  assert.equal(claudeIngressErrorCode({ code: "E".repeat(33) }), "ECLAUDEINGRESS");
+  assert.equal(claudeIngressErrorCode({ code: 123 }), "ECLAUDEINGRESS");
 });
 
 test("Claude cross-session frames reject malformed stable sender identity", () => {

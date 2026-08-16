@@ -24,6 +24,7 @@ test("coordination events redact bodies, paths, and unbounded values", () => {
     target: "/private/secret/project",
     outcome: "x".repeat(129),
     errorCode: "EPERM",
+    returnErrorCode: "ECONNRESET",
     denialOrigin: "downstream-error",
     body: "must not be logged",
   });
@@ -31,6 +32,7 @@ test("coordination events redact bodies, paths, and unbounded values", () => {
   assert.equal(event.target, "redacted");
   assert.equal(event.outcome, "redacted");
   assert.equal(event.errorCode, "EPERM");
+  assert.equal(event.returnErrorCode, "ECONNRESET");
   assert.equal(event.denialOrigin, "downstream-error");
   assert.equal("body" in event, false);
 });

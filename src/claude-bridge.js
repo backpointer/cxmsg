@@ -72,6 +72,11 @@ import {
 export const CLAUDE_BRIDGES_DIR = path.join(CXMSG_STATE_DIR, "claude-bridges");
 export const CLAUDE_BRIDGE_IMPLEMENTATION_REVISION =
   CXMSG_IMPLEMENTATION_REVISIONS.claudeBridge;
+const CLAUDE_DENIAL_ORIGINS = new Set([
+  "route-admission",
+  "downstream-error",
+  "inbound-policy",
+]);
 
 function bridgeRecordPath(target) {
   return path.join(CLAUDE_BRIDGES_DIR, `${validateSessionName(target)}.json`);
@@ -477,6 +482,18 @@ export async function returnClaudePeerStatus(
     denialOrigin = null,
   } = {},
 ) {
+  const denialErrorCode =
+    typeof errorCode === "string" && /^[A-Z0-9_]{1,32}$/.test(errorCode)
+      ? errorCode
+      : status === "denied" && errorCode !== null
+        ? "ECLAUDEINGRESS"
+        : null;
+  const normalizedDenialOrigin =
+    denialOrigin === null
+      ? null
+      : CLAUDE_DENIAL_ORIGINS.has(denialOrigin)
+        ? denialOrigin
+        : "unknown";
   try {
     await send(
       parsed.fromSocket,
@@ -488,24 +505,30 @@ export async function returnClaudePeerStatus(
       correlationId: parsed.messageId,
       target,
       outcome: status,
-      errorCode,
-      denialOrigin,
+      errorCode: denialErrorCode,
+      denialOrigin: normalizedDenialOrigin,
     });
     return true;
   } catch (error) {
+    const returnErrorCode =
+      typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code)
+        ? error.code
+        : "ESTATUSRETURN";
     await log({
       kind: "claude-native-peer",
       phase: "status-return",
       correlationId: parsed.messageId,
       target,
       outcome: "failed",
-      errorCode: error?.code || "status_return_error",
+      errorCode: denialErrorCode || returnErrorCode,
+      returnErrorCode,
+      denialOrigin: normalizedDenialOrigin,
     });
     return false;
   }
 }
 
-function boundedClaudeIngressErrorCode(error) {
+export function claudeIngressErrorCode(error) {
   return typeof error?.code === "string" && /^[A-Z0-9_]{1,32}$/.test(error.code)
     ? error.code
     : "ECLAUDEINGRESS";
@@ -679,7 +702,7 @@ export async function runClaudeBridge(target) {
       } catch (error) {
         if (parsed) {
           await returnClaudePeerStatus(target, parsed, "denied", {
-            errorCode: boundedClaudeIngressErrorCode(error),
+            errorCode: claudeIngressErrorCode(error),
             denialOrigin: "downstream-error",
           });
         }

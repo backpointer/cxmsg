@@ -454,6 +454,8 @@ The native frame remains reason-free. For local diagnosis only, cxmsg records a
 bounded error code and denial origin in its owner-private coordination event
 log. This evidence never changes routing, retry, wake, permission, approval, or
 Delegation state and contains no Message Body, path, endpoint, or token.
+Failure to return the control frame records a separate bounded return error and
+does not overwrite the original denial cause.
 
 Busy fallback is opt-in per dispatch invocation. The default remains
 fail-before-attempt. With `--when-busy when-idle`, only an exact frozen Codex
