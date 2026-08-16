@@ -1394,7 +1394,12 @@ source thread first. Inline Delegation still uses a metadata-only Busy
 preflight. WebSocket size failures expose bounded `EAPPWSOUTBOUND`,
 `EAPPWSBUFFER`, `EAPPWSFRAME`, or `EAPPWSFRAGMENTS` evidence instead of an
 unstructured transport message. `EAPPWSNOTCONNECTED` identifies a request that
-could not be written to the App Server connection.
+could not be written to the App Server connection. Immediate Delegation opens
+and validates an App Server connection before retaining a large task or creating
+its Job, so a failed initial preflight has zero Job and Message Body side
+effects. This check cannot eliminate a disconnect between preflight and worker
+turn start; that race is retained as a terminal Job with explicit failure stage
+and model-turn evidence instead of being retried automatically.
 
 If a long-history source cannot be forked within the bounded WebSocket frame,
 cxmsg does not silently replace its execution identity. After confirming that
