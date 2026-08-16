@@ -93,6 +93,9 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
         delivery: {
           attempt: 1,
           maxAttempts: 4,
+          ackProtocolVersion: 2,
+          targetSessionStatusAtAttempt: "idle",
+          targetPeerProtocolAtAttempt: 1,
           transportStatus: "delivered",
           acceptedAt: "2026-08-16T00:00:00.000Z",
           completionDeadlineAt: "2026-08-16T00:15:00.000Z",
@@ -105,6 +108,9 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
     },
   );
   assert.equal(status.status, "completed");
+  assert.equal(status.ackProtocolVersion, 2);
+  assert.equal(status.targetSessionStatusAtAttempt, "idle");
+  assert.equal(status.targetPeerProtocolAtAttempt, 1);
   assert.equal(status.acceptedAt, "2026-08-16T00:00:00.000Z");
   assert.equal(
     status.completionDeadlineAt,
@@ -112,6 +118,27 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
   );
   assert.equal(status.nativeReceipts[0].status, "delivered");
   assert.equal(status.replyEvidence.status, "correlated");
+
+  const legacyTimeout = await callCxmsgMcpTool(
+    "cxmsg_delivery_status",
+    { delivery_id: DELIVERY_ID },
+    {
+      jobReader: () => ({
+        ...sent[0],
+        status: "ack_timeout",
+        error: "legacy timeout wording",
+        delivery: {
+          ...sent[0].delivery,
+          attempt: 1,
+          transportStatus: "delivered",
+          errorCode: null,
+        },
+      }),
+    },
+  );
+  assert.equal(legacyTimeout.ackProtocolVersion, null);
+  assert.equal(legacyTimeout.errorCode, "EACKTIMEOUT");
+  assert.match(legacyTimeout.error, /target work may still be in progress/);
 });
 
 test("MCP rejects unreachable and ambiguous targets without sending", async () => {

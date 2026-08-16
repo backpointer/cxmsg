@@ -4,6 +4,7 @@ import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { CXMSG_IMPLEMENTATION_REVISIONS } from "../src/version.js";
 
 test("Claude bridge status explicitly warns about stale loaded code", async () => {
   const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-bridge-status-"));
@@ -35,7 +36,12 @@ test("Claude bridge status explicitly warns about stale loaded code", async () =
     );
     assert.equal(result.status, 0, result.stderr);
     assert.match(result.stdout, /implementation=stale/);
-    assert.match(result.stderr, /revision 25; current=28/);
+    assert.match(
+      result.stderr,
+      new RegExp(
+        `revision 25; current=${CXMSG_IMPLEMENTATION_REVISIONS.claudeBridge}`,
+      ),
+    );
     assert.match(result.stderr, /bridge stop worker/);
   } finally {
     await fs.rm(stateDir, { recursive: true, force: true });

@@ -463,6 +463,11 @@ serialized with ACK persistence so stale inspection cannot overwrite a
 terminal result. Retryable ACKs after acceptance fail closed instead of
 starting another attempt for work that may already be running.
 
+ACK protocol version and bounded target status/protocol snapshots are advisory
+diagnostic provenance only. They cannot authorize work, prove model completion,
+or make an `ack_timeout` safe to retry automatically. A missing application ACK
+remains ambiguous even when the transport write and target transcript succeed.
+
 Claude native `peer_message_status` receipts are matched only to an exact
 outbound transport message ID and retained as bounded transport evidence.
 `held`, `denied`, `expired`, and `delivered` never become a model ACK or cause

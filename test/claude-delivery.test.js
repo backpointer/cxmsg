@@ -9,6 +9,7 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
   process.env.CXMSG_STATE_DIR = stateDir;
   try {
     const {
+      CLAUDE_ACK_PROTOCOL_VERSION,
       createClaudeDeliveryJob,
       parseClaudeDeliveryAck,
       recordClaudeDeliveryAck,
@@ -24,6 +25,7 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
       address: "uds:/tmp/cc-socks/12345.sock",
       socketPath: "/tmp/cc-socks/12345.sock",
       status: "idle",
+      peerProtocol: 1,
     };
     const sourceRecord = { threadId: "source-thread" };
     let job = await createClaudeDeliveryJob({
@@ -144,6 +146,14 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     assert.match(frames[0].message.content, new RegExp(job.jobId));
     assert.match(frames[0].message.content, /status=accepted/);
     assert.match(frames[0].message.content, /status=completed/);
+    assert.match(frames[0].message.content, /SendMessage/);
+    assert.match(frames[0].message.content, /Before starting any work/);
+    assert.match(frames[0].message.content, /Do not merely print/);
+    assert.match(frames[0].message.content, /instead of accepted/);
+    assert.match(frames[0].message.content, /never send retryable_error/);
+    assert.equal(job.delivery.ackProtocolVersion, CLAUDE_ACK_PROTOCOL_VERSION);
+    assert.equal(job.delivery.targetSessionStatusAtAttempt, "idle");
+    assert.equal(job.delivery.targetPeerProtocolAtAttempt, 1);
 
     job = await recordClaudeNativeDeliveryReceipt({
       messageId: frames[0].msg_id,
@@ -376,6 +386,10 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     });
     completionTimedOut = await refreshClaudeDelivery(completionTimedOut);
     assert.equal(completionTimedOut.status, "completion_timeout");
+    assert.equal(
+      completionTimedOut.delivery.errorCode,
+      "ECOMPLETIONTIMEOUT",
+    );
     assert.match(completionTimedOut.error, /did not complete/);
     const lateCompletion = parseClaudeDeliveryAck(
       `<cxmsg-ack in-reply-to="${completionTimedOut.jobId}" status="completed">\nLate completion\n</cxmsg-ack>`,
@@ -612,6 +626,11 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     );
     assert.equal(failedResolution.status, "transport_error");
     assert.match(failedResolution.error, /not reachable/);
+    assert.equal(failedResolution.delivery.ackProtocolVersion, null);
+    assert.equal(
+      failedResolution.delivery.targetSessionStatusAtAttempt,
+      null,
+    );
     assert.equal(readJob(vanishedPeer.jobId).status, "transport_error");
 
     let timedOut = await createClaudeDeliveryJob({
@@ -627,8 +646,14 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
         ackDeadlineAt: new Date(Date.now() - 1_000).toISOString(),
       },
     });
-    timedOut = await refreshClaudeDelivery(timedOut);
+    const timeoutEvents = [];
+    timedOut = await refreshClaudeDelivery(timedOut, {
+      log: async (event) => timeoutEvents.push(event),
+    });
     assert.equal(timedOut.status, "ack_timeout");
+    assert.equal(timedOut.delivery.errorCode, "EACKTIMEOUT");
+    assert.match(timedOut.error, /target work may still be in progress/);
+    assert.equal(timeoutEvents.at(-1).errorCode, "EACKTIMEOUT");
     await assert.rejects(
       recordClaudeDeliveryAck(
         {
@@ -651,6 +676,8 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     );
     assert.equal(timedOut.status, "completed");
     assert.equal(timedOut.ack.late, true);
+    assert.equal(timedOut.delivery.errorCode, null);
+    assert.equal(timedOut.error, null);
 
     let lateAccepted = await createClaudeDeliveryJob({
       from: "coordinator",
@@ -681,6 +708,8 @@ test("Claude deliveries persist transport state and schedule bounded 529 retries
     );
     assert.equal(lateAccepted.status, "acknowledged");
     assert.equal(lateAccepted.ack.late, true);
+    assert.equal(lateAccepted.delivery.errorCode, null);
+    assert.equal(lateAccepted.error, null);
     assert.ok(
       Date.parse(lateAccepted.delivery.completionDeadlineAt) > Date.now(),
     );

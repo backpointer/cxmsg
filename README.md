@@ -1111,9 +1111,9 @@ cxmsg claude retry <delivery-id>
 ```
 
 `transport_delivered` means the Claude UDS accepted the frame; it does not mean
-the Claude API completed a model turn. cxmsg wraps correlated deliveries with
-an ACK request. A cooperating Claude session replies to the message's `from`
-address with one of these envelopes:
+the Claude API completed a model turn. ACK protocol v2 asks a cooperating
+Claude session to use its native `SendMessage` tool immediately, before starting
+work, and return this envelope to the incoming message's exact `from` address:
 
 ```text
 <cxmsg-ack in-reply-to="<delivery-id>" status="accepted">
@@ -1121,7 +1121,7 @@ queued or started
 </cxmsg-ack>
 ```
 
-An optional `accepted` ACK is followed later by exactly one terminal ACK:
+That `accepted` ACK is followed later by exactly one terminal ACK:
 
 ```text
 <cxmsg-ack in-reply-to="<delivery-id>" status="completed">
@@ -1150,6 +1150,12 @@ record each transport message ID so the receiver can avoid duplicating work.
 After `accepted`, only `completed` or `failed` is valid; a later retryable ACK
 is rejected so cxmsg cannot automatically duplicate work Claude already
 accepted.
+
+`cxmsg claude delivery --json` records the ACK protocol version plus bounded
+target session-status and peer-protocol snapshots from each transport attempt.
+They are diagnostic provenance, not proof that the target read or accepted the
+message. If no correlated ACK reaches the bridge, `EACKTIMEOUT` explicitly says
+that target work may still be in progress and forbids blind retry.
 
 ACK instructions are embedded in each outbound frame. An in-flight delivery
 created before an upgrade therefore retains its earlier instruction shape.

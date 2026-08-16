@@ -24,6 +24,9 @@ const ACK_PATTERN =
 const UUID_PATTERN = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 export const DEFAULT_CLAUDE_ACK_TIMEOUT_SECONDS = 120;
 export const DEFAULT_CLAUDE_COMPLETION_TIMEOUT_SECONDS = 15 * 60;
+export const CLAUDE_ACK_PROTOCOL_VERSION = 2;
+export const CLAUDE_ACK_TIMEOUT_ERROR =
+  "No correlated application ACK reached cxmsg before the deadline; transport was delivered and target work may still be in progress. Do not retry without operator review";
 const MAX_CLAUDE_TIMEOUT_SECONDS = 24 * 60 * 60;
 
 function boundedTimeoutSeconds(label, value) {
@@ -42,15 +45,39 @@ function deliveryBody(job) {
     `<cxmsg-delivery id="${job.jobId}">\n` +
     `${job.task}\n` +
     "</cxmsg-delivery>\n\n" +
-    "After receiving this message, you may first reply with one correlated status=accepted envelope. " +
-    "If you do, later reply with exactly one correlated status=completed or status=failed envelope. " +
-    "Otherwise reply with exactly one terminal envelope after processing:\n" +
+    "Before starting any work, immediately use Claude Code's SendMessage tool to send exactly one correlated status=accepted envelope to this incoming peer's exact from address. " +
+    "Do not merely print the envelope in your local response:\n" +
+    `<cxmsg-ack in-reply-to="${job.jobId}" status="accepted">\n` +
+    "accepted\n" +
+    "</cxmsg-ack>\n\n" +
+    "After processing, use SendMessage to send exactly one terminal status=completed or status=failed envelope to the same address:\n" +
     `<cxmsg-ack in-reply-to="${job.jobId}" status="completed">\n` +
     "brief result\n" +
     "</cxmsg-ack>\n" +
-    "Use status=retryable_error with code=429 or code=529 and retry-after=<seconds> for a transient API overload. " +
+    "If a transient 429 or 529 overload is already known before acceptance, send status=retryable_error with retry-after=<seconds> instead of accepted. After accepted, never send retryable_error. " +
     "Use the delivery id to avoid performing the same task twice after a retry."
   );
+}
+
+function targetAttemptEvidence(peer) {
+  if (!peer) {
+    return {
+      ackProtocolVersion: null,
+      targetSessionStatusAtAttempt: null,
+      targetPeerProtocolAtAttempt: null,
+    };
+  }
+  const status = peer?.sessionStatus || peer?.status || "unknown";
+  return {
+    ackProtocolVersion: CLAUDE_ACK_PROTOCOL_VERSION,
+    targetSessionStatusAtAttempt: /^[a-z][a-z0-9_-]{0,31}$/i.test(status)
+      ? status
+      : "unknown",
+    targetPeerProtocolAtAttempt:
+      Number.isSafeInteger(peer?.peerProtocol) && peer.peerProtocol > 0
+        ? peer.peerProtocol
+        : null,
+  };
 }
 
 export function parseClaudeDeliveryAck(body) {
@@ -293,6 +320,9 @@ export async function createClaudeDeliveryJob({
       attempt: 0,
       maxAttempts,
       messageIds: [],
+      ackProtocolVersion: null,
+      targetSessionStatusAtAttempt: null,
+      targetPeerProtocolAtAttempt: null,
       transportStatus: "pending",
       attemptedAt: null,
       deliveredAt: null,
@@ -429,8 +459,10 @@ export async function sendClaudeDeliveryJob(
     attempt,
     outcome: "attempted",
   });
+  let peer = null;
   try {
-    const peer = resolveStoredTarget(await peers(), current);
+    peer = resolveStoredTarget(await peers(), current);
+    const attemptEvidence = targetAttemptEvidence(peer);
     const sending =
       current.claudeTarget?.sessionId &&
       (current.claudeTarget.address !== peer.address ||
@@ -462,6 +494,7 @@ export async function sendClaudeDeliveryJob(
         ...sending.delivery,
         attempt,
         messageIds: [...(sending.delivery?.messageIds || []), messageId],
+        ...attemptEvidence,
         transportStatus: "delivered",
         attemptedAt,
         deliveredAt: new Date().toISOString(),
@@ -487,6 +520,7 @@ export async function sendClaudeDeliveryJob(
         ...current.delivery,
         attempt,
         messageIds: [...(current.delivery?.messageIds || []), messageId],
+        ...targetAttemptEvidence(peer),
         transportStatus: "failed",
         attemptedAt,
         nextAttemptAt: null,
@@ -702,7 +736,8 @@ export async function refreshClaudeDelivery(
       transition = {
         status: "ack_timeout",
         phase: "ack-deadline",
-        error: "Claude did not acknowledge the delivery before its deadline",
+        errorCode: "EACKTIMEOUT",
+        error: CLAUDE_ACK_TIMEOUT_ERROR,
       };
     } else if (
       current.status === "acknowledged" &&
@@ -711,6 +746,7 @@ export async function refreshClaudeDelivery(
       transition = {
         status: "completion_timeout",
         phase: "completion-deadline",
+        errorCode: "ECOMPLETIONTIMEOUT",
         error: "Claude did not complete the accepted delivery before its deadline",
       };
     }
@@ -719,6 +755,10 @@ export async function refreshClaudeDelivery(
       ...current,
       status: transition.status,
       error: transition.error,
+      delivery: {
+        ...current.delivery,
+        errorCode: transition.errorCode,
+      },
     };
   });
   if (transition) {
@@ -729,6 +769,7 @@ export async function refreshClaudeDelivery(
       target: timedOut.target,
       attempt: timedOut.delivery?.attempt,
       outcome: "timeout",
+      errorCode: transition.errorCode,
     });
   }
   return timedOut;

@@ -34,6 +34,7 @@ import {
   resolveClaudePeer,
 } from "../src/claude-messaging.js";
 import {
+  CLAUDE_ACK_TIMEOUT_ERROR,
   createClaudeDeliveryJob,
   refreshClaudeDelivery,
   sendClaudeDeliveryJob,
@@ -2128,6 +2129,12 @@ async function commandClaudeDelivery(jobId, jsonOutput) {
     throw new Error(`unknown Claude delivery: ${jobId}`);
   }
   job = await refreshClaudeDelivery(job);
+  const timeoutErrorCode =
+    job.status === "ack_timeout"
+      ? "EACKTIMEOUT"
+      : job.status === "completion_timeout"
+        ? "ECOMPLETIONTIMEOUT"
+        : null;
   const value = {
     jobId: job.jobId,
     from: job.from,
@@ -2135,18 +2142,26 @@ async function commandClaudeDelivery(jobId, jsonOutput) {
     status: job.status,
     attempt: job.delivery?.attempt || 0,
     maxAttempts: job.delivery?.maxAttempts || 0,
+    ackProtocolVersion: job.delivery?.ackProtocolVersion || null,
+    targetSessionStatusAtAttempt:
+      job.delivery?.targetSessionStatusAtAttempt || null,
+    targetPeerProtocolAtAttempt:
+      job.delivery?.targetPeerProtocolAtAttempt || null,
     transportStatus: job.delivery?.transportStatus || null,
     deliveredAt: job.delivery?.deliveredAt || null,
     ackDeadlineAt: job.delivery?.ackDeadlineAt || null,
     acceptedAt: job.delivery?.acceptedAt || null,
     completionDeadlineAt: job.delivery?.completionDeadlineAt || null,
     nextAttemptAt: job.delivery?.nextAttemptAt || null,
-    errorCode: job.delivery?.errorCode || null,
+    errorCode: job.delivery?.errorCode || timeoutErrorCode,
     nativeReceipts: job.delivery?.nativeReceipts || [],
     ack: job.ack || null,
     replyEvidence: job.replyEvidence || null,
     wake: job.wake || null,
-    error: job.error || null,
+    error:
+      job.status === "ack_timeout"
+        ? CLAUDE_ACK_TIMEOUT_ERROR
+        : job.error || null,
   };
   if (jsonOutput) process.stdout.write(`${JSON.stringify(value, null, 2)}\n`);
   else {

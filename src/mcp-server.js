@@ -1,6 +1,7 @@
 import readline from "node:readline";
 import { claudeBridgeState } from "./claude-bridge.js";
 import {
+  CLAUDE_ACK_TIMEOUT_ERROR,
   createClaudeDeliveryJob,
   sendClaudeDeliveryJob,
 } from "./claude-delivery.js";
@@ -103,6 +104,12 @@ function publicPeer(peer) {
 }
 
 function publicDelivery(job) {
+  const timeoutErrorCode =
+    job.status === "ack_timeout"
+      ? "EACKTIMEOUT"
+      : job.status === "completion_timeout"
+        ? "ECOMPLETIONTIMEOUT"
+        : null;
   return {
     deliveryId: job.jobId,
     from: job.from,
@@ -111,13 +118,18 @@ function publicDelivery(job) {
     destinationAttempted: (job.delivery?.attempt || 0) > 0,
     attempt: job.delivery?.attempt || 0,
     maxAttempts: job.delivery?.maxAttempts || 0,
+    ackProtocolVersion: job.delivery?.ackProtocolVersion || null,
+    targetSessionStatusAtAttempt:
+      job.delivery?.targetSessionStatusAtAttempt || null,
+    targetPeerProtocolAtAttempt:
+      job.delivery?.targetPeerProtocolAtAttempt || null,
     transportStatus: job.delivery?.transportStatus || null,
     deliveredAt: job.delivery?.deliveredAt || null,
     ackDeadlineAt: job.delivery?.ackDeadlineAt || null,
     acceptedAt: job.delivery?.acceptedAt || null,
     completionDeadlineAt: job.delivery?.completionDeadlineAt || null,
     nextAttemptAt: job.delivery?.nextAttemptAt || null,
-    errorCode: job.delivery?.errorCode || null,
+    errorCode: job.delivery?.errorCode || timeoutErrorCode,
     nativeReceipts: job.delivery?.nativeReceipts || [],
     replyEvidence: job.replyEvidence || null,
     ack: job.ack
@@ -138,7 +150,10 @@ function publicDelivery(job) {
           error: job.wake.error,
         }
       : null,
-    error: job.error || null,
+    error:
+      job.status === "ack_timeout"
+        ? CLAUDE_ACK_TIMEOUT_ERROR
+        : job.error || null,
   };
 }
 
