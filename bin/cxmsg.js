@@ -309,7 +309,7 @@ function usage(exitCode = 0) {
              [--payload-type <type>] [--expiry <timestamp>]
              [--wake-policy immediate|when-idle|after-turn|after-job]
              [--after-turn <turn-id>|--after-job <job-id>]
-             [--] <target> <message...>
+             [--] <codex-session> <message...>
   cxmsg reply [--from <name>] [--logical-message-id <uuid>]
               <reply-to-message-id|reply-handle> <message...>
   cxmsg route bind <session> --project <id> --role <role>
@@ -2656,7 +2656,16 @@ async function commandSend(args) {
   const message = validateStoredMessage(args.slice(1).join(" "));
   if (from === target) throw new Error("cannot send a peer message to the same session");
   const targetRecord = readSessionRecord(target);
-  if (!targetRecord) throw new Error(`unknown Codex session: ${target}`);
+  if (!targetRecord) {
+    const error = new Error(
+      `unknown Codex session: ${target}; 'cxmsg send' accepts registered Codex names from 'cxmsg peers'. ` +
+        "For a Claude target, choose an exact name or session id from 'cxmsg claude peers' and use " +
+        `'cxmsg claude send --from ${from} <claude-session> <message>'. ` +
+        "Claude-visible 'codex-<peer>' bridge names are not Codex targets",
+    );
+    error.code = "ETARGETRUNTIME";
+    throw error;
+  }
 
   const routed = Object.keys(routeOptions).length > 0;
   if (

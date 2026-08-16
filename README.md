@@ -83,6 +83,15 @@ different shell, specify it explicitly:
 cxmsg send --from coordinator worker "ping"
 ```
 
+`cxmsg send` accepts only a registered Codex name printed by `cxmsg peers`.
+The Codex and Claude target namespaces are deliberately separate: use an exact
+Claude name or session ID printed by `cxmsg claude peers` with `cxmsg claude
+send`. A stable `claude:<session-id>` Directory Node key is graph and routing
+identity, not a direct transport argument. Likewise, a Claude-visible
+`codex-<peer>` bridge name is the address Claude uses to reach Codex; it is not
+an alias accepted by `cxmsg send`. cxmsg never guesses another runtime or
+silently switches transports after an unknown-target error.
+
 For an explicitly isolated target, bind its current registered thread to one
 Project and role, then use a typed routed send:
 

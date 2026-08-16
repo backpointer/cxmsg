@@ -81,6 +81,26 @@ test("payload-type reports its routed-send requirement before message creation",
   assert.equal(routes.listQuarantine().length, 0);
 });
 
+test("unknown Codex targets explain the runtime namespace without creating a message", () => {
+  const quarantineCount = routes.listQuarantine().length;
+  const sent = cxmsg(
+    "send",
+    "--from",
+    "coordinator",
+    "claude-reviewer",
+    "bounded review request",
+  );
+  assert.equal(sent.status, 1);
+  assert.match(sent.stderr, /unknown Codex session: claude-reviewer/);
+  assert.match(sent.stderr, /code=ETARGETRUNTIME/);
+  assert.match(sent.stderr, /cxmsg peers/);
+  assert.match(sent.stderr, /cxmsg claude peers/);
+  assert.match(sent.stderr, /cxmsg claude send --from coordinator/);
+  assert.match(sent.stderr, /codex-<peer>.*not Codex targets/);
+  assert.doesNotMatch(sent.stderr, /App Server/);
+  assert.equal(routes.listQuarantine().length, quarantineCount);
+});
+
 test("a bound target quarantines an unscoped CLI send before App Server access", () => {
   const sent = cxmsg("send", "--from", "coordinator", "worker", "unscoped body");
   assert.equal(sent.status, 1);

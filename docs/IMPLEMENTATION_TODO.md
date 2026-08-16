@@ -410,6 +410,17 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Return an exact Directory sync command when one known Project contains an
       unsynchronized scheduled Delegation target.
 
+### Post-roadmap maintenance — runtime target namespace diagnostics
+
+- Status: COMPLETE
+
+- [x] Keep direct Codex and Claude target namespaces separate; never infer or
+      switch transports from a display-name prefix.
+- [x] Report an unknown Codex target before message creation with a structured
+      error and exact peer-discovery and Claude-send guidance.
+- [x] Document that stable Directory Node keys and Claude-visible Codex bridge
+      names are not direct `cxmsg send` aliases.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.
