@@ -152,6 +152,17 @@ holds its active inode, a segment that grows past the threshold is reported and
 rotated only on explicit daemon restart rather than being renamed underneath a
 live writer.
 
+Job archive state is owner-private runtime evidence, never repository content.
+Planning reads Job metadata and reference owners without exposing task, result,
+path, Endpoint, approval content, or capability material. Archive requires an
+exact plan digest under the shared Retention Mutation Barrier, uses bounded
+same-owner regular files, and never deletes source evidence. A Job referenced
+by Delivery scheduling, another active Job, an Execution Thread, or a
+Conversation cannot be archived. Archived Job records still protect stored
+Delegation task bodies from ordinary Retention purge. Restore is explicit,
+exact-ID, and one-time; neither archive nor restore grants retry, wake,
+permission, approval, or Delegation authority.
+
 Long Codex Peer Message bodies are stored separately under the owner-only
 Message Body Store. Content References expose a message UUID, byte count, and
 SHA-256 digest, never a filesystem path. Reads are bounded and digest-verified.

@@ -77,6 +77,12 @@ import {
   restoreRepairRetention,
 } from "../src/repair-retention.js";
 import {
+  archiveJobs,
+  buildJobRetentionPlan,
+  recoverJobRetention,
+  restoreJobs,
+} from "../src/job-retention.js";
+import {
   cancelScheduledDelivery,
   findDeliveryByReplyHandle,
   listDeliveryLedgerIndexed,
@@ -305,6 +311,10 @@ function usage(exitCode = 0) {
   cxmsg retention purge --before <ISO timestamp> [--scope all|ledger|bodies|quarantine] --confirm <plan-digest> [--json]
   cxmsg retention restore <backup-id> --confirm <backup-id> [--json]
   cxmsg retention recover [--json]
+  cxmsg jobs retention plan --before <ISO timestamp> [--json]
+  cxmsg jobs retention archive --before <ISO timestamp> --confirm <plan-digest> [--json]
+  cxmsg jobs retention restore <archive-id> --confirm <archive-id> [--json]
+  cxmsg jobs retention recover [--json]
   cxmsg open <name> [-- <codex resume options>]
   cxmsg attach <name> [-- <codex resume options>]
   cxmsg detach <name>
@@ -4994,6 +5004,72 @@ async function commandRepair(args) {
   );
 }
 
+async function commandJobs(args) {
+  if (args.shift() !== "retention") usage(2);
+  const operation = args.shift();
+  if (!["plan", "archive", "restore", "recover"].includes(operation)) usage(2);
+  const archiveId = operation === "restore" ? args.shift() || null : null;
+  let before = null;
+  let confirm = null;
+  let jsonOutput = false;
+  while (args.length) {
+    const option = args.shift();
+    if (option === "--before") before = args.shift() || null;
+    else if (option === "--confirm") confirm = args.shift() || null;
+    else if (option === "--json") jsonOutput = true;
+    else throw new Error(`unknown jobs retention ${operation} option: ${option}`);
+  }
+  if (operation === "recover") {
+    if (before || confirm || archiveId) {
+      throw new Error("jobs retention recover accepts only --json");
+    }
+    const recovered = await recoverJobRetention();
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify({ recovered }, null, 2)}\n`
+        : `jobs retention recovery complete\trecovered=${recovered.length}\n`,
+    );
+    return;
+  }
+  if (operation === "restore") {
+    if (!archiveId || confirm !== archiveId || before) {
+      throw new Error("jobs retention restore requires the exact archive id confirmation");
+    }
+    const receipt = await restoreJobs({ archiveId });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(receipt, null, 2)}\n`
+        : `jobs retention restored\tarchive=${receipt.archiveId}` +
+          `\trestore=${receipt.restoreId}\n`,
+    );
+    return;
+  }
+  if (!before) throw new Error(`jobs retention ${operation} requires --before <ISO timestamp>`);
+  if (operation === "archive") {
+    if (!confirm) throw new Error("jobs retention archive requires --confirm <plan-digest>");
+    const receipt = await archiveJobs({ before, expectedPlanDigest: confirm });
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(receipt, null, 2)}\n`
+        : `jobs retention archived\tarchive=${receipt.archiveId}` +
+          `\titems=${receipt.itemCount}\tplan-digest=${receipt.planDigest}\n`,
+    );
+    return;
+  }
+  if (confirm) throw new Error("jobs retention plan does not accept --confirm");
+  const plan = await buildJobRetentionPlan({ before });
+  process.stdout.write(
+    jsonOutput
+      ? `${JSON.stringify(plan, null, 2)}\n`
+      : `jobs retention plan; automatic deletion=false, mutation=archive` +
+        `, cutoff=${plan.cutoff}, eligible=${plan.category.eligible.length}` +
+        `, blocked=${plan.category.blocked.length}` +
+        `, retained-by-age=${plan.category.retainedByAge}` +
+        `, estimated-bytes=${plan.category.estimatedBytes}` +
+        `, plan-digest=${plan.planDigest}\n`,
+  );
+}
+
 async function commandRetention(args) {
   const operation = args.shift();
   if (!["plan", "purge", "restore", "recover"].includes(operation)) usage(2);
@@ -5091,6 +5167,9 @@ async function main() {
       break;
     case "retention":
       await commandRetention(args);
+      break;
+    case "jobs":
+      await commandJobs(args);
       break;
     case "create":
       await commandCreate(args[0]);

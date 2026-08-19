@@ -49,6 +49,7 @@ import {
   RUNTIME_LOG_ARCHIVES,
   RUNTIME_LOG_MAX_BYTES,
 } from "./runtime-logs.js";
+import { inspectJobRetentionState } from "./job-retention.js";
 import { failedProbe } from "./socket-probe.js";
 import { readThreadMetadata } from "./thread-activity.js";
 import {
@@ -247,6 +248,45 @@ export function inspectRuntimeLogs({ stateDir }) {
       required: invalid,
     }),
   ];
+}
+
+export function inspectJobRetention({ stateDir }) {
+  const state = inspectJobRetentionState({ stateDir });
+  if (state.status === "missing") {
+    return [diagnosticCheck({
+      id: "job-retention.state",
+      scope: "job-retention",
+      status: "pass",
+      summary: "No Job archive state exists",
+      verification: "metadata",
+      required: false,
+    })];
+  }
+  if (state.status === "invalid") {
+    return [diagnosticCheck({
+      id: "job-retention.state",
+      scope: "job-retention",
+      status: "fail",
+      summary: "Job archive state failed owner-private consistency validation",
+      verification: "metadata",
+      errorCode: state.errorCode || "EJOBARCHIVESTATE",
+      remediation: "Do not archive or restore Jobs until the retained archive state is inspected",
+    })];
+  }
+  return [diagnosticCheck({
+    id: "job-retention.state",
+    scope: "job-retention",
+    status: state.nonterminal > 0 ? "warn" : "pass",
+    summary:
+      state.nonterminal > 0
+        ? `${state.nonterminal} Job archive transaction(s) require explicit recovery`
+        : `${state.archives} Job archive transaction(s) are structurally consistent`,
+    verification: "metadata",
+    errorCode: state.nonterminal > 0 ? "EJOBARCHIVEINCOMPLETE" : null,
+    remediation:
+      state.nonterminal > 0 ? "Run cxmsg jobs retention recover from an allowed host context" : null,
+    required: false,
+  })];
 }
 
 function implementationRevisionCheck({
@@ -4716,7 +4756,7 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
       verification: "records",
       errorCode: "EJOBRETENTION",
       remediation:
-        "Plan an explicit owner-confirmed Job archive; do not delete Jobs that protect Delivery or reply correlations",
+        "Run cxmsg jobs retention plan with a cutoff at least 7 days old; archive only after confirming the exact digest",
       required: false,
     }));
   }

@@ -5,6 +5,7 @@ import {
   inspectBridges,
   inspectConversationState,
   inspectInboundPolicies,
+  inspectJobRetention,
   inspectJobs,
   inspectMessageBodies,
   inspectNodeDirectory,
@@ -76,6 +77,9 @@ export async function runDoctor({
   checks.push(...(adapters.inspectRuntime || inspectRuntime)());
   checks.push(
     ...(adapters.inspectRuntimeLogs || inspectRuntimeLogs)({ stateDir }),
+  );
+  checks.push(
+    ...(adapters.inspectJobRetention || inspectJobRetention)({ stateDir }),
   );
   const state = (adapters.inspectState || inspectState)({ stateDir, target });
   checks.push(...state.checks);

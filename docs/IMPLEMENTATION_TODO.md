@@ -440,6 +440,21 @@ Repair is not required for Direct Conversation, Team Cast, or Graph Projection.
 - [x] Verify the CLI under a filesystem profile with read permission and no
       write permission, including a missing-store no-creation case.
 
+### Post-roadmap maintenance — Job retention archive
+
+- Status: COMPLETE; explicit recoverable archive only
+
+- [x] Add a deterministic read-only plan for strong terminal Jobs older than
+      seven days.
+- [x] Protect Delivery triggers, active Job correlations, Execution Threads,
+      Conversations, ambiguous lifecycle states, and unresolved Claude replies.
+- [x] Add exact-digest archive, crash roll-forward, exact-ID one-time restore,
+      bounded owner-private state, and Doctor consistency checks.
+- [x] Keep archived Delegation task references visible to ordinary Retention so
+      Message Body purge cannot orphan them.
+- [x] Keep archive and restore outside Scheduler, result, wake, retry,
+      permission, approval, and Delegation authority.
+
 ## Explicit non-goals for this sequence
 
 - Multi-host routing, Redis Streams, and remote brokers.

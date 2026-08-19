@@ -367,6 +367,32 @@ incomplete Repair-archive journal under the same lease. Thus a stale archive
 request never moves one of its own candidates, although it may finish a
 previously committed interrupted operation before returning the stale error.
 
+Job retention uses a separate recoverable archive and the shared Retention
+Mutation Barrier:
+
+```bash
+cxmsg jobs retention plan --before <ISO-timestamp> --json
+cxmsg jobs retention archive --before <same-ISO-timestamp> \
+  --confirm <plan-digest> --json
+cxmsg jobs retention recover --json
+cxmsg jobs retention restore <archive-id> \
+  --confirm <archive-id> --json
+```
+
+The plan is read-only, preserves at least seven days, and emits only bounded
+Job identity, kind, status, timestamps, sizes, digests, and protection reasons.
+It selects only `completed`, `failed`, `expired`, or `cancelled` Jobs. Pending,
+ambiguous, timeout-reconcilable, unresolved Claude-response, Delivery-trigger,
+active Job-reply, Execution Thread, and Conversation evidence remains blocked.
+Archive revalidates the exact plan after ordinary Job writers drain, then moves
+each record into a 1 GiB/1,024-transaction owner-private store. Interrupted
+moves roll forward; restore requires the exact archive ID and can run once.
+Archived Job records continue to protect retained Delegation task bodies from
+ordinary Retention purge. They are removed from active `result`, `wait`,
+Scheduler, and receipt lookup; restore the exact archive before using those
+active Interfaces. No archive operation starts a model turn or creates,
+transfers, or revokes authority.
+
 Cancellation is terminal and refuses an active, unexpired claim. Scheduler
 status includes a heartbeat and reports a live identity with a stale heartbeat
 as `stalled`, rather than as stopped. A separate desired-state marker makes a

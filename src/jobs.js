@@ -30,7 +30,7 @@ import {
   isEmptyRolloutReadError,
 } from "./thread-activity.js";
 
-const JOBS_DIR = path.join(CXMSG_STATE_DIR, "jobs");
+export const JOBS_DIR = path.join(CXMSG_STATE_DIR, "jobs");
 const WORKER_REGISTRATION_GRACE_MS = 10_000;
 const TURN_OBSERVATION_GRACE_MS = 5_000;
 

@@ -29,6 +29,9 @@ to ignore unknown fields.
   Record-specific finding IDs use digest-derived labels and do not expose the
   native identity.
 - `EJOBRETENTION` is an owner-review threshold, not deletion authority.
+- Job archive consistency uses scope `job-retention`. A nonterminal archive is
+  reported as `EJOBARCHIVEINCOMPLETE`; malformed, unsafe, duplicated, or
+  missing pair evidence is a required failure and is never repaired by Doctor.
 
 All check fields, status meanings, privacy boundaries, `--target` behavior, and
 read-only guarantees not changed above remain as specified by

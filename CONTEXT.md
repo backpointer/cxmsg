@@ -196,6 +196,14 @@ send.
   indexes, and emits an audit receipt. After Tombstone creation it recovers by
   roll-forward; restore requires the current transaction head and unchanged
   active generation and never removes Tombstones.
+- **Job Retention Plan**: a deterministic, metadata-only selection of strong
+  terminal Job records older than seven days. Jobs referenced by Delivery
+  Triggers, active Job reply correlation, Execution Threads, or Conversations
+  remain blocked, as do reconcilable or ambiguous lifecycle states.
+- **Job Archive Transaction**: an explicit digest-confirmed move of selected
+  Job records into a bounded owner-private recoverable store under the shared
+  Retention Mutation Barrier. It never deletes a Job or its retained task body;
+  interrupted moves roll forward and exact-ID restore is one-time.
 - **Peer Message Context Projection Module**: the Module that converts an
   admitted Peer Message into the minimal model-visible untrusted marker,
   display alias, Message Body or preview, and Reply Handle. Routing, scheduling,

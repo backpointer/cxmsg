@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { listDeliveryLedgerIndexed } from "./delivery-ledger.js";
 import { listJobs } from "./jobs.js";
+import { listArchivedJobsForRetention } from "./job-retention.js";
 import { listMessageBodies } from "./message-bodies.js";
 import { listQuarantineForRetention } from "./route-admission.js";
 import { listConversationMessageIds } from "./conversations.js";
@@ -298,7 +299,7 @@ export async function buildRetentionPlan(
     ledgerReader = listDeliveryLedgerIndexed,
     bodyReader = listMessageBodies,
     quarantineReader = listQuarantineForRetention,
-    jobReader = listJobs,
+    jobReader = () => [...listJobs(), ...listArchivedJobsForRetention()],
     conversationReader = () => [
       ...listConversationMessageIds(),
       ...listGroupConversationMessageIds(),
