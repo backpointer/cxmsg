@@ -5,7 +5,31 @@ import net from "node:net";
 const WEBSOCKET_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const DEFAULT_CONNECT_TIMEOUT_MS = 5_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 1_000;
-const DEFAULT_MAX_BUFFER_BYTES = 1024 * 1024;
+export const DEFAULT_APP_SERVER_FRAME_BYTES = 4 * 1024 * 1024;
+export const MIN_APP_SERVER_FRAME_BYTES = 256 * 1024;
+export const MAX_APP_SERVER_FRAME_BYTES = 8 * 1024 * 1024;
+const MAX_WEBSOCKET_FRAME_OVERHEAD_BYTES = 14;
+const MAX_WEBSOCKET_UPGRADE_HEADER_BYTES = 16 * 1024;
+
+export function configuredAppServerFrameBytes(
+  value = process.env.CXMSG_APP_SERVER_FRAME_BYTES,
+) {
+  if (value === undefined || value === "") return DEFAULT_APP_SERVER_FRAME_BYTES;
+  if (!/^\d+$/.test(String(value))) {
+    throw new Error("CXMSG_APP_SERVER_FRAME_BYTES must be an integer");
+  }
+  const bytes = Number(value);
+  if (
+    !Number.isSafeInteger(bytes) ||
+    bytes < MIN_APP_SERVER_FRAME_BYTES ||
+    bytes > MAX_APP_SERVER_FRAME_BYTES
+  ) {
+    throw new Error(
+      `CXMSG_APP_SERVER_FRAME_BYTES must be ${MIN_APP_SERVER_FRAME_BYTES}-${MAX_APP_SERVER_FRAME_BYTES}`,
+    );
+  }
+  return bytes;
+}
 
 function bufferLimitError(code, message, observedBytes, limitBytes) {
   const error = new Error(message);
@@ -47,7 +71,7 @@ export class UnixWebSocket extends EventEmitter {
     {
       connectTimeoutMs = DEFAULT_CONNECT_TIMEOUT_MS,
       closeTimeoutMs = DEFAULT_CLOSE_TIMEOUT_MS,
-      maxBufferBytes = DEFAULT_MAX_BUFFER_BYTES,
+      maxBufferBytes = configuredAppServerFrameBytes(),
     } = {},
   ) {
     super();
@@ -55,6 +79,8 @@ export class UnixWebSocket extends EventEmitter {
     this.connectTimeoutMs = connectTimeoutMs;
     this.closeTimeoutMs = closeTimeoutMs;
     this.maxBufferBytes = maxBufferBytes;
+    this.maxReceiveBufferBytes =
+      maxBufferBytes + MAX_WEBSOCKET_FRAME_OVERHEAD_BYTES;
     this.socket = null;
     this.upgraded = false;
     this.closed = false;
@@ -87,6 +113,20 @@ export class UnixWebSocket extends EventEmitter {
       }, this.connectTimeoutMs);
       upgradeTimer.unref();
       const settle = () => clearTimeout(upgradeTimer);
+      const failReceiveBuffer = (observedBytes, limitBytes) => {
+        const error = bufferLimitError(
+          "EAPPWSBUFFER",
+          "app-server WebSocket receive buffer limit exceeded",
+          observedBytes,
+          limitBytes,
+        );
+        if (!settled) {
+          settled = true;
+          settle();
+          reject(error);
+        }
+        this.socket.destroy(error);
+      };
 
       this.socket = net.createConnection({ path: this.socketPath });
       this.socket.once("connect", () => {
@@ -104,28 +144,36 @@ export class UnixWebSocket extends EventEmitter {
         );
       });
       this.socket.on("data", (chunk) => {
-        if (this.buffer.length + chunk.length > this.maxBufferBytes) {
-          const error = bufferLimitError(
-            "EAPPWSBUFFER",
-            "app-server WebSocket receive buffer limit exceeded",
-            this.buffer.length + chunk.length,
-            this.maxBufferBytes,
-          );
-          if (!settled) {
-            settled = true;
-            settle();
-            reject(error);
-          }
-          this.socket.destroy(error);
+        const receiveLimit = this.upgraded
+          ? this.maxReceiveBufferBytes
+          : this.maxReceiveBufferBytes + MAX_WEBSOCKET_UPGRADE_HEADER_BYTES;
+        if (this.buffer.length + chunk.length > receiveLimit) {
+          failReceiveBuffer(this.buffer.length + chunk.length, receiveLimit);
           return;
         }
         if (!this.upgraded) {
           this.buffer = Buffer.concat([this.buffer, chunk]);
           const boundary = this.buffer.indexOf("\r\n\r\n");
-          if (boundary === -1) return;
+          if (boundary === -1) {
+            if (this.buffer.length > MAX_WEBSOCKET_UPGRADE_HEADER_BYTES) {
+              failReceiveBuffer(
+                this.buffer.length,
+                MAX_WEBSOCKET_UPGRADE_HEADER_BYTES,
+              );
+            }
+            return;
+          }
+          if (boundary + 4 > MAX_WEBSOCKET_UPGRADE_HEADER_BYTES) {
+            failReceiveBuffer(boundary + 4, MAX_WEBSOCKET_UPGRADE_HEADER_BYTES);
+            return;
+          }
 
           const header = this.buffer.subarray(0, boundary).toString("utf8");
           this.buffer = this.buffer.subarray(boundary + 4);
+          if (this.buffer.length > this.maxReceiveBufferBytes) {
+            failReceiveBuffer(this.buffer.length, this.maxReceiveBufferBytes);
+            return;
+          }
           const statusOk = /^HTTP\/1\.1 101\b/m.test(header);
           const acceptMatch = header.match(/^Sec-WebSocket-Accept:\s*(.+)$/im);
           if (!statusOk || acceptMatch?.[1]?.trim() !== expectedAccept) {

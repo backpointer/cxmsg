@@ -5,7 +5,12 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { UnixWebSocket } from "../src/unix-websocket.js";
+import {
+  configuredAppServerFrameBytes,
+  DEFAULT_APP_SERVER_FRAME_BYTES,
+  MAX_APP_SERVER_FRAME_BYTES,
+  UnixWebSocket,
+} from "../src/unix-websocket.js";
 
 const GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
@@ -56,11 +61,22 @@ function upgrade(socket, onData = () => {}, onUpgrade = () => {}) {
 }
 
 function serverFrame(payload, { opcode, final }) {
-  const body = Buffer.from(payload, "utf8");
-  return Buffer.concat([
-    Buffer.from([(final ? 0x80 : 0) | opcode, body.length]),
-    body,
-  ]);
+  const body = Buffer.isBuffer(payload) ? payload : Buffer.from(payload, "utf8");
+  let header;
+  if (body.length < 126) {
+    header = Buffer.from([(final ? 0x80 : 0) | opcode, body.length]);
+  } else if (body.length <= 0xffff) {
+    header = Buffer.alloc(4);
+    header[0] = (final ? 0x80 : 0) | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(body.length, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = (final ? 0x80 : 0) | opcode;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(body.length), 2);
+  }
+  return Buffer.concat([header, body]);
 }
 
 test("UnixWebSocket times out upgrades, flushes close, and bounds frames", { timeout: 2_000 }, async () => {
@@ -121,6 +137,67 @@ test("UnixWebSocket times out upgrades, flushes close, and bounds frames", { tim
       server.destroyConnections();
       await new Promise((resolve) => server.close(resolve));
     }
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("App Server WebSocket frame policy has a safe bounded override", () => {
+  assert.equal(configuredAppServerFrameBytes(undefined), DEFAULT_APP_SERVER_FRAME_BYTES);
+  assert.equal(configuredAppServerFrameBytes("4194304"), 4_194_304);
+  assert.throws(() => configuredAppServerFrameBytes("not-a-number"), /integer/);
+  assert.throws(
+    () => configuredAppServerFrameBytes(String(MAX_APP_SERVER_FRAME_BYTES + 1)),
+    /must be/,
+  );
+});
+
+test("default App Server frame bound accepts the largest retained historical failure", { timeout: 5_000 }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-ws-headroom-"));
+  const socketPath = path.join(directory, "headroom.sock");
+  const payload = Buffer.alloc(3_389_426, 0x61);
+  const server = await listen(socketPath, (socket) => {
+    upgrade(socket, undefined, () => {
+      socket.write(serverFrame(payload, { opcode: 0x1, final: true }));
+    });
+  });
+  const client = new UnixWebSocket(socketPath);
+  try {
+    const message = new Promise((resolve, reject) => {
+      client.once("message", resolve);
+      client.once("error", reject);
+    });
+    await client.connect();
+    assert.equal(Buffer.byteLength(await message, "utf8"), payload.length);
+  } finally {
+    await client.close();
+    server.destroyConnections();
+    await new Promise((resolve) => server.close(resolve));
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("receive buffering allows WebSocket overhead at the exact payload limit", { timeout: 2_000 }, async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-ws-boundary-"));
+  const socketPath = path.join(directory, "boundary.sock");
+  const server = await listen(socketPath, (socket) => {
+    upgrade(socket, undefined, () => {
+      socket.write(
+        serverFrame(Buffer.alloc(256, 0x61), { opcode: 0x1, final: true }),
+      );
+    });
+  });
+  const client = new UnixWebSocket(socketPath, { maxBufferBytes: 256 });
+  try {
+    const received = new Promise((resolve, reject) => {
+      client.once("message", resolve);
+      client.once("error", reject);
+    });
+    await client.connect();
+    assert.equal((await received).length, 256);
+  } finally {
+    await client.close();
+    server.destroyConnections();
+    await new Promise((resolve) => server.close(resolve));
     await fs.rm(directory, { recursive: true, force: true });
   }
 });

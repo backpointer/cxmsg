@@ -25,7 +25,7 @@ function peer(overrides = {}) {
   };
 }
 
-test("MCP exposes bounded host-side list, send, and status tools", async () => {
+test("MCP exposes bounded host-side list, send, status, and wait tools", async () => {
   const initialized = await handleMcpRequest({
     method: "initialize",
     params: { protocolVersion: "2025-06-18" },
@@ -36,7 +36,12 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
   const listed = await handleMcpRequest({ method: "tools/list" });
   assert.deepEqual(
     listed.tools.map((tool) => tool.name),
-    ["cxmsg_peers_list", "cxmsg_send_peer", "cxmsg_delivery_status"],
+    [
+      "cxmsg_peers_list",
+      "cxmsg_send_peer",
+      "cxmsg_delivery_status",
+      "cxmsg_wait_delivery",
+    ],
   );
 
   const sent = [];
@@ -85,7 +90,7 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
 
   const status = await callCxmsgMcpTool(
     "cxmsg_delivery_status",
-    { delivery_id: DELIVERY_ID },
+    { delivery_id: DELIVERY_ID, detail: "full" },
     {
       jobReader: () => ({
         ...sent[0],
@@ -121,7 +126,7 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
 
   const legacyTimeout = await callCxmsgMcpTool(
     "cxmsg_delivery_status",
-    { delivery_id: DELIVERY_ID },
+    { delivery_id: DELIVERY_ID, detail: "full" },
     {
       jobReader: () => ({
         ...sent[0],
@@ -139,6 +144,139 @@ test("MCP exposes bounded host-side list, send, and status tools", async () => {
   assert.equal(legacyTimeout.ackProtocolVersion, null);
   assert.equal(legacyTimeout.errorCode, "EACKTIMEOUT");
   assert.match(legacyTimeout.error, /target work may still be in progress/);
+});
+
+test("MCP defaults to compact redacted projections and accepts retained content refs", async () => {
+  const listed = await callCxmsgMcpTool(
+    "cxmsg_peers_list",
+    {},
+    { peers: async () => [peer()] },
+  );
+  assert.deepEqual(listed, {
+    peers: [
+      {
+        name: "reviewer",
+        status: "idle",
+        verification: "socket",
+      },
+    ],
+  });
+  assert.equal(JSON.stringify(listed).includes("/tmp/"), false);
+  assert.equal(JSON.stringify(listed).includes("/project"), false);
+
+  let storedMessage = null;
+  const delivery = await callCxmsgMcpTool(
+    "cxmsg_send_peer",
+    {
+      from_session: "coordinator",
+      target_session: SESSION_ID,
+      content_ref: "cxmsg-message:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    },
+    {
+      peers: async () => [peer()],
+      bridgeState: async () => ({ running: true, record: {} }),
+      session: () => ({ threadId: "source-thread" }),
+      messageReader: () => "retained coordination text",
+      createDelivery: ({ message, peer: target }) => {
+        storedMessage = message;
+        return {
+          jobId: DELIVERY_ID,
+          kind: "claude-delivery",
+          from: "coordinator",
+          target: target.name,
+          claudeTarget: { name: target.name },
+          delivery: { attempt: 0, maxAttempts: 4 },
+        };
+      },
+      sendDelivery: async (_bridge, _source, job) => ({
+        ...job,
+        status: "transport_delivered",
+        delivery: { attempt: 1, transportStatus: "delivered" },
+      }),
+    },
+  );
+  assert.equal(storedMessage, "retained coordination text");
+  assert.deepEqual(delivery, {
+    deliveryId: DELIVERY_ID,
+    from: "coordinator",
+    target: "reviewer",
+    status: "transport_delivered",
+    terminal: false,
+    destinationAttempted: true,
+    attempt: 1,
+    transportStatus: "delivered",
+  });
+});
+
+test("MCP waits once for a terminal delivery instead of model-driven polling", async () => {
+  let reads = 0;
+  const result = await callCxmsgMcpTool(
+    "cxmsg_wait_delivery",
+    { delivery_id: DELIVERY_ID, timeout_seconds: 1 },
+    {
+      jobReader: () => ({
+        jobId: DELIVERY_ID,
+        kind: "claude-delivery",
+        from: "coordinator",
+        target: "reviewer",
+        status: reads++ === 0 ? "transport_delivered" : "completed",
+        delivery: { attempt: 1, transportStatus: "delivered" },
+      }),
+      sleep: async () => {},
+    },
+  );
+  assert.equal(reads, 2);
+  assert.equal(result.status, "completed");
+  assert.equal(result.terminal, true);
+});
+
+test("MCP wait is bounded and send requires exactly one body source", async () => {
+  let timestamp = 0;
+  const waiting = await callCxmsgMcpTool(
+    "cxmsg_wait_delivery",
+    { delivery_id: DELIVERY_ID, timeout_seconds: 1 },
+    {
+      jobReader: () => ({
+        jobId: DELIVERY_ID,
+        kind: "claude-delivery",
+        from: "coordinator",
+        target: "reviewer",
+        status: "transport_delivered",
+        delivery: { attempt: 1, transportStatus: "delivered" },
+      }),
+      now: () => timestamp,
+      sleep: async (milliseconds) => {
+        timestamp += milliseconds;
+      },
+    },
+  );
+  assert.equal(waiting.waitTimedOut, true);
+  assert.equal(waiting.terminal, false);
+
+  const baseArgs = {
+    from_session: "coordinator",
+    target_session: "reviewer",
+  };
+  await assert.rejects(
+    callCxmsgMcpTool("cxmsg_send_peer", baseArgs),
+    /exactly one/,
+  );
+  await assert.rejects(
+    callCxmsgMcpTool("cxmsg_send_peer", {
+      ...baseArgs,
+      message: "inline",
+      content_ref: "cxmsg-message:aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    }),
+    /exactly one/,
+  );
+  await assert.rejects(
+    callCxmsgMcpTool(
+      "cxmsg_wait_delivery",
+      { delivery_id: DELIVERY_ID, timeout_seconds: 31 },
+      { jobReader: () => assert.fail("invalid wait must not read a Job") },
+    ),
+    /1 to 30/,
+  );
 });
 
 test("MCP rejects unreachable and ambiguous targets without sending", async () => {
@@ -216,5 +354,18 @@ test("MCP stdio emits JSON-RPC responses without protocol noise", async () => {
   await new Promise((resolve) => setImmediate(resolve));
   const parsed = JSON.parse(response.trim());
   assert.equal(parsed.id, 1);
-  assert.equal(parsed.result.tools.length, 3);
+  assert.equal(parsed.result.tools.length, 4);
+});
+
+test("MCP tool content is a compact summary while structured content remains usable", async () => {
+  const response = await handleMcpRequest(
+    {
+      method: "tools/call",
+      params: { name: "cxmsg_peers_list", arguments: {} },
+    },
+    { peers: async () => [peer()] },
+  );
+  assert.deepEqual(response.content, [{ type: "text", text: "1 Claude peers" }]);
+  assert.equal(response.structuredContent.peers[0].name, "reviewer");
+  assert.equal(response.structuredContent.peers[0].address, undefined);
 });

@@ -690,6 +690,8 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   assert.equal(terminalWithResultObservationFailure.length, 1);
   assert.equal(terminalWithResultObservationFailure[0].status, "warn");
   assert.equal(terminalWithResultObservationFailure[0].errorCode, "EAPPWSFRAME");
+  assert.equal(terminalWithResultObservationFailure[0].observedBytes, 1_097_173);
+  assert.equal(terminalWithResultObservationFailure[0].limitBytes, 1_048_576);
   assert.match(
     terminalWithResultObservationFailure[0].remediation,
     /do not rerun automatically/i,
@@ -714,6 +716,11 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
       failureCode: "EAPPWSFRAME",
       failureStage: "turn-start",
       modelTurnStarted: null,
+      failureEvidence: {
+        errorCode: "EAPPWSFRAME",
+        observedBytes: 1_247_151,
+        limitBytes: 1_048_576,
+      },
     },
     {
       version: 1,
@@ -733,6 +740,8 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   assert.match(stagedFailures[0].remediation, /Verify the App Server/);
   assert.match(stagedFailures[1].summary, /unverified model-turn acceptance/);
   assert.match(stagedFailures[1].remediation, /Do not retry/);
+  assert.equal(stagedFailures[1].observedBytes, 1_247_151);
+  assert.equal(stagedFailures[1].limitBytes, 1_048_576);
   assert.match(stagedFailures[2].summary, /after positive model-turn/);
   assert.equal(stagedFailures[2].errorCode, "EROLLOUTEMPTY");
   assert.match(stagedFailures[2].remediation, /do not retry or redelegate/i);
@@ -2044,11 +2053,21 @@ test("Doctor report policy and renderer have stable statuses and exit codes", ()
   assert.equal(healthy.overall, "healthy");
   assert.equal(doctorExitCode(healthy), 0);
 
-  const unknown = diagnosticCheck({ id: "b", scope: "test", status: "unknown", summary: "unverified", errorCode: "EPERM" });
+  const unknown = diagnosticCheck({
+    id: "b",
+    scope: "test",
+    status: "unknown",
+    summary: "unverified",
+    errorCode: "EPERM",
+    observedBytes: 3_389_426,
+    limitBytes: 1_048_576,
+  });
   const degraded = { overall: doctorOverall([unknown]), checks: [unknown], deep: true };
   assert.equal(degraded.overall, "degraded");
   assert.equal(doctorExitCode(degraded), 1);
-  assert.match(renderDoctorText(degraded), /^cxmsg doctor: degraded/m);
+  const rendered = renderDoctorText(degraded);
+  assert.match(rendered, /^cxmsg doctor: degraded/m);
+  assert.match(rendered, /observed_bytes=3389426 limit_bytes=1048576/);
 
   const failed = diagnosticCheck({ id: "c", scope: "test", status: "fail", summary: "failed" });
   assert.equal(doctorOverall([failed]), "unhealthy");

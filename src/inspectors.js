@@ -136,6 +136,8 @@ export function diagnosticCheck({
   repairable = false,
   remediation = null,
   required = true,
+  observedBytes = null,
+  limitBytes = null,
 }) {
   return Object.fromEntries(
     Object.entries({
@@ -148,6 +150,8 @@ export function diagnosticCheck({
       repairable,
       remediation,
       required,
+      observedBytes,
+      limitBytes,
     }).filter(([, value]) => value !== null),
   );
 }
@@ -4360,6 +4364,8 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
         summary: `Delegation ${label} completed but its final result could not be observed`,
         verification: "record:thread-items",
         errorCode: job.resultObservation.errorCode || "ERESULTOBSERVATION",
+        observedBytes: job.resultObservation.observedBytes ?? null,
+        limitBytes: job.resultObservation.limitBytes ?? null,
         remediation:
           "Treat the terminal turn as durable execution evidence; inspect the retained thread result separately and do not rerun automatically",
         required: false,
@@ -4396,6 +4402,8 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
               : `Delegation ${label} failed with unverified model-turn acceptance`,
         verification: `record:${job.failureStage}`,
         errorCode: job.failureCode || "EDELEGATIONWORKER",
+        observedBytes: job.failureEvidence?.observedBytes ?? null,
+        limitBytes: job.failureEvidence?.limitBytes ?? null,
         remediation:
           job.rerouteGuidance ||
           (turnEvidence === null

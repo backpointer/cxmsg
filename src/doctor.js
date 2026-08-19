@@ -168,6 +168,12 @@ export function renderDoctorText(report) {
     const details = [
       check.verification ? `verification=${check.verification}` : null,
       check.errorCode ? `error=${check.errorCode}` : null,
+      Number.isSafeInteger(check.observedBytes)
+        ? `observed_bytes=${check.observedBytes}`
+        : null,
+      Number.isSafeInteger(check.limitBytes)
+        ? `limit_bytes=${check.limitBytes}`
+        : null,
     ].filter(Boolean);
     lines.push(`${check.status.toUpperCase()}\t${check.id}\t${check.summary}${details.length ? `\t${details.join(" ")}` : ""}`);
     if (check.remediation) lines.push(`  remediation: ${check.remediation}`);

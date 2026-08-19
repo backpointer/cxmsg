@@ -31,6 +31,7 @@ import {
 } from "../src/attachments.js";
 import {
   listClaudePeers,
+  MAX_CLAUDE_FRAME_BYTES,
   resolveClaudePeer,
 } from "../src/claude-messaging.js";
 import {
@@ -176,10 +177,15 @@ import {
   validateSessionName,
 } from "../src/messaging.js";
 import {
+  MAX_STORED_MESSAGE_BYTES,
   messageBodyInfo,
   readMessageBody,
   storeMessageBody,
 } from "../src/message-bodies.js";
+import {
+  configuredAppServerFrameBytes,
+  MAX_APP_SERVER_FRAME_BYTES,
+} from "../src/unix-websocket.js";
 import {
   addClusterMember,
   addSuccessor,
@@ -417,6 +423,8 @@ function usage(exitCode = 0) {
 Environment:
   CODEX_BIN          Codex executable (default: codex)
   CXMSG_SOCKET       Optional custom app-server socket
+  CXMSG_APP_SERVER_FRAME_BYTES
+                     App Server WebSocket frame limit (262144-8388608; default 4194304)
   CODEX_SESSION_NAME Sender identity set automatically by 'cxmsg open'
 `;
   (exitCode === 0 ? process.stdout : process.stderr).write(output);
@@ -431,12 +439,19 @@ function commandVersion(args) {
     throw error;
   }
   const result = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     packageVersion: CXMSG_VERSION,
     implementationRevisions: CXMSG_IMPLEMENTATION_REVISIONS,
     appServer: {
       owner: "codex",
       revision: null,
+    },
+    transportLimits: {
+      appServerFrameBytes: configuredAppServerFrameBytes(),
+      appServerFrameMaximumBytes: MAX_APP_SERVER_FRAME_BYTES,
+      claudeFrameBytes: MAX_CLAUDE_FRAME_BYTES,
+      peerMessageBytes: MAX_MESSAGE_BYTES,
+      storedMessageBytes: MAX_STORED_MESSAGE_BYTES,
     },
   };
   if (jsonOutput) {
@@ -449,7 +464,12 @@ function commandVersion(args) {
       ` scheduler=${result.implementationRevisions.scheduler}` +
       ` host-relay=${result.implementationRevisions.hostRelay}` +
       ` claude-bridge=${result.implementationRevisions.claudeBridge}\n` +
-      "app-server external-codex\n",
+      "app-server external-codex\n" +
+      `transport app-server-frame=${result.transportLimits.appServerFrameBytes}` +
+      ` app-server-max=${result.transportLimits.appServerFrameMaximumBytes}` +
+      ` claude-frame=${result.transportLimits.claudeFrameBytes}` +
+      ` peer-message=${result.transportLimits.peerMessageBytes}` +
+      ` stored-message=${result.transportLimits.storedMessageBytes}\n`,
   );
 }
 

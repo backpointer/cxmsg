@@ -1121,16 +1121,23 @@ codex mcp add cxmsg -- cxmsg-mcp
 ```
 
 Restart the Codex client after changing MCP configuration. The server exposes
-three bounded tools:
+four bounded tools. Compact projections are the default; request
+`detail: "full"` only for diagnosis:
 
 - `cxmsg_peers_list`: list Claude peers and their transport state without
   invoking a model.
 - `cxmsg_send_peer`: send ordinary, user-authorized coordination text and
-  return a durable delivery ID.
+  return a durable delivery ID. It accepts either inline `message` text or one
+  owner-private `content_ref` already retained by the Message Body Store.
 - `cxmsg_delivery_status`: read redacted transport, ACK, retry, and completion
   metadata for that delivery ID.
+- `cxmsg_wait_delivery`: wait at most 30 seconds for one Delivery to become
+  terminal, avoiding repeated model-driven status polling.
 
-The MCP server uses stdio and opens no additional network listener. It reuses
+The MCP text result is a one-line summary while the bounded projection remains
+available as structured content. Peer paths, addresses, and native session IDs
+are omitted from compact projections. The MCP server uses stdio and opens no
+additional network listener. It reuses
 the existing cxmsg bridge, peer validation, message limits, durable delivery
 records, ACK handling, and retry policy. Its result distinguishes transport
 acceptance from model completion and reports whether the destination was
@@ -1496,7 +1503,7 @@ Delegation observers opt out of payload-heavy `item/completed` and
 `turn/completed` notifications, poll turn status with `itemsView=notLoaded`,
 and retrieve the final answer through reverse, one-item
 `thread/items/list` pages. This keeps long-history command output and turn
-summaries outside the 1 MiB WebSocket observation bound. If the terminal turn
+summaries outside the default 4 MiB WebSocket observation bound. If the terminal turn
 is confirmed but its final answer still cannot be retrieved within that bound,
 the Job remains `completed` and records a separate owner-private
 `resultObservation` failure; Doctor and the text CLI surface it without
@@ -1506,6 +1513,15 @@ tri-state `modelTurnStarted`: `true` is positive turn evidence, `false` proves
 failure before model execution, and `null` means acceptance is ambiguous and
 must not be retried automatically. `rerouteGuidance` is bounded operational
 advice and never grants authority.
+
+App Server WebSocket frames remain bounded independently of the operating
+system socket buffer. The default is 4 MiB, raised from 1 MiB to accommodate
+bounded App Server envelopes with moderate protocol overhead. Operators may set
+`CXMSG_APP_SERVER_FRAME_BYTES` from 256 KiB through 8 MiB; invalid or larger
+values fail closed. `cxmsg version --json` reports the effective frame limit and
+the separate Claude, ordinary-message, and retained-message limits. Increasing
+the frame limit is not a substitute for `itemsView=notLoaded`, reverse one-item
+result reads, stored Message Bodies, or compact MCP projections.
 
 Idle persisted threads remain addressable even when their original TUI is
 closed. A newly opened Codex session that has never received a first turn has no
