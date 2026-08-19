@@ -8,7 +8,6 @@ import {
   existsSync,
   lstatSync,
   mkdirSync,
-  openSync,
   readFileSync,
   unlinkSync,
   writeFileSync,
@@ -272,6 +271,10 @@ import {
 } from "../src/scheduler.js";
 import { SCHEDULER_HEARTBEAT_STALE_MS } from "../src/delivery-policy.js";
 import { withFileLock } from "../src/file-lock.js";
+import {
+  appServerLogEnvironment,
+  openBoundedRuntimeLog,
+} from "../src/runtime-logs.js";
 import { writeCoordinationEvent } from "../src/observability.js";
 import { buildRetentionPlan } from "../src/retention.js";
 import {
@@ -425,6 +428,8 @@ Environment:
   CXMSG_SOCKET       Optional custom app-server socket
   CXMSG_APP_SERVER_FRAME_BYTES
                      App Server WebSocket frame limit (262144-8388608; default 4194304)
+  CXMSG_APP_SERVER_RUST_LOG
+                     Optional App Server tracing filter; default suppresses raw tool-router context
   CODEX_SESSION_NAME Sender identity set automatically by 'cxmsg open'
 `;
   (exitCode === 0 ? process.stdout : process.stderr).write(output);
@@ -578,12 +583,13 @@ async function startServer() {
   if (existsSync(DEFAULT_SOCKET_PATH)) unlinkSync(DEFAULT_SOCKET_PATH);
   if (existsSync(PID_PATH)) unlinkSync(PID_PATH);
 
-  const logFd = openSync(LOG_PATH, "a", 0o600);
+  const logFd = openBoundedRuntimeLog(LOG_PATH);
   const child = spawn(
     codexBin,
     ["app-server", "--listen", `unix://${DEFAULT_SOCKET_PATH}`],
     {
       detached: true,
+      env: appServerLogEnvironment(),
       stdio: ["ignore", logFd, logFd],
     },
   );
@@ -674,7 +680,7 @@ async function startScheduler() {
     writeSchedulerIntent("running");
     mkdirSync(CXMSG_STATE_DIR, { recursive: true, mode: 0o700 });
     chmodSync(CXMSG_STATE_DIR, 0o700);
-    const logFd = openSync(SCHEDULER_LOG_PATH, "a", 0o600);
+    const logFd = openBoundedRuntimeLog(SCHEDULER_LOG_PATH);
     const child = spawn(process.execPath, [schedulerWorker], {
       detached: true,
       stdio: ["ignore", logFd, logFd],
@@ -1230,7 +1236,7 @@ async function commandRelay(args) {
     );
   }
   if (existsSync(HOST_RELAY_RECORD_PATH)) unlinkSync(HOST_RELAY_RECORD_PATH);
-  const logFd = openSync(HOST_RELAY_LOG_PATH, "a", 0o600);
+  const logFd = openBoundedRuntimeLog(HOST_RELAY_LOG_PATH);
   const child = spawn(process.execPath, [hostRelayWorker, String(port)], {
     detached: true,
     stdio: ["ignore", logFd, logFd],

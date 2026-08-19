@@ -23,6 +23,7 @@ import {
   inspectNodeDirectory,
   inspectRelay,
   inspectRouteState,
+  inspectRuntimeLogs,
   inspectState,
 } from "../src/inspectors.js";
 import { directConversationId } from "../src/conversations.js";
@@ -36,6 +37,21 @@ import {
 
 const THREAD_ID = "019ff02a-ee3b-7072-8a79-e5ffd491529d";
 const JOB_ID = "6ddaa4e0-fa31-454e-a37e-a37f8807f0e7";
+
+test("Runtime Log Inspector reports bounded metadata without reading log text", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "cxmsg-doctor-logs-"));
+  try {
+    await fs.writeFile(path.join(root, "app-server.log"), "secret".repeat(200_000), {
+      mode: 0o600,
+    });
+    const checks = inspectRuntimeLogs({ stateDir: root });
+    assert.equal(checks[0].status, "warn");
+    assert.equal(checks[0].errorCode, "ERUNTIMELOGQUOTA");
+    assert.doesNotMatch(JSON.stringify(checks), /secret/);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 function pass(id, scope = "test") {
   return diagnosticCheck({
@@ -176,8 +192,10 @@ test("healthy Doctor fixtures are redacted and mutate zero state files", async (
     const after = await stateSnapshot(root);
     const rendered = JSON.stringify(report);
 
-    assert.equal(report.schemaVersion, 1);
+    assert.equal(report.schemaVersion, 2);
     assert.equal(report.overall, "healthy");
+    assert.equal(report.operationalOverall, "healthy");
+    assert.equal(report.historicalOverall, "healthy");
     assert.equal(doctorExitCode(report), 0);
     assert.deepEqual(after, before);
     assert.doesNotMatch(rendered, /private task body|private result body|project-that-must-not-be-rendered/);
@@ -745,6 +763,21 @@ test("Job Inspector distinguishes missing and unverified workers", () => {
   assert.match(stagedFailures[2].summary, /after positive model-turn/);
   assert.equal(stagedFailures[2].errorCode, "EROLLOUTEMPTY");
   assert.match(stagedFailures[2].remediation, /do not retry or redelegate/i);
+});
+
+test("Job Inspector reports an explicit archive review threshold", () => {
+  const jobs = Array.from({ length: 750 }, (_, index) => ({
+    version: 1,
+    kind: "delegation",
+    jobId: `12345678-1234-4234-8234-${String(index).padStart(12, "0")}`,
+    status: "completed",
+    completedAt: "2026-08-14T00:00:30.000Z",
+  }));
+  const finding = inspectJobs(jobs).find(
+    (check) => check.errorCode === "EJOBRETENTION",
+  );
+  assert.equal(finding?.status, "warn");
+  assert.match(finding?.summary, /750 retained Job/);
 });
 
 test("Message Body Store Inspector reports private metadata, quarantine, and quota", async () => {
@@ -2071,6 +2104,23 @@ test("Doctor report policy and renderer have stable statuses and exit codes", ()
 
   const failed = diagnosticCheck({ id: "c", scope: "test", status: "fail", summary: "failed" });
   assert.equal(doctorOverall([failed]), "unhealthy");
+
+  const retained = diagnosticCheck({
+    id: "history",
+    scope: "test",
+    status: "warn",
+    summary: "retained incident",
+    historical: true,
+  });
+  const separated = {
+    overall: "degraded",
+    operationalOverall: "healthy",
+    historicalOverall: "degraded",
+    checks: [retained],
+    deep: false,
+  };
+  assert.equal(doctorExitCode(separated), 0);
+  assert.match(renderDoctorText(separated), /^cxmsg doctor: healthy .*historical=degraded/m);
 });
 
 test("Doctor CLI reserves exit code 2 for invalid invocation", () => {

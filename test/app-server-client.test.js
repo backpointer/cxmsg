@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   AppServerClient,
   AppServerError,
+  appServerRequestError,
   appServerVersion,
   classifyAppServerNegativeAcceptance,
   validateAppServerSocket,
@@ -171,6 +172,17 @@ test("request errors retain the initialized App Server contract", async () => {
     },
   );
   await client.close();
+});
+
+test("active external writers produce a bounded structured App Server error", () => {
+  const error = appServerRequestError("thread/read", {
+    code: -32603,
+    message:
+      "thread-store conflict: thread 019fefdc-ddad-7f71-b82b-032b5734ceae already has an active writer",
+  });
+  assert.equal(error.code, "EEXTERNALWRITERACTIVE");
+  assert.match(error.message, /active external writer/);
+  assert.doesNotMatch(JSON.stringify(error), /019fefdc/);
 });
 
 test("outbound frame preflight rejects structurally without retaining a pending request", async () => {

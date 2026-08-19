@@ -5,7 +5,6 @@ import {
   closeSync,
   existsSync,
   mkdirSync,
-  openSync,
   readFileSync,
   renameSync,
   unlinkSync,
@@ -43,6 +42,7 @@ import {
 } from "./claude-requests.js";
 import { isPendingJob, listJobs, mutateJob, readJob } from "./jobs.js";
 import { writeCoordinationEvent } from "./observability.js";
+import { openBoundedRuntimeLog } from "./runtime-logs.js";
 import {
   deliverPeerMessage,
   truncateUtf8,
@@ -788,7 +788,7 @@ export async function runClaudeBridge(target) {
 export function openBridgeLog(target) {
   mkdirSync(CLAUDE_BRIDGES_DIR, { recursive: true, mode: 0o700 });
   chmodSync(CLAUDE_BRIDGES_DIR, 0o700);
-  return openSync(bridgeLogPath(target), "a", 0o600);
+  return openBoundedRuntimeLog(bridgeLogPath(target));
 }
 
 export function closeBridgeLog(descriptor) {

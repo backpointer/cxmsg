@@ -53,6 +53,19 @@ export class AppServerError extends Error {
   }
 }
 
+export function appServerRequestError(method, details) {
+  const message = details?.message || "unknown error";
+  if (/thread-store conflict: thread [0-9a-f-]{36} already has an active writer/i.test(message)) {
+    const error = new AppServerError(
+      `${method} failed: target thread already has an active external writer`,
+      { code: details?.code, message: "target thread already has an active external writer" },
+    );
+    error.code = "EEXTERNALWRITERACTIVE";
+    return error;
+  }
+  return new AppServerError(`${method} failed: ${message}`, details);
+}
+
 function appServerNotConnectedError() {
   const error = new AppServerError("app-server client is not connected");
   error.code = "EAPPWSNOTCONNECTED";
@@ -271,10 +284,7 @@ export class AppServerClient {
     this.pending.delete(message.id);
 
     if (message.error) {
-      const error = new AppServerError(
-        `${pending.method} failed: ${message.error.message || "unknown error"}`,
-        message.error,
-      );
+      const error = appServerRequestError(pending.method, message.error);
       error.appServerUserAgent = this.initializeResult?.userAgent || null;
       pending.reject(error);
       return;

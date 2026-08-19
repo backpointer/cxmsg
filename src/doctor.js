@@ -15,6 +15,7 @@ import {
   inspectRelay,
   inspectRouteState,
   inspectRuntime,
+  inspectRuntimeLogs,
   inspectState,
 } from "./inspectors.js";
 import {
@@ -23,7 +24,7 @@ import {
   socketPath as configuredSocketPath,
 } from "./runtime.js";
 
-export const DOCTOR_SCHEMA_VERSION = 1;
+export const DOCTOR_SCHEMA_VERSION = 2;
 
 export function doctorOverall(checks) {
   if (checks.some((check) => check.required !== false && check.status === "fail")) {
@@ -73,6 +74,9 @@ export async function runDoctor({
 } = {}) {
   const checks = [];
   checks.push(...(adapters.inspectRuntime || inspectRuntime)());
+  checks.push(
+    ...(adapters.inspectRuntimeLogs || inspectRuntimeLogs)({ stateDir }),
+  );
   const state = (adapters.inspectState || inspectState)({ stateDir, target });
   checks.push(...state.checks);
   if (!target) {
@@ -151,9 +155,14 @@ export async function runDoctor({
     { deep, socketPath },
   ));
   const scopedChecks = target ? deduplicateDoctorChecks(checks) : checks;
+  const operationalChecks = scopedChecks.filter((check) => check.historical !== true);
+  const historicalChecks = scopedChecks.filter((check) => check.historical === true);
   return {
     schemaVersion: DOCTOR_SCHEMA_VERSION,
     overall: doctorOverall(scopedChecks),
+    operationalOverall: doctorOverall(operationalChecks),
+    historicalOverall:
+      historicalChecks.length > 0 ? doctorOverall(historicalChecks) : "healthy",
     deep,
     target,
     checks: scopedChecks,
@@ -161,8 +170,9 @@ export async function runDoctor({
 }
 
 export function renderDoctorText(report) {
+  const operational = report.operationalOverall || report.overall;
   const lines = [
-    `cxmsg doctor: ${report.overall} (${report.checks.length} checks${report.deep ? ", deep" : ""})`,
+    `cxmsg doctor: ${operational} (${report.checks.length} checks${report.deep ? ", deep" : ""}; historical=${report.historicalOverall || report.overall})`,
   ];
   for (const check of report.checks) {
     const details = [
@@ -182,5 +192,5 @@ export function renderDoctorText(report) {
 }
 
 export function doctorExitCode(report) {
-  return report.overall === "healthy" ? 0 : 1;
+  return (report.operationalOverall || report.overall) === "healthy" ? 0 : 1;
 }

@@ -882,16 +882,36 @@ steers a model turn, answers an approval request, changes a grant, signals a
 process, removes a record, or repairs state.
 
 Text output is intended for operators. Automation should use `--json` and the
-versioned [Doctor schema](docs/DOCTOR_SCHEMA_V1.md). Exit code `0` means
-`healthy`, `1` means `degraded` or `unhealthy`, and `2` means an invalid
-invocation or failure to construct a report. Doctor deliberately has no
-`--fix` option.
+versioned [Doctor schema](docs/DOCTOR_SCHEMA_V2.md). `overall` preserves all
+retained findings, while `operationalOverall` excludes findings explicitly
+classified as immutable historical evidence. `historicalOverall` reports those
+retained incidents separately. Exit code `0` means operational health is
+`healthy`, `1` means operational health is `degraded` or `unhealthy`, and `2`
+means an invalid invocation or failure to construct a report. Doctor
+deliberately has no `--fix` option.
+
+Healthy Execution Thread provenance is aggregated instead of emitting one PASS
+row per record. Finding IDs that must distinguish immutable UUID records use a
+digest-derived label rather than a collision-prone UUIDv7 time prefix.
 
 `--target` excludes unrelated global historical findings and keeps only the
 selected Session's Jobs, attachments, bridge, thread, and sender/recipient
 Route Deliveries alongside current service health. Stable duplicate finding
 IDs are collapsed to the strongest result. Run unscoped Doctor when auditing
 global Directory, Conversation, Message Body, policy, or Repair state.
+
+Runtime daemon logs are owner-only and rotate at daemon start when the active
+segment reaches 1 MiB; two archives are retained. Doctor reports unsafe,
+oversized, or excess segments without reading their text. The default App
+Server tracing filter suppresses `codex_core::tools::router` because failed
+tool diagnostics may contain source context or local paths. Override it only
+for an explicit local diagnostic session with `CXMSG_APP_SERVER_RUST_LOG`.
+Rotation never renames the active inode of a running daemon; an oversized live
+segment is reported until that daemon is explicitly restarted.
+
+At 750 retained Jobs, Doctor emits `EJOBRETENTION` to request an explicit
+archive plan. It never deletes a Job because Jobs may protect Delivery,
+reply-correlation, Execution Thread, or scheduling evidence.
 
 Create a durable named session without attaching a TUI:
 

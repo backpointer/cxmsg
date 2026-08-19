@@ -141,6 +141,17 @@ one 1 MiB active segment and four retained archives. Rotation uses an
 owner-only lock. The event set is operational evidence rather than a complete
 conversation history and must not be copied into a repository.
 
+Daemon stdout/stderr logs are a separate diagnostic surface. App Server,
+Scheduler, host relay, and Claude bridge logs rotate at daemon start at 1 MiB
+and retain at most two archives; files and directories are validated as
+owner-private regular paths before opening. Doctor inspects only their metadata.
+The default App Server tracing filter disables raw tool-router diagnostics so
+failed tool context and local paths are not newly copied into the daemon log.
+An operator override is explicit and remains local. Because a running process
+holds its active inode, a segment that grows past the threshold is reported and
+rotated only on explicit daemon restart rather than being renamed underneath a
+live writer.
+
 Long Codex Peer Message bodies are stored separately under the owner-only
 Message Body Store. Content References expose a message UUID, byte count, and
 SHA-256 digest, never a filesystem path. Reads are bounded and digest-verified.

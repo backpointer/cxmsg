@@ -45,6 +45,10 @@ import {
 } from "./message-bodies.js";
 import { processIdentity, processState, serviceEvidence } from "./process-state.js";
 import { EVENT_LOG_ARCHIVES, EVENT_LOG_MAX_BYTES } from "./runtime.js";
+import {
+  RUNTIME_LOG_ARCHIVES,
+  RUNTIME_LOG_MAX_BYTES,
+} from "./runtime-logs.js";
 import { failedProbe } from "./socket-probe.js";
 import { readThreadMetadata } from "./thread-activity.js";
 import {
@@ -62,6 +66,7 @@ const SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const MAX_RECORD_BYTES = 256 * 1024;
 const MAX_DIRECTORY_BYTES = 32 * 1024 * 1024;
 const MAX_DIRECTORY_RECORDS = 2048;
+const JOB_RETENTION_REVIEW_COUNT = 750;
 const PENDING_JOB_STATES = new Set([
   "dispatching",
   "scheduled",
@@ -138,6 +143,7 @@ export function diagnosticCheck({
   required = true,
   observedBytes = null,
   limitBytes = null,
+  historical = false,
 }) {
   return Object.fromEntries(
     Object.entries({
@@ -152,8 +158,95 @@ export function diagnosticCheck({
       required,
       observedBytes,
       limitBytes,
+      historical: historical || null,
     }).filter(([, value]) => value !== null),
   );
+}
+
+export function inspectRuntimeLogs({ stateDir }) {
+  const roots = [
+    path.join(stateDir, "app-server.log"),
+    path.join(stateDir, "scheduler.log"),
+    path.join(stateDir, "host-relay.log"),
+  ];
+  const bridgeDirectory = path.join(stateDir, "claude-bridges");
+  try {
+    for (const name of readdirSync(bridgeDirectory)) {
+      if (/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}\.log$/.test(name)) {
+        roots.push(path.join(bridgeDirectory, name));
+      }
+    }
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      return [
+        diagnosticCheck({
+          id: "runtime-logs.directory",
+          scope: "runtime-logs",
+          status: "fail",
+          summary: "Runtime log directory could not be inspected safely",
+          verification: "metadata",
+          errorCode: errorCode(error, "ERUNTIMELOGDIRECTORY"),
+        }),
+      ];
+    }
+  }
+  let files = 0;
+  let oversized = 0;
+  let invalid = 0;
+  let excessArchives = 0;
+  for (const root of roots) {
+    for (let index = 0; index <= RUNTIME_LOG_ARCHIVES + 1; index += 1) {
+      const target = index === 0 ? root : `${root}.${index}`;
+      let metadata;
+      try {
+        metadata = lstatSync(target);
+      } catch (error) {
+        if (error?.code === "ENOENT") continue;
+        invalid += 1;
+        continue;
+      }
+      files += 1;
+      if (
+        !metadata.isFile() ||
+        metadata.isSymbolicLink() ||
+        metadata.nlink !== 1 ||
+        (typeof process.getuid === "function" && metadata.uid !== process.getuid()) ||
+        (metadata.mode & 0o077) !== 0
+      ) {
+        invalid += 1;
+        continue;
+      }
+      if (index > RUNTIME_LOG_ARCHIVES) excessArchives += 1;
+      if (metadata.size > RUNTIME_LOG_MAX_BYTES) oversized += 1;
+    }
+  }
+  const status = invalid ? "fail" : oversized || excessArchives ? "warn" : "pass";
+  return [
+    diagnosticCheck({
+      id: "runtime-logs.bounds",
+      scope: "runtime-logs",
+      status,
+      summary:
+        status === "pass"
+          ? `${files} runtime log segment(s) satisfy owner-private bounded retention`
+          : invalid
+            ? "Runtime log segments include unsafe metadata"
+            : "Runtime log segments exceed the configured start-time retention bound",
+      verification: "metadata",
+      errorCode: invalid
+        ? "ERUNTIMELOGIDENTITY"
+        : oversized
+          ? "ERUNTIMELOGQUOTA"
+          : excessArchives
+            ? "ERUNTIMELOGARCHIVES"
+            : null,
+      remediation:
+        status === "warn"
+          ? "Restart the owning daemon to rotate its bounded runtime log; do not delete an active log inode"
+          : null,
+      required: invalid,
+    }),
+  ];
 }
 
 function implementationRevisionCheck({
@@ -193,6 +286,10 @@ function safeLabel(value) {
   if (typeof value === "string" && UUID_PATTERN.test(value)) return value.slice(0, 8);
   if (typeof value === "string" && SESSION_PATTERN.test(value)) return value;
   return `record-${createHash("sha256").update(String(value)).digest("hex").slice(0, 10)}`;
+}
+
+function uniqueRecordLabel(value) {
+  return createHash("sha256").update(String(value)).digest("hex").slice(0, 10);
 }
 
 function errorCode(error, fallback = "EINSPECT") {
@@ -1993,17 +2090,24 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
   );
   const jobsById = new Map(jobs.map((record) => [record.jobId, record]));
   const executionJobs = new Set();
+  let healthyExecutionIdentities = 0;
+  let healthyExecutionJobs = 0;
+  let healthyExecutionSources = 0;
   for (const execution of executionThreads.records) {
     const job = jobsById.get(execution.jobId);
     const collidesWithNode = identities.has(`codex:${execution.threadId}`);
     const addressable = sessionThreadIds.has(execution.threadId);
     const duplicateJob = executionJobs.has(execution.jobId);
     executionJobs.add(execution.jobId);
-    checks.push(
-      diagnosticCheck({
-        id: `directory-execution-threads.identity.${safeLabel(execution.threadId)}`,
+    const identityFailed = collidesWithNode || addressable || duplicateJob;
+    if (!identityFailed) {
+      healthyExecutionIdentities += 1;
+    } else {
+      checks.push(
+        diagnosticCheck({
+        id: `directory-execution-threads.identity.${uniqueRecordLabel(execution.threadId)}`,
         scope: "directory-execution-threads",
-        status: collidesWithNode || addressable || duplicateJob ? "fail" : "pass",
+        status: "fail",
         summary: collidesWithNode
           ? "Execution Thread identity collides with a live or Tombstoned Node"
           : addressable
@@ -2019,8 +2123,9 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
             : duplicateJob
               ? "EEXECUTIONJOBDUPLICATE"
               : null,
-      }),
-    );
+        }),
+      );
+    }
     const jobMatches = Boolean(
       job &&
         (job.kind ?? "delegation") === "delegation" &&
@@ -2033,37 +2138,64 @@ export function inspectNodeDirectory({ stateDir, sessions = [], jobs = [] } = {}
           job.executionThreadId === null ||
           job.executionThreadId === execution.threadId),
     );
-    checks.push(
-      diagnosticCheck({
-        id: `directory-execution-threads.job.${safeLabel(execution.threadId)}`,
+    if (jobMatches) {
+      healthyExecutionJobs += 1;
+    } else {
+      checks.push(
+        diagnosticCheck({
+        id: `directory-execution-threads.job.${uniqueRecordLabel(execution.threadId)}`,
         scope: "directory-execution-threads",
-        status: jobMatches ? "pass" : "fail",
-        summary: jobMatches
-          ? "Execution Thread matches its retained isolated Delegation evidence"
-          : "Execution Thread does not match a retained isolated Delegation",
+        status: "fail",
+        summary: "Execution Thread does not match a retained isolated Delegation",
         verification: "jobs",
-        errorCode: jobMatches ? null : "EEXECUTIONJOB",
-      }),
-    );
+        errorCode: "EEXECUTIONJOB",
+        }),
+      );
+    }
     if (execution.sourceNodeKey) {
       const source = identities.get(execution.sourceNodeKey);
       const sourceMatches = Boolean(
         source && source.projectId === execution.projectId,
       );
-      checks.push(
-        diagnosticCheck({
-          id: `directory-execution-threads.source.${safeLabel(execution.threadId)}`,
+      if (sourceMatches) {
+        healthyExecutionSources += 1;
+      } else {
+        checks.push(
+          diagnosticCheck({
+          id: `directory-execution-threads.source.${uniqueRecordLabel(execution.threadId)}`,
           scope: "directory-execution-threads",
-          status: sourceMatches ? "pass" : "fail",
-          summary: sourceMatches
-            ? "Execution Thread references a same-Project source Node identity"
-            : "Execution Thread source Node or Project identity is missing or mismatched",
+          status: "fail",
+          summary: "Execution Thread source Node or Project identity is missing or mismatched",
           verification: "records",
-          errorCode: sourceMatches ? null : "EEXECUTIONSOURCE",
-        }),
-      );
+          errorCode: "EEXECUTIONSOURCE",
+          }),
+        );
+      }
     }
   }
+  checks.push(
+    diagnosticCheck({
+      id: "directory-execution-threads.identity.summary",
+      scope: "directory-execution-threads",
+      status: "pass",
+      summary: `${healthyExecutionIdentities} Execution Thread identity record(s) remain non-addressable with unique provenance`,
+      verification: "records",
+    }),
+    diagnosticCheck({
+      id: "directory-execution-threads.job.summary",
+      scope: "directory-execution-threads",
+      status: "pass",
+      summary: `${healthyExecutionJobs} Execution Thread record(s) match retained Delegation evidence`,
+      verification: "jobs",
+    }),
+    diagnosticCheck({
+      id: "directory-execution-threads.source.summary",
+      scope: "directory-execution-threads",
+      status: "pass",
+      summary: `${healthyExecutionSources} Execution Thread source reference(s) match same-Project Node identities`,
+      verification: "records",
+    }),
+  );
   return checks;
 }
 
@@ -3552,6 +3684,7 @@ export function inspectRouteState({
               ? "Retain this unknown Delivery; do not replay or repeat reconciliation without new positive evidence"
               : `Run cxmsg route reconcile ${delivery.logicalMessageId}; absence is not replay permission`,
           required: false,
+          historical: legacyIdentity || reconciledUnknown,
         }),
       );
     }
@@ -4369,6 +4502,7 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
         remediation:
           "Treat the terminal turn as durable execution evidence; inspect the retained thread result separately and do not rerun automatically",
         required: false,
+        historical: true,
       }));
     }
     if (job.mirrorDelivery?.status === "failed") {
@@ -4382,6 +4516,7 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
         remediation:
           "Treat the Job result as durable; inspect or retry coordination delivery separately",
         required: false,
+        historical: true,
       }));
     }
     if (
@@ -4412,6 +4547,7 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
               ? "Resolve the recorded transport or preflight failure before using a new Job ID"
               : "Inspect the retained turn and Job result evidence before any follow-up"),
         required: false,
+        historical: true,
       }));
     }
     if (
@@ -4569,6 +4705,19 @@ export function inspectJobs(jobs, { now = Date.now(), processStateFn = processSt
       status: "pass",
       summary: `${active} nonterminal Job(s) have no locally provable inconsistency`,
       verification: "record",
+    }));
+  }
+  if (jobs.length >= JOB_RETENTION_REVIEW_COUNT) {
+    checks.push(diagnosticCheck({
+      id: "jobs.retention.count",
+      scope: "jobs",
+      status: "warn",
+      summary: `${jobs.length} retained Job record(s) reached the explicit archive review threshold`,
+      verification: "records",
+      errorCode: "EJOBRETENTION",
+      remediation:
+        "Plan an explicit owner-confirmed Job archive; do not delete Jobs that protect Delivery or reply correlations",
+      required: false,
     }));
   }
   return checks;
