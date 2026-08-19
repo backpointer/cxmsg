@@ -1548,12 +1548,14 @@ failed; `cxmsg result` and Doctor report the coordination failure separately.
 Delegation observers opt out of payload-heavy `item/completed` and
 `turn/completed` notifications, poll turn status with `itemsView=notLoaded`,
 and retrieve the final answer through reverse, one-item
-`thread/items/list` pages. This keeps long-history command output and turn
-summaries outside the default 4 MiB WebSocket observation bound. If the terminal turn
-is confirmed but its final answer still cannot be retrieved within that bound,
-the Job remains `completed` and records a separate owner-private
-`resultObservation` failure; Doctor and the text CLI surface it without
-authorizing retry or rerouting.
+`thread/items/list` pages. If the connected App Server reports that this
+experimental method is not supported, cxmsg falls back to reverse, one-turn
+`thread/turns/list` pages with `itemsView=summary`; the unsupported method alone
+is not recorded as a result-observation failure. Both paths keep each response
+bounded. If the terminal turn is confirmed but its final answer still cannot be
+retrieved within that bound, the Job remains `completed` and records a separate
+owner-private `resultObservation` failure; Doctor and the text CLI surface it
+without authorizing retry or rerouting.
 Delegation failures also record `failureStage`, `turnStartAttemptedAt`, and a
 tri-state `modelTurnStarted`: `true` is positive turn evidence, `false` proves
 failure before model execution, and `null` means acceptance is ambiguous and

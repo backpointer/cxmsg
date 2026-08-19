@@ -234,6 +234,46 @@ class ResultFrameFailureClient extends FixtureClient {
   }
 }
 
+class UnsupportedItemsClient extends FixtureClient {
+  static executionThreadId = "e8345678-1234-4234-8234-123456789abc";
+  static turnId = "e9345678-1234-4234-8234-123456789abc";
+  static requests = [];
+
+  async request(method, params) {
+    if (method === "thread/items/list") {
+      this.constructor.requests.push({ method, params });
+      const error = new Error(
+        "thread/items/list failed: thread/items/list is not supported yet",
+      );
+      error.details = {
+        code: -32601,
+        message: "thread/items/list is not supported yet",
+      };
+      throw error;
+    }
+    if (method === "thread/turns/list" && params.itemsView === "summary") {
+      this.constructor.requests.push({ method, params });
+      return {
+        data: [
+          {
+            id: this.constructor.turnId,
+            status: "completed",
+            items: [
+              {
+                type: "agentMessage",
+                phase: "final_answer",
+                text: "done",
+              },
+            ],
+          },
+        ],
+        nextCursor: null,
+      };
+    }
+    return super.request(method, params);
+  }
+}
+
 class EmptyRolloutRaceClient extends ExplicitFreshClient {
   static executionThreadId = "e6345678-1234-4234-8234-123456789abc";
   static turnId = "e7345678-1234-4234-8234-123456789abc";
@@ -558,6 +598,41 @@ test("terminal turn evidence survives a bounded result observation failure", asy
   assert.deepEqual(
     ResultFrameFailureClient.options.optOutNotificationMethods,
     ["item/completed", "turn/completed"],
+  );
+});
+
+test("completed Delegation observes its result through turn summaries when item listing is unsupported", async () => {
+  const fallbackJobId = "e7345678-1234-4234-8234-123456789abc";
+  UnsupportedItemsClient.requests = [];
+  jobs.createJob({
+    jobId: fallbackJobId,
+    from: "coordinator",
+    target: "worker",
+    threadId: sourceThreadId,
+    task: "unsupported item listing fixture",
+    execution: "fork",
+  });
+
+  const result = await runDelegationWorker(fallbackJobId, {
+    Client: UnsupportedItemsClient,
+  });
+  assert.equal(result.status, "completed");
+  assert.equal(result.result, "done");
+  assert.equal(result.resultObservation.status, "available");
+  assert.equal(
+    UnsupportedItemsClient.requests.some(
+      ({ method }) => method === "thread/items/list",
+    ),
+    true,
+  );
+  assert.equal(
+    UnsupportedItemsClient.requests.some(
+      ({ method, params }) =>
+        method === "thread/turns/list" &&
+        params.itemsView === "summary" &&
+        params.limit === 1,
+    ),
+    true,
   );
 });
 

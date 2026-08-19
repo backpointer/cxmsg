@@ -166,25 +166,61 @@ export async function findFinalTurnResult(
     MAX_FINAL_RESULT_SEARCH_PAGES,
     64,
   );
+  try {
+    let cursor = null;
+    for (let pageIndex = 0; pageIndex < boundedMaxPages; pageIndex += 1) {
+      const params = {
+        threadId,
+        turnId,
+        limit: FINAL_RESULT_SEARCH_PAGE_SIZE,
+        sortDirection: "desc",
+      };
+      if (cursor) params.cursor = cursor;
+      const page = await client.request("thread/items/list", params);
+      for (const entry of page.data || []) {
+        const item = entry?.item;
+        if (
+          entry?.turnId === turnId &&
+          item?.type === "agentMessage" &&
+          item.phase === "final_answer"
+        ) {
+          return { state: "available", result: item.text || null };
+        }
+      }
+      if (!page.nextCursor) return { state: "missing", result: null };
+      cursor = page.nextCursor;
+    }
+    return { state: "incomplete", result: null };
+  } catch (error) {
+    if (
+      error?.details?.code !== -32601 ||
+      !/thread\/items\/list is not supported/i.test(error?.details?.message || "")
+    ) {
+      throw error;
+    }
+  }
+
+  // Some App Server releases expose bounded turn summaries but not the
+  // experimental per-item listing method. Keep the same one-record paging
+  // bound while recovering the final answer from the target turn summary.
   let cursor = null;
   for (let pageIndex = 0; pageIndex < boundedMaxPages; pageIndex += 1) {
-    const params = {
-      threadId,
-      turnId,
+    const page = await listRecentTurns(client, threadId, {
       limit: FINAL_RESULT_SEARCH_PAGE_SIZE,
-      sortDirection: "desc",
-    };
-    if (cursor) params.cursor = cursor;
-    const page = await client.request("thread/items/list", params);
-    for (const entry of page.data || []) {
-      const item = entry?.item;
-      if (
-        entry?.turnId === turnId &&
-        item?.type === "agentMessage" &&
-        item.phase === "final_answer"
-      ) {
-        return { state: "available", result: item.text || null };
-      }
+      cursor,
+      itemsView: "summary",
+    });
+    const turn = (page.data || []).find((entry) => entry?.id === turnId);
+    if (turn) {
+      const finalItem = [...(turn.items || [])]
+        .reverse()
+        .find(
+          (item) =>
+            item?.type === "agentMessage" && item.phase === "final_answer",
+        );
+      return finalItem
+        ? { state: "available", result: finalItem.text || null }
+        : { state: "missing", result: null };
     }
     if (!page.nextCursor) return { state: "missing", result: null };
     cursor = page.nextCursor;

@@ -214,6 +214,71 @@ test("final result lookup reads one reverse-ordered item per bounded page", asyn
   ]);
 });
 
+test("final result lookup falls back to bounded turn summaries when item listing is unsupported", async () => {
+  const calls = [];
+  const client = {
+    async request(method, params) {
+      calls.push({ method, params });
+      if (method === "thread/items/list") {
+        const error = new Error(
+          "thread/items/list failed: thread/items/list is not supported yet",
+        );
+        error.details = {
+          code: -32601,
+          message: "thread/items/list is not supported yet",
+        };
+        throw error;
+      }
+      return {
+        data: [
+          {
+            id: "target-turn",
+            status: "completed",
+            items: [
+              {
+                type: "userMessage",
+                content: [{ type: "text", text: "private" }],
+              },
+              {
+                type: "agentMessage",
+                phase: "final_answer",
+                text: "fallback final result",
+              },
+            ],
+          },
+        ],
+        nextCursor: null,
+      };
+    },
+  };
+
+  const result = await findFinalTurnResult(client, "thread-1", "target-turn");
+  assert.deepEqual(result, {
+    state: "available",
+    result: "fallback final result",
+  });
+  assert.deepEqual(calls, [
+    {
+      method: "thread/items/list",
+      params: {
+        threadId: "thread-1",
+        turnId: "target-turn",
+        limit: 1,
+        sortDirection: "desc",
+      },
+    },
+    {
+      method: "thread/turns/list",
+      params: {
+        threadId: "thread-1",
+        limit: 1,
+        sortDirection: "desc",
+        itemsView: "summary",
+      },
+    },
+  ]);
+});
+
 test("client message reconciliation reports only positive bounded acceptance evidence", async () => {
   const calls = [];
   const client = {
