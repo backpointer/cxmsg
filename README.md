@@ -76,6 +76,12 @@ cxmsg peers
 cxmsg send worker "Migration finished; rebase is safe."
 ```
 
+The peer table separates App Server thread state from TUI presentation.
+`PRESENTATION=foreground` with a numeric `TUI_PID` identifies a verified live
+`cxmsg attach` TUI. `background` means cxmsg can manage the thread without a
+foreground TUI, while `stored-or-external` has no verified cxmsg attachment.
+The JSON form exposes the same evidence as `presentation` and `attachedPid`.
+
 `cxmsg open` sets `CODEX_SESSION_NAME`, so the sender is automatic. From a
 different shell, specify it explicitly:
 

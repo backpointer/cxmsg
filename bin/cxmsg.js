@@ -1696,6 +1696,11 @@ async function commandPeers(jsonOutput) {
   const peers = await withAppServer(async (client) => {
     return Promise.all(
       listSessionRecords().map(async (record) => {
+        const attachment = liveAttachment(record.name);
+        const attachmentState = {
+          presentation: sessionPresentation(record, attachment),
+          attachedPid: attachment?.childPid || null,
+        };
         try {
           const result = await client.request("thread/read", {
             threadId: record.threadId,
@@ -1708,6 +1713,7 @@ async function commandPeers(jsonOutput) {
             cwd: result.thread.cwd,
             updatedAt: result.thread.updatedAt,
             delegators: record.allowedDelegators || [],
+            ...attachmentState,
           };
         } catch {
           return {
@@ -1717,6 +1723,7 @@ async function commandPeers(jsonOutput) {
             cwd: record.cwd,
             updatedAt: null,
             delegators: record.allowedDelegators || [],
+            ...attachmentState,
           };
         }
       }),
@@ -1769,13 +1776,28 @@ async function commandPeers(jsonOutput) {
     peers.map((peer) => peer.status),
     20,
   );
+  const presentationWidth = columnWidth(
+    "PRESENTATION",
+    peers.map((peer) => peer.presentation),
+    18,
+  );
+  const pidWidth = columnWidth(
+    "TUI_PID",
+    peers.map((peer) => String(peer.attachedPid || "-")),
+    12,
+  );
   const threadWidth = "THREAD_ID_PREFIX".length;
   process.stdout.write(
-    `${column("NAME", nameWidth)}  ${column("STATUS", statusWidth)}  ${column("THREAD_ID_PREFIX", threadWidth)}  CWD\n`,
+    `${column("NAME", nameWidth)}  ${column("STATUS", statusWidth)}  ` +
+      `${column("PRESENTATION", presentationWidth)}  ${column("TUI_PID", pidWidth)}  ` +
+      `${column("THREAD_ID_PREFIX", threadWidth)}  CWD\n`,
   );
   for (const peer of peers) {
     process.stdout.write(
-      `${column(peer.name, nameWidth)}  ${column(peer.status, statusWidth)}  ${column(peer.id.slice(0, 8), threadWidth)}  ${peer.cwd}\n`,
+      `${column(peer.name, nameWidth)}  ${column(peer.status, statusWidth)}  ` +
+        `${column(peer.presentation, presentationWidth)}  ` +
+        `${column(peer.attachedPid || "-", pidWidth)}  ` +
+        `${column(peer.id.slice(0, 8), threadWidth)}  ${peer.cwd}\n`,
     );
   }
 }
